@@ -1576,7 +1576,7 @@ impl Interp {
                     if xs.is_empty() {
                         return Ok(Value::list(vec![]));
                     }
-                    if (xs.len() as u128) * (n as u128) > 1 << 28 {
+                    if (xs.len() as u128) * (n as u128) > 100_000_000 {
                         return Err(self.err(span, "E0216", "repeated list would be too large"));
                     }
                     self.tick_n(xs.len() as u64 * n as u64, span)?;

@@ -112,6 +112,7 @@
     },
     "raw-string": {
       "patterns": [
+        { "begin": "r(#+)\"", "end": "\"\\1", "name": "string.quoted.raw.hashed.cogito" },
         { "begin": "r\"\"\"", "end": "\"\"\"", "name": "string.quoted.raw.triple.cogito" },
         { "begin": "r\"", "end": "\"", "name": "string.quoted.raw.cogito" }
       ]
