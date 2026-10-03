@@ -406,7 +406,18 @@ impl<'s> Parser<'s> {
         }
         self.expect(&Tok::Assign, "`=` after the type name")?;
         self.skip_newlines();
-        let body = if self.at(&Tok::LBrace) {
+        let is_alias = match self.peek() {
+            Tok::LParen | Tok::Fn => true,
+            Tok::Ident(_) => self.peek_at(1) == &Tok::Dot,
+            Tok::Upper(n) => {
+                matches!(&**n, "Int" | "Float" | "Str" | "Bool" | "Unit" | "Any" | "Range" | "List" | "Map" | "Option" | "Result" | "Ordering")
+                    || self.peek_at(1) == &Tok::LBracket
+            }
+            _ => false,
+        };
+        let body = if is_alias {
+            TypeBody::Alias(self.type_expr()?)
+        } else if self.at(&Tok::LBrace) {
             let open = self.bump().span;
             let mut fields = Vec::new();
             loop {
@@ -547,31 +558,29 @@ impl<'s> Parser<'s> {
     fn stmt(&mut self) -> PResult<Stmt> {
         let start = self.span();
         match self.peek() {
-            Tok::Let => {
-                self.bump();
+            Tok::Let | Tok::Var => {
+                let mutable = self.bump().tok == Tok::Var;
+                let kw = if mutable { "var" } else { "let" };
+                if let Tok::Upper(n) = self.peek().clone() {
+                    if !matches!(self.peek_at(1), Tok::LParen) {
+                        let mut c = n.chars();
+                        let lower = c.next().map(|f| f.to_lowercase().collect::<String>() + c.as_str()).unwrap_or_default();
+                        return Err(Diagnostic::error("E0013", format!("variable `{}` must start with a lowercase letter", n))
+                            .at(self.span())
+                            .label("uppercase names are reserved for types and constructors")
+                            .help(format!("rename it to `{}`", lower)));
+                    }
+                }
                 let pat = self.pattern()?;
                 let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
                 if !self.at(&Tok::Assign) {
-                    return Err(self.unexpected("`=` in `let` binding").help("every binding needs a value: `let x = 1`"));
+                    return Err(self.unexpected(&format!("`=` in `{}` binding", kw)).help(format!("every binding needs a value: `{} x = 1`", kw)));
                 }
                 self.bump();
                 self.skip_newlines();
                 let value = self.expr()?;
                 let span = start.to(value.span);
-                Ok(Stmt { kind: StmtKind::Let { pat, ty, value }, span })
-            }
-            Tok::Var => {
-                self.bump();
-                let (name, name_span) = self.lower_ident("variable name")?;
-                let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
-                if !self.at(&Tok::Assign) {
-                    return Err(self.unexpected("`=` in `var` declaration").help("every variable needs an initial value: `var count = 0`"));
-                }
-                self.bump();
-                self.skip_newlines();
-                let value = self.expr()?;
-                let span = start.to(value.span);
-                Ok(Stmt { kind: StmtKind::Var { name, name_span, res: VarRes::Unresolved, ty, value }, span })
+                Ok(Stmt { kind: StmtKind::Let { pat, ty, value, mutable }, span })
             }
             Tok::Fn if !matches!(self.peek_at(1), Tok::LParen) => {
                 let def = self.fn_decl()?;
@@ -767,6 +776,7 @@ impl<'s> Parser<'s> {
                 | Tok::Return
                 | Tok::Break
                 | Tok::Continue
+                | Tok::Assert
         )
     }
 
@@ -909,7 +919,15 @@ impl<'s> Parser<'s> {
                 }
                 Tok::LBracket => {
                     let open = self.bump().span;
-                    let index = self.expr()?;
+                    // `xs[..n]` and `xs[..=n]` slice from the start.
+                    let index = if matches!(self.peek(), Tok::DotDot | Tok::DotDotEq) {
+                        let inclusive = self.bump().tok == Tok::DotDotEq;
+                        let end = self.add_expr()?;
+                        let span = open.to(end.span);
+                        mk(ExprKind::Range { start: Box::new(mk(ExprKind::Int(0), open)), end: Some(Box::new(end)), inclusive }, span)
+                    } else {
+                        self.expr()?
+                    };
                     let close = self.expect_closing(&Tok::RBracket, open, "`]` after index")?;
                     let span = e.span.to(close);
                     e = mk(ExprKind::Index { target: Box::new(e), index: Box::new(index) }, span);
@@ -982,7 +1000,7 @@ impl<'s> Parser<'s> {
                         Some(s) => Some(parse_fmt_spec(&s).map_err(|msg| {
                             Diagnostic::error("E0005", format!("invalid format spec `{}`: {}", s, msg))
                                 .at(Span::new(self.file, end as usize, end as usize + s.len() + 1))
-                                .help("format specs look like `{x:.2}` (2 decimals), `{x:>8}` (right-align in 8 columns), `{n:05}` (zero-pad), `{n:x}` (hex)")
+                                .help("to write a literal brace in a string, escape it: `\\{` (or use a raw string, r\"...\", which has no interpolation)\nformat specs look like `{x:.2}` (2 decimals), `{x:>8}` (right-align in 8 columns), `{n:05}` (zero-pad), `{n:x}` (hex)")
                         })?),
                         None => None,
                     };
@@ -1137,6 +1155,12 @@ impl<'s> Parser<'s> {
             Tok::Continue => {
                 self.bump();
                 Ok(mk(ExprKind::Continue, start))
+            }
+            Tok::Assert => {
+                // `assert` used as an expression (e.g. a match arm) evaluates to ().
+                let stmt = self.stmt()?;
+                let span = stmt.span;
+                Ok(mk(ExprKind::Block(vec![stmt]), span))
             }
             Tok::Assign => Err(self.unexpected("an expression").help("did you mean `==` (comparison)?")),
             t => {

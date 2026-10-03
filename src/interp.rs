@@ -97,6 +97,10 @@ pub struct Interp {
     /// Collect program output here instead of writing it to stdout.
     pub capture: Option<String>,
     pub contracts: bool,
+    /// Maximum number of steps (calls plus loop iterations) before a
+    /// `Budget` error; used to stop runaway test cases.
+    pub budget: Option<u64>,
+    pub ticks: u64,
     stdout: std::io::BufWriter<std::io::Stdout>,
     stdout_tty: bool,
     pub none: Value,
@@ -159,6 +163,8 @@ impl Interp {
             silent: false,
             capture: None,
             contracts: true,
+            budget: None,
+            ticks: 0,
             stdout: std::io::BufWriter::with_capacity(1 << 16, std::io::stdout()),
             stdout_tty: std::io::stdout().is_terminal(),
             none,
@@ -183,6 +189,20 @@ impl Interp {
 
     pub fn flush(&mut self) {
         let _ = self.stdout.flush();
+    }
+
+    #[inline]
+    fn tick(&mut self, span: Span) -> R<()> {
+        self.ticks += 1;
+        if let Some(b) = self.budget {
+            if self.ticks > b {
+                return Err(self.fail(
+                    self.diag(span, "E0219", format!("step budget exceeded: more than {} calls and loop iterations", b))
+                        .help("this usually means an infinite loop, or an input too large for the algorithm;\nlimit the inputs with `where`/`requires`, or raise the limit with `--budget N`"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------ values
@@ -232,7 +252,9 @@ impl Interp {
             out.push(TraceFrame { name: f.name.clone(), span: loc });
             loc = f.call_span;
         }
-        out.push(TraceFrame { name: Rc::from("<top level>"), span: loc });
+        if loc != Span::default() {
+            out.push(TraceFrame { name: Rc::from("<top level>"), span: loc });
+        }
         out.reverse();
         out
     }
@@ -292,6 +314,7 @@ impl Interp {
         for item in &prog.items {
             match item {
                 Item::Fn(def) => self.install_fn(def),
+                Item::Type(td) if matches!(td.body, TypeBody::Alias(_)) => {}
                 Item::Type(td) => {
                     let ty = self.ctx.types[td.id as usize].clone();
                     match &ty.kind {
@@ -353,6 +376,26 @@ impl Interp {
         self.globals[slot] = Some(if cands.len() == 1 { cands.pop().unwrap() } else { Value::Overload(Rc::new(cands)) });
     }
 
+    /// For a value whose type was declared in an imported module, the
+    /// function `name` defined in that module (if any).
+    fn home_method(&self, recv: &Value, name: &str) -> Option<Value> {
+        if self.ctx.type_home.is_empty() {
+            return None;
+        }
+        let id = match recv {
+            Value::Record(r) => r.ty.as_ref()?.id,
+            Value::Variant(v) => v.ty.id,
+            _ => return None,
+        };
+        let m = self.ctx.type_home.get(&id)?;
+        let v = self.global_by_name(&m.ns, name)?;
+        if v.is_callable() {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
     pub fn global_by_name(&self, ns: &Namespace, name: &str) -> Option<Value> {
         let slot = ns.values.get(name)?;
         self.globals.get(*slot as usize).cloned().flatten()
@@ -386,11 +429,12 @@ impl Interp {
             StmtKind::Expr(e) => {
                 self.eval(e, env)?;
             }
-            StmtKind::Let { pat, ty, value } => {
+            StmtKind::Let { pat, ty, value, mutable } => {
                 let mut v = self.eval(value, env)?;
                 if let Some(t) = ty {
+                    let kw = if *mutable { "var" } else { "let" };
                     v = self.conform(v, &t.ty).map_err(|m| {
-                        self.fail(self.diag(value.span, "E0200", format!("type mismatch in `let`: {}", m)).note(format!("the annotation is `{}`", t.ty)))
+                        self.fail(self.diag(value.span, "E0200", format!("type mismatch in `{}`: {}", kw, m)).note(format!("the annotation is `{}`", t.ty)))
                     })?;
                 }
                 if let PatKind::Bind { res, sub: None, .. } = &pat.kind {
@@ -402,15 +446,6 @@ impl Interp {
                             .help("use `match` to handle values of different shapes"),
                     ));
                 }
-            }
-            StmtKind::Var { res, ty, value, .. } => {
-                let mut v = self.eval(value, env)?;
-                if let Some(t) = ty {
-                    v = self.conform(v, &t.ty).map_err(|m| {
-                        self.fail(self.diag(value.span, "E0200", format!("type mismatch in `var`: {}", m)).note(format!("the annotation is `{}`", t.ty)))
-                    })?;
-                }
-                self.store(*res, v, env);
             }
             StmtKind::Assign { target, op, value } => self.assign(target, *op, value, env)?,
             StmtKind::Fn { def, res } => {
@@ -803,10 +838,16 @@ impl Interp {
                     }
                     _ => {}
                 }
-                if method.res == VarRes::Unresolved {
-                    return Err(self.fail(self.no_member(&recv, &method.name, *method_span)));
-                }
-                let f = self.load(method, *method_span, env)?;
+                let home_fn = self.home_method(&recv, &method.name);
+                let f = match home_fn {
+                    Some(f) => f,
+                    None => {
+                        if method.res == VarRes::Unresolved {
+                            return Err(self.fail(self.no_member(&recv, &method.name, *method_span)));
+                        }
+                        self.load(method, *method_span, env)?
+                    }
+                };
                 let (pos, named) = self.eval_args(args, env, Some(recv))?;
                 self.call_value(&f, pos, named, e.span)
             }
@@ -904,6 +945,7 @@ impl Interp {
             ExprKind::Lambda(def) => Ok(self.make_closure(def, env)),
             ExprKind::While { cond, body } => {
                 while self.eval_cond(cond, env, "the `while` condition")? {
+                    self.tick(e.span)?;
                     match self.eval(body, env) {
                         Ok(_) | Err(Ctrl::Continue) => {}
                         Err(Ctrl::Break(_)) => break,
@@ -913,6 +955,7 @@ impl Interp {
                 Ok(Value::Unit)
             }
             ExprKind::Loop { body } => loop {
+                self.tick(e.span)?;
                 match self.eval(body, env) {
                     Ok(_) | Err(Ctrl::Continue) => {}
                     Err(Ctrl::Break(v)) => return Ok(v),
@@ -981,6 +1024,7 @@ impl Interp {
     fn exec_for(&mut self, pat: &Pattern, it: Value, body: &Expr, env: &mut Env, span: Span) -> R {
         macro_rules! run_body {
             () => {
+                self.tick(span)?;
                 match self.eval(body, env) {
                     Ok(_) | Err(Ctrl::Continue) => {}
                     Err(Ctrl::Break(_)) => break,
@@ -1123,6 +1167,7 @@ impl Interp {
                 Some(i) => Ok(xs[i].clone()),
                 None => Err(self.fail(
                     self.diag(span, "E0204", format!("index {} is out of bounds for a list of length {}", i, xs.len()))
+                        .label(if xs.is_empty() { "the list is empty".to_string() } else { format!("valid indexes are 0..{} (or -{}..-1)", xs.len() - 1, xs.len()) })
                         .help("use `xs.get(i)`, which returns an Option, if the index may be missing"),
                 )),
             },
@@ -1793,6 +1838,7 @@ impl Interp {
     /// of the first parameter (used by mutating `!` functions).
     pub fn call_closure_full(&mut self, c: &Rc<Closure>, args: Vec<Value>, named: Vec<(Name, Value)>, span: Span, want_first: bool) -> R<(Value, Value)> {
         let def = c.def.clone();
+        self.tick(span)?;
         if self.stack.len() >= self.max_depth {
             return Err(self.fail(
                 self.diag(span, "E0213", format!("stack overflow: more than {} nested calls (in `{}`)", self.max_depth, def.display_name()))
@@ -1878,6 +1924,7 @@ impl Interp {
                         Err(m) => {
                             let mut d = Diagnostic::error("E0200", format!("type mismatch for parameter `{}` of `{}`: {}", p.name, def.display_name(), m))
                                 .at(span)
+                                .label(format!("`{}` expects {} here", def.display_name(), t.ty))
                                 .note(format!("`{}` is declared as `{}: {}` at {}", p.name, p.name, t.ty, self.location(p.span)));
                             d.trace = self.trace(span, true);
                             return Err(self.fail(d));
@@ -1936,6 +1983,15 @@ impl Interp {
                             .label("this promise was not kept");
                         if !wh.is_empty() {
                             d = d.note(format!("where {}", wh.join(", ")));
+                        }
+                        let args: Vec<String> = def
+                            .params
+                            .iter()
+                            .filter(|p| !wh.iter().any(|w| w.starts_with(&format!("{} = ", p.name))))
+                            .map(|p| format!("{} = {}", p.name, short_repr(&env.locals[p.slot as usize])))
+                            .collect();
+                        if !args.is_empty() {
+                            d = d.note(format!("called with {}", args.join(", ")));
                         }
                         d = d.help(format!("this is a bug in `{}` (or in its contract)", def.display_name()));
                         return Err(self.fail(d));

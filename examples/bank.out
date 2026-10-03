@@ -1,0 +1,3 @@
+Alice: 70, Bob: 50
+transfer failed: insufficient funds: needed 500, have 20
+withdraw failed: invalid amount -5

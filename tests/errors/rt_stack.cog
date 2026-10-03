@@ -1,0 +1,3 @@
+# expect: E0213
+fn down(n: Int) -> Int => down(n + 1)
+down(0)

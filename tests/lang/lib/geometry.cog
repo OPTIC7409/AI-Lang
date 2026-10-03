@@ -1,0 +1,13 @@
+# A small module used by modules.cog.
+type Vec2 = { x: Float, y: Float }
+
+let origin = Vec2(0.0, 0.0)
+
+fn add(a: Vec2, b: Vec2) -> Vec2 => Vec2(a.x + b.x, a.y + b.y)
+
+fn length(v: Vec2) -> Float => hypot(v.x, v.y)
+
+fn scale!(v: Vec2, k: Float) {
+  v.x *= k
+  v.y *= k
+}

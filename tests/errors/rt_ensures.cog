@@ -1,0 +1,5 @@
+# expect: E0302
+fn f(x: Int) -> Int
+  ensures result > x
+=> x
+f(1)

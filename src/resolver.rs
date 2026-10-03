@@ -95,6 +95,7 @@ struct Found {
 #[derive(Clone, Copy, PartialEq)]
 enum BindMode {
     Local,
+    LocalMut,
     Global,
 }
 
@@ -391,8 +392,41 @@ impl<'a> Resolver<'a> {
         // to each other (and to types) regardless of order.
         let first_new_type = self.ctx.types.len() as u32;
         let mut type_decl_count = 0u32;
+        // `type A = B` with a single bare name that is already a type is an alias.
+        let program_types: HashSet<Name> = prog
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Type(td) => Some(td.name.clone()),
+                _ => None,
+            })
+            .collect();
+        for item in prog.items.iter_mut() {
+            if let Item::Type(td) = item {
+                if let TypeBody::Enum(vs) = &td.body {
+                    if vs.len() == 1 && !vs[0].has_parens {
+                        let n = vs[0].name.clone();
+                        if program_types.contains(&n) || self.ns.types.contains_key(&n) || self.ns.aliases.contains_key(&n) {
+                            let span = vs[0].span;
+                            td.body = TypeBody::Alias(TypeExpr { kind: TypeExprKind::Named(n, vec![]), span, ty: Ty::Any });
+                        }
+                    }
+                }
+            }
+        }
         for item in prog.items.iter_mut() {
             match item {
+                Item::Type(td) if matches!(td.body, TypeBody::Alias(_)) => {
+                    if (self.ns.types.contains_key(&td.name) || self.ns.aliases.contains_key(&td.name)) && !self.repl {
+                        let d = Diagnostic::error("E0102", format!("type `{}` is defined more than once", td.name)).at(td.name_span);
+                        self.error(d);
+                    }
+                    if self.ctx.builtins.types.contains_key(&td.name) || is_primitive_type(&td.name) {
+                        let d = Diagnostic::error("E0102", format!("`{}` is a built-in type and cannot be redefined", td.name)).at(td.name_span);
+                        self.error(d);
+                    }
+                    self.ns.types.remove(&td.name);
+                }
                 Item::Type(td) => {
                     let id = first_new_type + type_decl_count;
                     type_decl_count += 1;
@@ -411,6 +445,7 @@ impl<'a> Resolver<'a> {
                         self.error(d);
                     }
                     self.ns.types.insert(td.name.clone(), id);
+                    self.ns.aliases.remove(&td.name);
                     match &mut td.body {
                         TypeBody::Record(_) => {
                             td.slot = self.define_global(
@@ -434,6 +469,7 @@ impl<'a> Resolver<'a> {
                                 );
                             }
                         }
+                        TypeBody::Alias(_) => unreachable!(),
                     }
                 }
                 Item::Fn(def) => {
@@ -451,25 +487,34 @@ impl<'a> Resolver<'a> {
                     }
                 }
                 Item::Import(imp) => self.import(imp),
-                Item::Stmt(Stmt { kind: StmtKind::Let { pat, .. }, .. }) => {
+                Item::Stmt(Stmt { kind: StmtKind::Let { pat, mutable, .. }, .. }) => {
                     let mut names = vec![];
                     Self::bound_names(pat, &mut names);
+                    let kind = if *mutable { GlobalKind::Var } else { GlobalKind::Let };
                     for (n, sp) in names {
-                        self.define_global(n, GlobalKind::Let, sp, false);
+                        self.define_global(n, kind.clone(), sp, false);
                     }
-                }
-                Item::Stmt(Stmt { kind: StmtKind::Var { name, name_span, .. }, .. }) => {
-                    self.define_global(name.clone(), GlobalKind::Var, *name_span, false);
                 }
                 _ => {}
             }
         }
 
-        // Pass 2: build type definitions.
+        // Pass 2: resolve aliases (in order), then build type definitions.
+        for item in prog.items.iter_mut() {
+            if let Item::Type(td) = item {
+                if let TypeBody::Alias(te) = &mut td.body {
+                    let params = td.params.clone();
+                    let ty = self.resolve_type(te, &params);
+                    self.ns.aliases.insert(td.name.clone(), AliasDef { params, ty });
+                }
+            }
+        }
         let mut new_types = Vec::new();
         for item in prog.items.iter_mut() {
             if let Item::Type(td) = item {
-                new_types.push(self.type_decl(td));
+                if !matches!(td.body, TypeBody::Alias(_)) {
+                    new_types.push(self.type_decl(td));
+                }
             }
         }
         for td in new_types {
@@ -521,9 +566,10 @@ impl<'a> Resolver<'a> {
         for item in prog.items.iter_mut() {
             match item {
                 Item::Fn(def) => {
+                    // Top-level functions refer to themselves through their
+                    // global slot, so that recursion respects overloading.
                     let def = Rc::get_mut(def).unwrap();
-                    let name = def.name.clone();
-                    self.resolve_fn(def, FnKind::Function, false, name);
+                    self.resolve_fn(def, FnKind::Function, false, None);
                 }
                 Item::Test(t) => {
                     let def = Rc::get_mut(&mut t.func).unwrap();
@@ -552,7 +598,7 @@ impl<'a> Resolver<'a> {
         // record has a field with that name.
         let pending = std::mem::take(&mut self.pending_methods);
         for (name, span) in pending {
-            if !self.ctx.known_fields.contains(&name) && self.global_slot(&name).is_none() {
+            if !self.ctx.known_fields.contains(&name) && !self.ctx.module_fns.contains(&name) && self.global_slot(&name).is_none() {
                 self.undefined(&name, span, "function");
                 if let Some(d) = self.diags.last_mut() {
                     d.notes.push(format!("`value.{}(...)` calls the function `{}` with `value` as its first argument", name, name));
@@ -635,6 +681,14 @@ impl<'a> Resolver<'a> {
                 return;
             }
             let m = Rc::new(Module { name: alias.clone(), path: canon.clone(), program: prog, ns, executed: std::cell::Cell::new(false) });
+            for id in m.ns.types.values() {
+                self.ctx.type_home.insert(*id, m.clone());
+            }
+            for (name, slot) in m.ns.values.iter() {
+                if matches!(self.ctx.globals[*slot as usize].kind, GlobalKind::Fn) {
+                    self.ctx.module_fns.insert(name.clone());
+                }
+            }
             self.ctx.modules.insert(canon, m.clone());
             m
         };
@@ -660,6 +714,7 @@ impl<'a> Resolver<'a> {
                 }
                 TypeKind::Record { fields: names.into(), tys }
             }
+            TypeBody::Alias(_) => unreachable!(),
             TypeBody::Enum(variants) => {
                 let mut defs = Vec::new();
                 for v in variants.iter_mut() {
@@ -687,6 +742,17 @@ impl<'a> Resolver<'a> {
             }
         };
         TypeDef { id: td.id, name: td.name.clone(), params, kind, span: td.name_span }
+    }
+
+    fn lookup_alias(&self, name: &str) -> Option<AliasDef> {
+        if let Some((module, tname)) = name.split_once('.') {
+            let slot = self.ns.values.get(module)?;
+            if let GlobalKind::Module(m) = &self.ctx.globals[*slot as usize].kind {
+                return m.ns.aliases.get(tname).cloned();
+            }
+            return None;
+        }
+        self.ns.aliases.get(name).cloned()
     }
 
     fn lookup_type(&self, name: &str) -> Option<u32> {
@@ -760,6 +826,11 @@ impl<'a> Resolver<'a> {
                             Ty::Param(i as u32, name.clone())
                         } else if self.generics.contains(&name) {
                             Ty::Generic(name.clone())
+                        } else if let Some(alias) = self.lookup_alias(&name) {
+                            if !targs.is_empty() && targs.len() != alias.params.len() {
+                                arity_err(self, alias.params.len());
+                            }
+                            alias.ty.subst(&targs)
                         } else if let Some(id) = self.lookup_type(&name) {
                             let nparams = if (id as usize) < self.ctx.types.len() {
                                 self.ctx.types[id as usize].params.len()
@@ -778,6 +849,7 @@ impl<'a> Resolver<'a> {
                                 .map(String::from)
                                 .collect();
                             cands.extend(self.ns.types.keys().map(|k| k.to_string()));
+                            cands.extend(self.ns.aliases.keys().map(|k| k.to_string()));
                             cands.extend(self.ctx.builtins.types.keys().map(|k| k.to_string()));
                             cands.extend(self.generics.iter().map(|k| k.to_string()));
                             let mut d = Diagnostic::error("E0106", format!("unknown type `{}`", name)).at(span);
@@ -857,26 +929,13 @@ impl<'a> Resolver<'a> {
 
     fn stmt(&mut self, s: &mut Stmt) {
         match &mut s.kind {
-            StmtKind::Let { pat, ty, value } => {
+            StmtKind::Let { pat, ty, value, mutable } => {
                 self.expr(value);
                 if let Some(t) = ty {
                     self.resolve_type(t, &[]);
                 }
-                let mode = if self.at_global_scope() { BindMode::Global } else { BindMode::Local };
+                let mode = if self.at_global_scope() { BindMode::Global } else if *mutable { BindMode::LocalMut } else { BindMode::Local };
                 self.pattern(pat, mode);
-            }
-            StmtKind::Var { name, name_span, res, ty, value } => {
-                self.expr(value);
-                if let Some(t) = ty {
-                    self.resolve_type(t, &[]);
-                }
-                if self.at_global_scope() {
-                    let slot = self.ns.values[name];
-                    self.ctx.globals[slot as usize].declared = true;
-                    *res = VarRes::Global(slot);
-                } else {
-                    *res = VarRes::Local(self.declare_local(name.clone(), *name_span, true, LocalKind::Var));
-                }
             }
             StmtKind::Assign { target, op: _, value } => {
                 self.expr(value);
@@ -910,7 +969,7 @@ impl<'a> Resolver<'a> {
             ExprKind::Var(v) => {
                 let name = v.name.clone();
                 let Some(found) = self.resolve_var(v, span) else { return };
-                if found.mutable {
+                if found.mutable && !found.captured {
                     return;
                 }
                 let mut d;
@@ -1338,7 +1397,8 @@ impl<'a> Resolver<'a> {
                     self.expr(&mut arm.body);
                     self.pop_scope();
                 }
-                self.check_exhaustive(arms, span);
+                let head = Span { end: scrutinee.span.end, ..span };
+                self.check_exhaustive(arms, head);
             }
             ExprKind::Block(stmts) => self.block(stmts),
             ExprKind::Lambda(def) => {
@@ -1421,6 +1481,7 @@ impl<'a> Resolver<'a> {
                 VarRes::Global(slot)
             }
             BindMode::Local => VarRes::Local(self.declare_local(name.clone(), span, false, LocalKind::Let)),
+            BindMode::LocalMut => VarRes::Local(self.declare_local(name.clone(), span, true, LocalKind::Var)),
         }
     }
 
@@ -1565,7 +1626,7 @@ impl<'a> Resolver<'a> {
     fn lookup_binding(&self, name: &Name, mode: BindMode) -> VarRes {
         match mode {
             BindMode::Global => self.ns.values.get(name).map(|s| VarRes::Global(*s)).unwrap_or(VarRes::Unresolved),
-            BindMode::Local => {
+            BindMode::Local | BindMode::LocalMut => {
                 let f = self.fns.last().unwrap();
                 for s in f.scopes.iter().rev() {
                     for l in s.locals.iter().rev() {
@@ -1592,7 +1653,7 @@ impl<'a> Resolver<'a> {
         let mut bools: HashSet<bool> = HashSet::new();
         let mut kind_bool = false;
         for arm in arms {
-            if arm.guard.is_none() && arm.pat.is_irrefutable() {
+            if arm.guard.is_none() && arm.pat.covers() {
                 return;
             }
             let mut pats = vec![];
@@ -1604,7 +1665,7 @@ impl<'a> Resolver<'a> {
                             return;
                         }
                         enum_id = Some(ctor.type_id);
-                        if arm.guard.is_none() && args.iter().all(|(_, a)| a.is_irrefutable()) {
+                        if arm.guard.is_none() && args.iter().all(|(_, a)| a.covers()) {
                             covered.insert(ctor.tag);
                         }
                     }

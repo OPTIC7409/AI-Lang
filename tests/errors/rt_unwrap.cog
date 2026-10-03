@@ -1,0 +1,3 @@
+# expect: E0210
+let x: Option[Int] = None
+print(x.unwrap())

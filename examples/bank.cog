@@ -1,0 +1,72 @@
+# Contracts make assumptions explicit and checkable.
+#   cogito examples/bank.cog      runs the program
+#   cogito verify examples/bank.cog  checks the contracts with random inputs
+
+type Account = { owner: Str, balance: Int }
+
+type TxError =
+  | InsufficientFunds(needed: Int, available: Int)
+  | InvalidAmount(amount: Int)
+
+fn deposit(acct: Account, amount: Int) -> Account
+  requires amount > 0
+  ensures result.balance == acct.balance + amount
+=> { ..acct, balance: acct.balance + amount }
+
+fn withdraw(acct: Account, amount: Int) -> Result[Account, TxError]
+  ensures match result {
+    Ok(a) => a.balance == acct.balance - amount and a.balance >= 0
+    Err(_) => true
+  }
+{
+  if amount <= 0 {
+    return Err(InvalidAmount(amount))
+  }
+  if amount > acct.balance {
+    return Err(InsufficientFunds(needed: amount, available: acct.balance))
+  }
+  Ok({ ..acct, balance: acct.balance - amount })
+}
+
+fn transfer(from: Account, to: Account, amount: Int) -> Result[(Account, Account), TxError]
+  requires from.balance >= 0 and to.balance >= 0
+  ensures match result {
+    Ok((a, b)) => a.balance + b.balance == from.balance + to.balance
+    Err(_) => true
+  }
+{
+  let a = withdraw(from, amount)?
+  Ok((a, deposit(to, amount)))
+}
+
+fn describe(e: TxError) -> Str => match e {
+  InsufficientFunds(needed, available) => "insufficient funds: needed {needed}, have {available}"
+  InvalidAmount(amount) => "invalid amount {amount}"
+}
+
+fn main() {
+  let alice = Account(owner: "Alice", balance: 100)
+  let bob = Account(owner: "Bob", balance: 20)
+
+  match transfer(alice, bob, 30) {
+    Ok((a, b)) => print("{a.owner}: {a.balance}, {b.owner}: {b.balance}")
+    Err(e) => print("transfer failed: {e.describe()}")
+  }
+  match transfer(bob, alice, 500) {
+    Ok(_) => print("unexpected success")
+    Err(e) => print("transfer failed: {e.describe()}")
+  }
+  match withdraw(alice, -5) {
+    Ok(_) => print("unexpected success")
+    Err(e) => print("withdraw failed: {e.describe()}")
+  }
+}
+
+property "money is conserved" (a: Int, b: Int, amount: Int) where a >= 0 and b >= 0 {
+  let x = Account(owner: "x", balance: a)
+  let y = Account(owner: "y", balance: b)
+  match transfer(x, y, amount) {
+    Ok((x2, y2)) => assert x2.balance + y2.balance == a + b
+    Err(_) => assert true
+  }
+}

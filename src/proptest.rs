@@ -32,14 +32,14 @@ impl<'a> Gen<'a> {
             Ty::Bool => Value::Bool(self.rng.next_u64() & 1 == 1),
             Ty::Int => {
                 let r = self.rng.below(100);
-                if r < 10 {
-                    Value::Int([0, 1, -1][self.rng.below(3)])
+                if r < 15 {
+                    Value::Int([0, 1, -1, 2, -2, 3, 10, -10][self.rng.below(8)])
                 } else if r < 85 {
                     Value::Int(self.rng.range(-size, size))
                 } else if r < 97 {
-                    Value::Int(self.rng.range(-1_000_000, 1_000_000))
+                    Value::Int(self.rng.range(-1000, 1000))
                 } else {
-                    Value::Int(self.rng.range(-(1 << 40), 1 << 40))
+                    Value::Int(self.rng.range(-100_000, 100_000))
                 }
             }
             Ty::Float => {

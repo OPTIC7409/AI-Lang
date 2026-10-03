@@ -1,0 +1,46 @@
+# Processing JSON data: parsing, validation with Result, and reporting.
+
+let source = r"""
+  [
+    {"sku": "A-100", "name": "Widget",   "price": 2.5,  "qty": 10},
+    {"sku": "B-200", "name": "Gadget",   "price": 12.0, "qty": 3},
+    {"sku": "C-300", "name": "Doohickey","price": 7.25, "qty": 0},
+    {"sku": "D-400", "name": "Gizmo",    "price": -1,   "qty": 5}
+  ]
+  """
+
+type Item = { sku: Str, name: Str, price: Float, qty: Int }
+
+fn field(m: Map[Str, Any], key: Str) -> Result[Any, Str] =>
+  m.get(key).ok_or("missing field `{key}`")
+
+fn to_item(m: Map[Str, Any]) -> Result[Item, Str] {
+  let sku = field(m, "sku")?
+  let price = field(m, "price")?
+  if price < 0 {
+    return Err("{sku}: price must not be negative")
+  }
+  Ok(Item(sku: sku, name: field(m, "name")?, price: price, qty: field(m, "qty")?))
+}
+
+fn main() {
+  let records = parse_json(source).unwrap()
+  var items = []
+  for r in records {
+    match to_item(r) {
+      Ok(item) => items.push!(item)
+      Err(e) => print("skipping record: {e}")
+    }
+  }
+  print()
+  print("{"SKU":<6} {"NAME":<10} {"PRICE":>7} {"QTY":>4} {"VALUE":>8}")
+  for it in items.sort_by(fn(i) => -i.price * float(i.qty)) {
+    let value = it.price * float(it.qty)
+    print("{it.sku:<6} {it.name:<10} {it.price:>7.2} {it.qty:>4} {value:>8.2}")
+  }
+  let out_of_stock = items.filter(fn(i) => i.qty == 0).map(fn(i) => i.name)
+  print()
+  print("out of stock: {out_of_stock.join(", ")}")
+  print("total value: {items.map(fn(i) => i.price * float(i.qty)).sum():.2}")
+  print("as JSON: {to_json(items[0])}")
+}

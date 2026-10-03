@@ -1,0 +1,5 @@
+# expect: E0112
+type T = P(Int, Int)
+fn f(t: T) => match t {
+  P(a) => a
+}

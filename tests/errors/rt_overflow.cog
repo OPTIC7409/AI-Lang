@@ -1,0 +1,2 @@
+# expect: E0207
+print(max_int + 1)

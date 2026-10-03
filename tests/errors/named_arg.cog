@@ -1,0 +1,3 @@
+# expect: E0108
+fn greet(name: Str) => name
+greet(nme: "x")

@@ -1,0 +1,10 @@
+skipping record: D-400: price must not be negative
+
+SKU    NAME         PRICE  QTY    VALUE
+B-200  Gadget       12.00    3    36.00
+A-100  Widget        2.50   10    25.00
+C-300  Doohickey     7.25    0     0.00
+
+out of stock: Doohickey
+total value: 61.00
+as JSON: {"sku":"A-100","name":"Widget","price":2.5,"qty":10}

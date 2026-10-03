@@ -1,0 +1,6 @@
+Hello, world!
+1 + 2 + ... + 10 = 55
+55 is odd
+squares: [1, 4, 9, 16, 25]
+sum of odd squares: 35
+ratio = 0.667, padded = |left    |   right|

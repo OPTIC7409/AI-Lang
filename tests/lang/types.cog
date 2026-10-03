@@ -1,0 +1,145 @@
+# User-defined types, Option/Result, and runtime type checks.
+
+type Point = { x: Int, y: Int }
+
+type Shape =
+  | Circle(center: Point, radius: Float)
+  | Rect(top_left: Point, w: Float, h: Float)
+  | Dot
+
+type Tree[T] =
+  | Leaf
+  | Node(left: Tree[T], value: T, right: Tree[T])
+
+fn insert(t: Tree[Int], v: Int) -> Tree[Int] => match t {
+  Leaf => Node(Leaf, v, Leaf)
+  Node(l, x, r) => if v < x {
+    Node(l.insert(v), x, r)
+  } else {
+    Node(l, x, r.insert(v))
+  }
+}
+
+fn to_list(t: Tree[Int]) -> List[Int] => match t {
+  Leaf => []
+  Node(l, x, r) => l.to_list() + [x] + r.to_list()
+}
+
+test "records" {
+  let p = Point(x: 1, y: 2)
+  let q = Point(3, 4)
+  assert p.x == 1 and q.y == 4
+  assert p == Point(1, 2)
+  assert str(p) == "Point(x: 1, y: 2)"
+  var m = p
+  m.x = 10
+  assert p.x == 1 and m.x == 10
+  let moved = { ..p, y: 20 }
+  assert moved == Point(1, 20)
+  assert type_of(moved) == "Point"
+}
+
+test "record fields are type-checked" {
+  assert catch(fn() => Point(x: "a", y: 2)).is_err()
+}
+
+test "enums with named and positional fields" {
+  let shapes = [Circle(Point(0, 0), 1.0), Rect(top_left: Point(1, 1), w: 2.0, h: 3), Dot]
+  let names = shapes.map(fn(s) => match s {
+    Circle(radius: r, ..) => "circle {r}"
+    Rect(_, w, h) => "rect {w}x{h}"
+    Dot => "dot"
+  })
+  assert names == ["circle 1.0", "rect 2.0x3.0", "dot"]
+  let c = shapes[0]
+  assert c.radius == 1.0
+  assert c.center.x == 0
+}
+
+test "generic recursive types" {
+  var t = Leaf
+  for v in [5, 2, 8, 1, 9] { t = t.insert(v) }
+  assert t.to_list() == [1, 2, 5, 8, 9]
+}
+
+fn parse_age(s: Str) -> Result[Int, Str] {
+  let n = parse_int(s).ok_or("not a number: {s}")?
+  if n < 0 { return Err("negative age") }
+  Ok(n)
+}
+
+fn sum_ages(xs: List[Str]) -> Result[Int, Str] {
+  var total = 0
+  for x in xs { total += parse_age(x)? }
+  Ok(total)
+}
+
+test "Result and the ? operator" {
+  assert parse_age("42") == Ok(42)
+  assert parse_age("x") == Err("not a number: x")
+  assert parse_age("-1") == Err("negative age")
+  assert sum_ages(["1", "2"]) == Ok(3)
+  assert sum_ages(["1", "oops", "-5"]) == Err("not a number: oops")
+}
+
+fn first_even(xs: List[Int]) -> Option[Int] {
+  let e = xs.find(fn(x) => x % 2 == 0)?
+  Some(e * 100)
+}
+
+test "Option" {
+  assert first_even([1, 3, 4]) == Some(400)
+  assert first_even([1, 3]) == None
+  assert Some(3).map(fn(x) => x + 1) == Some(4)
+  assert None.unwrap_or(7) == 7
+  assert Some(1).is_some() and None.is_none()
+  assert Ok(1).is_ok() and Err("e").is_err()
+  assert Err("bad").map_err(upper) == Err("BAD")
+  assert Some(2).and_then(fn(x) => if x > 1 { Some(x * 2) } else { None }) == Some(4)
+  assert catch(fn() => None.unwrap()).is_err()
+  assert Ok(5).ok() == Some(5)
+}
+
+fn takes_floats(xs: List[Float]) -> Float => xs.sum()
+
+test "Int is accepted where Float is expected" {
+  assert takes_floats([1, 2, 3]) == 6.0
+  assert type_of(takes_floats([1])) == "Float"
+}
+
+fn typed(x: Int, names: List[Str], m: Map[Str, Int], t: (Int, Str), r: { a: Int }) -> Str => "ok"
+
+test "annotations are checked at call boundaries" {
+  assert typed(1, ["a"], ["k": 1], (1, "s"), { a: 1, b: 2 }) == "ok"
+  assert catch(fn() => typed("1", ["a"], ["k": 1], (1, "s"), { a: 1 })).is_err()
+  assert catch(fn() => typed(1, ["a", 2], ["k": 1], (1, "s"), { a: 1 })).is_err()
+  assert catch(fn() => typed(1, ["a"], ["k": "v"], (1, "s"), { a: 1 })).is_err()
+  assert catch(fn() => typed(1, ["a"], ["k": 1], (1, 2), { a: 1 })).is_err()
+  assert catch(fn() => typed(1, ["a"], ["k": 1], (1, "s"), { b: 1 })).is_err()
+}
+
+fn bad_return(x: Int) -> Str => x
+
+test "return types are checked" {
+  assert catch(fn() => bad_return(1)).is_err()
+}
+
+test "let annotations are checked" {
+  assert catch(fn() {
+    let x: Str = 5
+    x
+  }).is_err()
+}
+
+fn first[T](xs: List[T]) -> Option[T] => xs.get(0)
+
+test "generic functions" {
+  assert first([1, 2]) == Some(1)
+  assert first(["a"]) == Some("a")
+}
+
+test "Ordering" {
+  assert compare(1, 2) == Less
+  assert compare("b", "a") == Greater
+  assert compare([1], [1]) == Equal
+}

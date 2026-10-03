@@ -1,0 +1,2 @@
+# expect: E0002
+let s = "abc

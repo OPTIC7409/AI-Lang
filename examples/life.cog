@@ -1,0 +1,60 @@
+# Conway's Game of Life on a small torus.
+
+type Grid = List[List[Bool]]
+
+fn parse(rows: List[Str]) -> Grid =>
+  rows.map(fn(r) => r.chars().map(fn(c) => c == "#"))
+
+fn render(g: Grid) -> Str =>
+  g.map(fn(row) => row.map(fn(alive) => if alive { "#" } else { "." }).join()).join("\n")
+
+fn neighbours(g: Grid, r: Int, c: Int) -> Int {
+  let h = g.len()
+  let w = g[0].len()
+  var n = 0
+  for dr in -1..=1 {
+    for dc in -1..=1 {
+      if (dr, dc) != (0, 0) and g[(r + dr) % h][(c + dc) % w] {
+        n += 1
+      }
+    }
+  }
+  n
+}
+
+fn step(g: Grid) -> Grid {
+  var next = g
+  for r in 0..g.len() {
+    for c in 0..g[r].len() {
+      next[r][c] = match (g[r][c], neighbours(g, r, c)) {
+        (true, 2) | (_, 3) => true
+        _ => false
+      }
+    }
+  }
+  next
+}
+
+fn main() {
+  var g = parse([
+    ".#......",
+    "..#.....",
+    "###.....",
+    "........",
+    "........",
+    "........",
+  ])
+  for gen in 0..4 {
+    print("generation {gen}:")
+    print(render(g))
+    print()
+    g = step(g)
+  }
+}
+
+test "a blinker oscillates" {
+  let b = parse([".....", "..#..", "..#..", "..#..", "....."])
+  let b1 = step(b)
+  assert render(b1) == ".....\n.....\n.###.\n.....\n....."
+  assert step(b1) == b
+}

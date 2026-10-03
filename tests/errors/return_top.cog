@@ -1,0 +1,2 @@
+# expect: E0105
+return 1

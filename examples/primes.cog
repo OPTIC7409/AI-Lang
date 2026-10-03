@@ -1,0 +1,45 @@
+# The sieve of Eratosthenes, checked against trial division.
+
+fn sieve(limit: Int) -> List[Int]
+  requires limit >= 0
+  ensures result.all(is_prime)
+{
+  if limit < 2 { return [] }
+  var marks = [true] * (limit + 1)
+  marks[0] = false
+  marks[1] = false
+  var p = 2
+  while p * p <= limit {
+    if marks[p] {
+      var m = p * p
+      while m <= limit {
+        marks[m] = false
+        m += p
+      }
+    }
+    p += 1
+  }
+  [i for (i, is_p) in marks.enumerate() if is_p]
+}
+
+fn is_prime(n: Int) -> Bool {
+  if n < 2 { return false }
+  var d = 2
+  while d * d <= n {
+    if n % d == 0 { return false }
+    d += 1
+  }
+  true
+}
+
+fn main() {
+  let ps = sieve(100)
+  print("{ps.len()} primes below 100:")
+  print(ps.chunks(10).map(fn(row) => row.map(fn(p) => "{p:>3}").join()).join("\n"))
+  let twins = ps.windows(2).filter(fn(w) => w[1] - w[0] == 2).map(fn(w) => (w[0], w[1]))
+  print("twin primes: {twins.take(5)} ...")
+}
+
+property "the sieve agrees with trial division" (n: Int) where n >= 0 and n <= 2000 {
+  assert sieve(n) == (0..=n).filter(is_prime)
+}

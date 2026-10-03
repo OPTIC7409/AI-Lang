@@ -1,0 +1,25 @@
+# FizzBuzz, using a match on a tuple.
+
+fn fizzbuzz(n: Int) -> Str
+  requires n > 0
+=> match (n % 3, n % 5) {
+  (0, 0) => "FizzBuzz"
+  (0, _) => "Fizz"
+  (_, 0) => "Buzz"
+  _ => str(n)
+}
+
+fn main() {
+  print((1..=15).map(fizzbuzz).join(" "))
+}
+
+test "fizzbuzz" {
+  assert fizzbuzz(3) == "Fizz"
+  assert fizzbuzz(10) == "Buzz"
+  assert fizzbuzz(30) == "FizzBuzz"
+  assert fizzbuzz(7) == "7"
+}
+
+property "multiples of 15 are FizzBuzz" (k: Int) where k > 0 and k < 1000000 {
+  assert fizzbuzz(k * 15) == "FizzBuzz"
+}

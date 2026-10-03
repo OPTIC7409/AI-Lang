@@ -1,0 +1,143 @@
+# Lists, maps, tuples, records and value semantics.
+
+test "list basics" {
+  let xs = [10, 20, 30]
+  assert xs.len() == 3
+  assert xs[0] == 10
+  assert xs[-1] == 30
+  assert xs[1..] == [20, 30]
+  assert xs[..2] == [10, 20]
+  assert xs[-2..] == [20, 30]
+  assert xs.get(5) == None
+  assert xs.get(1) == Some(20)
+  assert xs.first() == Some(10)
+  assert [].first() == None
+  assert xs + [40] == [10, 20, 30, 40]
+  assert [0] * 3 == [0, 0, 0]
+}
+
+test "spread in list literals" {
+  let xs = [1, 2]
+  assert [..xs, 3, ..xs] == [1, 2, 3, 1, 2]
+  assert [..0..3] == [0, 1, 2]
+}
+
+test "value semantics: copies never alias" {
+  var a = [1, 2, 3]
+  let b = a
+  a[0] = 99
+  a.push!(4)
+  assert a == [99, 2, 3, 4]
+  assert b == [1, 2, 3]
+}
+
+test "nested updates" {
+  var grid = [[0, 0], [0, 0]]
+  grid[1][0] = 5
+  grid[0][1] += 2
+  assert grid == [[0, 2], [5, 0]]
+  var r = { name: "x", tags: ["a"] }
+  r.tags.push!("b")
+  r.name += "y"
+  assert r == { name: "xy", tags: ["a", "b"] }
+}
+
+test "mutating methods require var" {
+  var xs = [3, 1, 2]
+  xs.sort!()
+  assert xs == [1, 2, 3]
+  assert xs.pop!() == Some(3)
+  xs.insert!(0, 7)
+  assert xs == [7, 1, 2]
+  assert xs.remove!(1) == 1
+  xs.extend!([8, 9])
+  xs.reverse!()
+  assert xs == [9, 8, 2, 7]
+  xs.swap!(0, -1)
+  assert xs == [7, 8, 2, 9]
+  xs.clear!()
+  assert xs == []
+}
+
+test "non-mutating versions return new values" {
+  let xs = [3, 1, 2]
+  assert xs.sort() == [1, 2, 3]
+  assert xs.push(4) == [3, 1, 2, 4]
+  assert xs.insert(1, 9) == [3, 9, 1, 2]
+  assert xs.remove(0) == [1, 2]
+  assert xs.set(0, 5) == [5, 1, 2]
+  assert xs.reverse() == [2, 1, 3]
+  assert xs == [3, 1, 2]
+}
+
+test "maps" {
+  var m = ["a": 1, "b": 2]
+  assert m["a"] == 1
+  assert m.get("z") == None
+  assert m.get_or("z", 0) == 0
+  m["c"] = 3
+  m["a"] += 10
+  assert m.keys() == ["a", "b", "c"]
+  assert m.values() == [11, 2, 3]
+  assert m.len() == 3
+  assert "b" in m
+  assert m.remove!("b") == Some(2)
+  assert m == ["c": 3, "a": 11]
+  assert catch(fn() => m["nope"]).is_err()
+  let empty: Map[Str, Int] = [:]
+  assert empty.is_empty()
+}
+
+test "map iteration yields (key, value) tuples" {
+  let m = ["x": 1, "y": 2]
+  var total = 0
+  var ks = ""
+  for (k, v) in m {
+    total += v
+    ks += k
+  }
+  assert total == 3
+  assert ks == "xy"
+}
+
+test "tuples" {
+  let t = (1, "two", 3.0)
+  assert t.0 == 1
+  assert t.1 == "two"
+  assert t[2] == 3.0
+  let (a, b, _) = t
+  assert a == 1 and b == "two"
+}
+
+test "anonymous records" {
+  let p = { x: 1, y: 2 }
+  assert p.x + p.y == 3
+  let q = { ..p, y: 5 }
+  assert q == { x: 1, y: 5 }
+  assert p == { y: 2, x: 1 }
+  let r = { ..p, z: 3 }
+  assert r.z == 3
+}
+
+test "comprehensions" {
+  assert [x * x for x in 1..=5] == [1, 4, 9, 16, 25]
+  assert [x for x in 0..10 if x % 3 == 0] == [0, 3, 6, 9]
+  assert [(a, b) for a in 1..3 for b in "xy"] == [(1, "x"), (1, "y"), (2, "x"), (2, "y")]
+  assert [k for (k, v) in ["a": 1, "b": 2] if v > 1] == ["b"]
+}
+
+test "ranges" {
+  assert (0..5).to_list() == [0, 1, 2, 3, 4]
+  assert (1..=3).to_list() == [1, 2, 3]
+  assert range(0, 10, 3) == [0, 3, 6, 9]
+  assert range(5, 0, -2) == [5, 3, 1]
+  assert (0..10).len() == 10
+  assert (5..1).len() == 0
+  assert (1..=100).sum() == 5050
+}
+
+test "strings are iterable" {
+  var out = []
+  for c in "abc" { out.push!(c.upper()) }
+  assert out == ["A", "B", "C"]
+}

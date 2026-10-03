@@ -1,0 +1,73 @@
+# Classic sorting algorithms, each checked against the built-in `sort`
+# by property-based tests.
+
+fn insertion_sort(xs: List[Int]) -> List[Int] {
+  var out = xs
+  for i in 1..out.len() {
+    var j = i
+    while j > 0 and out[j - 1] > out[j] {
+      out.swap!(j - 1, j)
+      j -= 1
+    }
+  }
+  out
+}
+
+fn merge(a: List[Int], b: List[Int]) -> List[Int] {
+  var out = []
+  var i = 0
+  var j = 0
+  while i < a.len() and j < b.len() {
+    if a[i] <= b[j] {
+      out.push!(a[i])
+      i += 1
+    } else {
+      out.push!(b[j])
+      j += 1
+    }
+  }
+  out + a[i..] + b[j..]
+}
+
+fn merge_sort(xs: List[Int]) -> List[Int] {
+  if xs.len() <= 1 { return xs }
+  let mid = xs.len() // 2
+  merge(merge_sort(xs[..mid]), merge_sort(xs[mid..]))
+}
+
+fn quicksort(xs: List[Int]) -> List[Int] => match xs {
+  [] => []
+  [pivot, ..rest] => {
+    let (smaller, larger) = rest.partition(fn(x) => x < pivot)
+    quicksort(smaller) + [pivot] + quicksort(larger)
+  }
+}
+
+fn is_sorted(xs: List[Int]) -> Bool => xs.windows(2).all(fn(w) => w[0] <= w[1])
+
+fn main() {
+  seed(2024)
+  let data = [random_int(0, 99) for _ in 0..12]
+  print("input:          {data}")
+  print("insertion sort: {insertion_sort(data)}")
+  print("merge sort:     {merge_sort(data)}")
+  print("quicksort:      {quicksort(data)}")
+}
+
+property "insertion sort agrees with sort" (xs: List[Int]) {
+  assert insertion_sort(xs) == xs.sort()
+}
+
+property "merge sort agrees with sort" (xs: List[Int]) {
+  assert merge_sort(xs) == xs.sort()
+}
+
+property "quicksort agrees with sort" (xs: List[Int]) {
+  assert quicksort(xs) == xs.sort()
+}
+
+property "sorting yields a sorted permutation" (xs: List[Int]) {
+  let s = merge_sort(xs)
+  assert is_sorted(s)
+  assert s.tally() == xs.tally()
+}

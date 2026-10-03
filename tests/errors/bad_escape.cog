@@ -1,0 +1,2 @@
+# expect: E0004
+let s = "\q"

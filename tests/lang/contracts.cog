@@ -1,0 +1,49 @@
+# Contracts: requires and ensures.
+
+fn safe_div(a: Int, b: Int) -> Int
+  requires b != 0
+  ensures result * b + a % b == a
+=> a // b
+
+fn index_of_max(xs: List[Int]) -> Int
+  requires not xs.is_empty()
+  ensures 0 <= result and result < xs.len()
+  ensures xs.all(fn(x) => x <= xs[result])
+{
+  var best = 0
+  for i in 1..xs.len() {
+    if xs[i] > xs[best] { best = i }
+  }
+  best
+}
+
+fn wrong(x: Int) -> Int
+  ensures result > x
+=> x
+
+test "contracts that hold" {
+  assert safe_div(7, 2) == 3
+  assert safe_div(-7, 2) == -4
+  assert index_of_max([3, 9, 2]) == 1
+}
+
+test "violated preconditions are errors" {
+  let r = catch(fn() => safe_div(1, 0))
+  assert r.is_err()
+  assert r.map_err(fn(m) => "precondition" in m) == Err(true)
+  assert catch(fn() => index_of_max([])).is_err()
+}
+
+test "violated postconditions are errors" {
+  let r = catch(fn() => wrong(1))
+  assert r.map_err(fn(m) => "postcondition" in m) == Err(true)
+}
+
+property "safe_div agrees with its contract" (a: Int, b: Int) where b != 0 {
+  let q = safe_div(a, b)
+  assert q * b <= a or b < 0
+}
+
+property "index_of_max finds a maximum" (xs: List[Int]) where xs.len() > 0 {
+  assert xs[index_of_max(xs)] == xs.max().unwrap()
+}

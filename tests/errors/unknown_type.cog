@@ -1,0 +1,2 @@
+# expect: E0106
+fn f(x: Integer) => x

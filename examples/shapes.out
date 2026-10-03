@@ -1,0 +1,5 @@
+circle at (0.0, 0.0) with radius 1.0 area   3.142  perimeter   6.283
+3.0x4.0 rectangle at (1.0, 1.0)      area  12.000  perimeter  14.000
+triangle                             area   6.000  perimeter  12.000
+largest: 3.0x4.0 rectangle at (1.0, 1.0)
+total area: 21.14

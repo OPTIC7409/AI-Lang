@@ -1,0 +1,134 @@
+# Control flow and pattern matching.
+
+test "if is an expression" {
+  let x = 5
+  let size = if x > 3 { "big" } else { "small" }
+  assert size == "big"
+  let grade = if x > 8 { "A" } else if x > 4 { "B" } else { "C" }
+  assert grade == "B"
+  let nothing = if false { 1 }
+  assert nothing == ()
+}
+
+test "else may start on the next line" {
+  let v = if 1 > 2 {
+    "yes"
+  }
+  else {
+    "no"
+  }
+  assert v == "no"
+}
+
+test "while and loop" {
+  var i = 0
+  var total = 0
+  while i < 5 {
+    i += 1
+    if i == 3 { continue }
+    total += i
+  }
+  assert total == 12
+  var n = 0
+  let found = loop {
+    n += 1
+    if n * n > 50 { break n }
+  }
+  assert found == 8
+}
+
+test "for loops over many things" {
+  var s = 0
+  for i in 0..4 { s += i }
+  assert s == 6
+  var words = []
+  for (i, w) in ["a", "b"].enumerate() { words.push!("{i}{w}") }
+  assert words == ["0a", "1b"]
+  var count = 0
+  for _ in 0.. {
+    count += 1
+    if count == 10 { break }
+  }
+  assert count == 10
+}
+
+test "the loop iterates over a snapshot" {
+  var xs = [1, 2, 3]
+  for x in xs { xs.push!(x) }
+  assert xs == [1, 2, 3, 1, 2, 3]
+}
+
+fn describe(x: Any) -> Str => match x {
+  0 => "zero"
+  1 | 2 | 3 => "small"
+  n if type_of(n) == "Int" and n < 0 => "negative"
+  4..=9 => "medium"
+  "hello" => "greeting"
+  [] => "empty list"
+  [a] => "one item: {a}"
+  [first, ..rest] => "list starting with {first} and {rest.len()} more"
+  (a, b) => "pair of {a} and {b}"
+  { name, .. } => "something named {name}"
+  Some(inner) => "some {inner}"
+  None => "none"
+  true => "yes"
+  _ => "other"
+}
+
+test "match on literals, ranges, lists, tuples, records" {
+  assert describe(0) == "zero"
+  assert describe(2) == "small"
+  assert describe(-5) == "negative"
+  assert describe(7) == "medium"
+  assert describe(42) == "other"
+  assert describe("hello") == "greeting"
+  assert describe([]) == "empty list"
+  assert describe([9]) == "one item: 9"
+  assert describe([1, 2, 3]) == "list starting with 1 and 2 more"
+  assert describe((1, 2)) == "pair of 1 and 2"
+  assert describe({ name: "Bob", age: 3 }) == "something named Bob"
+  assert describe(Some(1)) == "some 1"
+  assert describe(None) == "none"
+  assert describe(true) == "yes"
+  assert describe(false) == "other"
+}
+
+test "list patterns with a tail" {
+  let [a, ..middle, z] = [1, 2, 3, 4]
+  assert a == 1 and z == 4
+  assert middle == [2, 3]
+}
+
+test "binding with @" {
+  let r = match 15 {
+    n @ 10..=20 => "teen {n}"
+    _ => "other"
+  }
+  assert r == "teen 15"
+}
+
+test "a failing let pattern is an error" {
+  assert catch(fn() {
+    let [a, b] = [1, 2, 3]
+    a + b
+  }).is_err()
+}
+
+test "no matching arm is an error" {
+  let f = fn(x) => match x {
+    1 => "one"
+  }
+  assert f(1) == "one"
+  assert catch(fn() => f(2)).is_err()
+}
+
+test "match guards" {
+  let classify = fn(p) => match p {
+    (x, y) if x == y => "diagonal"
+    (x, _) if x > 0 => "right"
+    _ => "left"
+  }
+  assert classify((2, 2)) == "diagonal"
+  assert classify((3, 1)) == "right"
+  assert classify((-3, 1)) == "left"
+}

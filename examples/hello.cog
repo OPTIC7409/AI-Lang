@@ -1,0 +1,28 @@
+# Hello, Cogito!
+# Run with: cogito examples/hello.cog
+
+let name = "world"
+print("Hello, {name}!")
+
+# Values are immutable by default; `var` makes a variable that can change.
+var count = 0
+for i in 1..=10 {
+  count += i
+}
+print("1 + 2 + ... + 10 = {count}")
+
+# Everything is an expression.
+let parity = if count % 2 == 0 { "even" } else { "odd" }
+print("{count} is {parity}")
+
+# Functions; `=>` introduces a single-expression body.
+fn square(x: Int) -> Int => x * x
+
+# `x.f(y)` calls `f(x, y)`, and `|>` pipes a value into a call.
+let squares = (1..=5).map(square)
+print("squares: {squares}")
+print("sum of odd squares: {squares |> filter(fn(n) => n % 2 == 1) |> sum}")
+
+# String interpolation with format specs.
+let ratio = 2.0 / 3.0
+print("ratio = {ratio:.3}, padded = |{"left":<8}|{"right":>8}|")

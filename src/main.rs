@@ -30,6 +30,7 @@ OPTIONS (test / verify):
     --seed N         random seed (default: derived from each property's name)
     --filter TEXT    only run tests/functions whose name contains TEXT
     --all            verify: also check functions without contracts
+    --budget N       maximum steps (calls + loop iterations) per generated case (default 10000000)
     --no-color       disable colored output
 ",
         cogito::VERSION
@@ -274,6 +275,7 @@ fn parse_opts(args: &[String], color: bool, default_cases: u32) -> Result<(Optio
             "--seed" => opts.seed = Some(value(&mut i)?.parse().map_err(|_| "--seed needs a number".to_string())?),
             "--filter" => opts.filter = Some(value(&mut i)?),
             "--all" => opts.all = true,
+            "--budget" => opts.budget = value(&mut i)?.parse().map_err(|_| "--budget needs a number".to_string())?,
             "--no-color" => {}
             s if s.starts_with("--") => return Err(format!("unknown option `{}`", s)),
             _ => rest.push(a.clone()),

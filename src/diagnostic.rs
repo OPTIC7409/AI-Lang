@@ -112,7 +112,7 @@ impl Diagnostic {
                 }
             }
         }
-        if !self.trace.is_empty() {
+        if self.trace.len() >= 2 {
             let _ = writeln!(out, "  {}stack trace (most recent call first):{}", c.dim, c.reset);
             let max = 12;
             let n = self.trace.len();
@@ -121,6 +121,10 @@ impl Diagnostic {
                     let _ = writeln!(out, "    {}... {} more frames ...{}", c.dim, n - max, c.reset);
                 }
                 if n > max && i >= max / 2 && i < n - max / 2 {
+                    continue;
+                }
+                if frame.span == Span::default() {
+                    let _ = writeln!(out, "    {}at{} {}", c.dim, c.reset, frame.name);
                     continue;
                 }
                 let loc = if (frame.span.file as usize) < sm.files.len() { sm.location(frame.span) } else { "?".into() };
@@ -141,28 +145,14 @@ fn render_excerpt(out: &mut String, sm: &SourceMap, span: Span, label: Option<&s
     let gutter = end_line.to_string().len().max(2);
     let _ = writeln!(out, "{:>w$}{}-->{} {}:{}:{}", "", c.blue, c.reset, file.name, line, col, w = gutter);
     let _ = writeln!(out, "{:>w$} {}|{}", "", c.blue, c.reset, w = gutter);
-    let last = if end_line > line + 3 { line + 3 } else { end_line };
-    for l in line..=last {
-        let text = file.line_text(l);
-        let _ = writeln!(out, "{}{:>w$} |{} {}", c.blue, l, c.reset, text.replace('\t', "    "), w = gutter);
-        let text_chars = text.chars().count();
-        let (from, to) = if line == end_line {
-            (col, if end_col > col { end_col } else { col + 1 })
-        } else if l == line {
-            (col, text_chars + 1)
-        } else if l == end_line {
-            (1, end_col.max(2))
-        } else {
-            (1, text_chars + 1)
-        };
-        let width = to.saturating_sub(from).max(1);
-        let prefix: String = text.chars().take(from.saturating_sub(1)).map(|ch| if ch == '\t' { "    " } else { " " }).collect();
-        let lbl = if l == last { label.unwrap_or("") } else { "" };
-        let _ = writeln!(out, "{:>w$} {}|{} {}{}{}{} {}{}", "", c.blue, c.reset, prefix, c.bold, kc, "^".repeat(width), lbl, c.reset, w = gutter);
-    }
-    if last < end_line {
-        let _ = writeln!(out, "{:>w$} {}|{} ...", "", c.blue, c.reset, w = gutter);
-    }
+    // Multi-line spans are shown by their first line only.
+    let text = file.line_text(line);
+    let _ = writeln!(out, "{}{:>w$} |{} {}", c.blue, line, c.reset, text.replace('\t', "    "), w = gutter);
+    let text_chars = text.chars().count();
+    let to = if line == end_line { if end_col > col { end_col } else { col + 1 } } else { text_chars + 1 };
+    let width = to.saturating_sub(col).max(1);
+    let prefix: String = text.chars().take(col.saturating_sub(1)).map(|ch| if ch == '\t' { "    " } else { " " }).collect();
+    let _ = writeln!(out, "{:>w$} {}|{} {}{}{}{} {}{}", "", c.blue, c.reset, prefix, c.bold, kc, "^".repeat(width), label.unwrap_or(""), c.reset, w = gutter);
 }
 
 pub struct Colors {
@@ -278,6 +268,7 @@ pub const CATALOG: &[(&str, &str, &str)] = &[
     ("E0216", "invalid argument", "A built-in function received an argument value it cannot handle, such as a\nnegative count for `repeat`."),
     ("E0217", "panic", "The program called `panic(message)`."),
     ("E0218", "not yet implemented", "The program reached a `todo()`."),
+    ("E0219", "step budget exceeded", "While running a property test or `cogito verify`, a single test case ran\nfor more steps (function calls plus loop iterations) than its budget.\nThis usually means an infinite loop, or a generated input that is too\nlarge for the algorithm. Restrict the inputs with `where` (properties) or\n`requires` (contracts), or raise the limit with `--budget N`."),
     ("E0300", "assertion failed", "An `assert` statement's condition was false. For comparisons, Cogito shows\nthe value of each side."),
     ("E0301", "precondition violated", "A function was called with arguments that violate its `requires`\ncontract. This is a bug in the *caller*: the function documented an\nassumption, and the call broke it."),
     ("E0302", "postcondition violated", "A function returned a value that violates its own `ensures` contract.\nThis is a bug in the *function*: it promised something it did not deliver.\nInside `ensures`, the name `result` refers to the returned value."),

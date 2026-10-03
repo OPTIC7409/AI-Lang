@@ -1,0 +1,38 @@
+# Word frequencies: strings, maps and pipelines.
+
+let text = """
+  It was the best of times, it was the worst of times,
+  it was the age of wisdom, it was the age of foolishness,
+  it was the epoch of belief, it was the epoch of incredulity.
+  """
+
+fn normalize(word: Str) -> Str =>
+  word.lower().chars().filter(fn(c) => c.is_alpha()).join()
+
+fn top_words(text: Str, n: Int) -> List[(Str, Int)] {
+  text.words()
+    .map(normalize)
+    .filter(fn(w) => w.len() > 0)
+    .tally()
+    .entries()
+    .sort_by(fn(e) => (-e.1, e.0))
+    .take(n)
+}
+
+fn main() {
+  let words = text.words()
+  print("{words.len()} words, {words.map(normalize).unique().len()} distinct")
+  for (word, count) in top_words(text, 5) {
+    let bar = "#" * count
+    print("{word:>6} {count:>2} {bar}")
+  }
+}
+
+test "normalize strips punctuation and case" {
+  assert normalize("Times,") == "times"
+  assert normalize("WAS") == "was"
+}
+
+test "top words are ordered by count, then alphabetically" {
+  assert top_words("b a b c a b", 2) == [("b", 3), ("a", 2)]
+}

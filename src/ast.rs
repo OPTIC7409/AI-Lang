@@ -141,6 +141,8 @@ pub struct VariantDecl {
 pub enum TypeBody {
     Record(Vec<FieldDecl>),
     Enum(Vec<VariantDecl>),
+    /// `type Grid = List[List[Bool]]`
+    Alias(TypeExpr),
 }
 
 #[derive(Debug)]
@@ -170,6 +172,12 @@ pub struct PropDecl {
     pub func: Rc<FnDef>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AliasDef {
+    pub params: Vec<Name>,
+    pub ty: Ty,
+}
+
 /// The names defined at the top level of a module (or the REPL, or the built-ins).
 #[derive(Debug, Default, Clone)]
 pub struct Namespace {
@@ -177,6 +185,8 @@ pub struct Namespace {
     pub values: HashMap<Name, u32>,
     /// Type names to type ids.
     pub types: HashMap<Name, u32>,
+    /// Type aliases.
+    pub aliases: HashMap<Name, AliasDef>,
 }
 
 #[derive(Debug)]
@@ -206,8 +216,8 @@ pub struct Stmt {
 
 #[derive(Debug)]
 pub enum StmtKind {
-    Let { pat: Pattern, ty: Option<TypeExpr>, value: Expr },
-    Var { name: Name, name_span: Span, res: VarRes, ty: Option<TypeExpr>, value: Expr },
+    /// `let pattern = value` or (with `mutable`) `var pattern = value`.
+    Let { pat: Pattern, ty: Option<TypeExpr>, value: Expr, mutable: bool },
     Assign { target: Expr, op: Option<BinOp>, value: Expr },
     Fn { def: Rc<FnDef>, res: VarRes },
     Assert { cond: Expr, msg: Option<Expr> },
@@ -386,6 +396,20 @@ pub enum PatKind {
 }
 
 impl Pattern {
+    /// For exhaustiveness checking: does this pattern match every value of
+    /// the shape it describes? (Tuples and records of catch-alls do.)
+    pub fn covers(&self) -> bool {
+        match &self.kind {
+            PatKind::Wild => true,
+            PatKind::Bind { sub, .. } => sub.as_ref().map_or(true, |s| s.covers()),
+            PatKind::Or(alts) => alts.iter().any(|a| a.covers()),
+            PatKind::Tuple(items) => items.iter().all(|p| p.covers()),
+            PatKind::Record { fields, rest: true } => fields.iter().all(|(_, p)| p.covers()),
+            PatKind::Ctor { ctor, args, .. } if ctor.is_record => args.iter().all(|(_, p)| p.covers()),
+            _ => false,
+        }
+    }
+
     /// True if this pattern matches any value (never fails).
     pub fn is_irrefutable(&self) -> bool {
         match &self.kind {

@@ -18,11 +18,13 @@ pub struct Options {
     pub color: bool,
     /// verify: also check functions that have no contracts.
     pub all: bool,
+    /// Step budget per generated test case.
+    pub budget: u64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { seed: None, cases: 100, filter: None, color: false, all: false }
+        Options { seed: None, cases: 100, filter: None, color: false, all: false, budget: 10_000_000 }
     }
 }
 
@@ -84,11 +86,12 @@ fn requires_hold(it: &mut Interp, c: &Rc<Closure>, args: &[Value]) -> Result<boo
 
 fn run_case(it: &mut Interp, c: &Rc<Closure>, args: Vec<Value>) -> Outcome {
     let depth = it.stack.len();
+    it.ticks = 0;
     let out = match requires_hold(it, c, &args) {
         Ok(false) => Outcome::Discard,
         Err(Ctrl::Error(d)) => Outcome::Fail(d),
         Err(_) => Outcome::Discard,
-        Ok(true) => match it.call_closure(c, args, vec![], c.def.span) {
+        Ok(true) => match it.call_closure(c, args, vec![], Span::default()) {
             Ok(_) => Outcome::Pass,
             Err(Ctrl::Error(d)) => Outcome::Fail(d),
             Err(_) => Outcome::Pass,
@@ -123,7 +126,15 @@ fn param_types(def: &FnDef) -> Result<Vec<Ty>, String> {
     Ok(tys)
 }
 
-fn quickcheck(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64) -> PropOutcome {
+fn quickcheck(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, budget: u64) -> PropOutcome {
+    let saved_budget = it.budget;
+    it.budget = Some(budget);
+    let r = quickcheck_inner(it, def, cases, seed);
+    it.budget = saved_budget;
+    r
+}
+
+fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64) -> PropOutcome {
     let tys = match param_types(def) {
         Ok(t) => t,
         Err(m) => return PropOutcome::CannotGenerate(m),
@@ -231,7 +242,7 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                 let start = Instant::now();
                 let cl = Rc::new(Closure { def: t.func.clone(), captures: vec![] });
                 let depth = it.stack.len();
-                let r = it.call_closure(&cl, vec![], vec![], t.span);
+                let r = it.call_closure(&cl, vec![], vec![], Span::default());
                 it.stack.truncate(depth);
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
                 let timing = if ms > 100.0 { format!(" {}({:.0} ms){}", c.dim, ms, c.reset) } else { String::new() };
@@ -257,7 +268,7 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                 }
                 any = true;
                 let seed = opts.seed.unwrap_or_else(|| name_seed(&p.name));
-                match quickcheck(it, &p.func, opts.cases, seed) {
+                match quickcheck(it, &p.func, opts.cases, seed, opts.budget) {
                     PropOutcome::Passed { cases, discarded } => {
                         sum.passed += 1;
                         sum.cases += cases as u64;
@@ -337,7 +348,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
             continue;
         }
         let seed = opts.seed.unwrap_or_else(|| name_seed(&name));
-        match quickcheck(it, &def, opts.cases, seed) {
+        match quickcheck(it, &def, opts.cases, seed, opts.budget) {
             PropOutcome::Passed { cases, discarded } => {
                 sum.passed += 1;
                 sum.cases += cases as u64;
@@ -367,6 +378,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
                     "E0302" => "postcondition violated",
                     "E0301" => "a precondition of a called function was violated",
                     "E0200" => "type error",
+                    "E0219" => "took too long",
                     _ => "runtime error",
                 };
                 out.push_str(&format!("  {}✗ {:w$}{}  {}{}{}\n", c.red, name, c.reset, c.bold, kind, c.reset, w = width));

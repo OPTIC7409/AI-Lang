@@ -1,0 +1,6 @@
+# expect: E0110
+fn f() {
+  var n = 0
+  let inc = fn() { n += 1 }
+  inc()
+}

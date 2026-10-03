@@ -1,0 +1,3 @@
+# expect: E0200
+fn f(x: Int) => x
+f("no")

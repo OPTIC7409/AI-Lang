@@ -1,0 +1,3 @@
+# expect: E0209
+let n = 1
+if n { print(n) }

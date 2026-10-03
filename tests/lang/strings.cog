@@ -1,0 +1,95 @@
+# String functions, conversions and JSON.
+
+test "splitting and joining" {
+  assert "a,b,,c".split(",") == ["a", "b", "", "c"]
+  assert "  two   words ".split() == ["two", "words"]
+  assert "x\ny\n".lines() == ["x", "y"]
+  assert ["a", "b"].join("-") == "a-b"
+  assert [1, 2, 3].join(", ") == "1, 2, 3"
+  assert "abc".chars() == ["a", "b", "c"]
+}
+
+test "transformations" {
+  assert "  hi  ".trim() == "hi"
+  assert "Hello".upper() == "HELLO"
+  assert "Hello".lower() == "hello"
+  assert "hello".capitalize() == "Hello"
+  assert "banana".replace("an", "AN") == "bANANa"
+  assert "abc".reverse() == "cba"
+  assert "7".pad_left(3, "0") == "007"
+  assert "ab".pad_right(4) == "ab  "
+  assert "ab".repeat(2) == "abab"
+}
+
+test "searching" {
+  assert "hello".starts_with("he")
+  assert "hello".ends_with("lo")
+  assert "hello".contains("ell")
+  assert "hello".index_of("l") == Some(2)
+  assert "hello".index_of("z") == None
+  assert "banana".count("a") == 3
+  assert "héllo".index_of("l") == Some(2)
+}
+
+test "character classes" {
+  assert "123".is_digit()
+  assert not "12a".is_digit()
+  assert not "".is_digit()
+  assert "abc".is_alpha()
+  assert "ABC".is_upper()
+  assert " \t".is_space()
+  assert ord("A") == 65
+  assert chr(97) == "a"
+}
+
+test "conversions" {
+  assert int("42") == 42
+  assert int(3.99) == 3
+  assert int(-3.99) == -3
+  assert float("2.5") == 2.5
+  assert parse_int("x") == None
+  assert parse_int(" 12 ") == Some(12)
+  assert parse_float("1e3") == Some(1000.0)
+  assert catch(fn() => int("abc")).is_err()
+  assert str(12) == "12"
+  assert fixed(2.0 / 3.0, 3) == "0.667"
+  assert round(2.5) == 3
+  assert round(3.14159, 2) == 3.14
+  assert floor(-1.5) == -2
+  assert ceil(1.2) == 2
+}
+
+test "math" {
+  assert abs(-3) == 3
+  assert sqrt(16.0) == 4.0
+  assert catch(fn() => sqrt(-1.0)).is_err()
+  assert gcd(12, 18) == 6
+  assert lcm(4, 6) == 12
+  assert clamp(15, 0, 10) == 10
+  assert min(3, 1, 2) == 1
+  assert max([1, 5, 2]) == Some(5)
+  assert [].max() == None
+  assert sign(-2.5) == -1
+  assert bit_and(12, 10) == 8
+  assert shl(1, 4) == 16
+  assert (2 ** 0.5) * (2 ** 0.5) > 1.99
+}
+
+test "json round trip" {
+  let data = ["name": "Ada", "langs": ["en", "fr"], "age": 36, "pi": 3.5, "ok": true]
+  let text = to_json(data)
+  assert text == "\{\"name\":\"Ada\",\"langs\":[\"en\",\"fr\"],\"age\":36,\"pi\":3.5,\"ok\":true\}"
+  assert parse_json(text) == Ok(data)
+  assert parse_json("[1, 2, null]") == Ok([1, 2, None])
+  assert parse_json("\{bad").is_err()
+  assert to_json({ x: 1, y: [true] }) == "\{\"x\":1,\"y\":[true]\}"
+}
+
+test "random numbers are reproducible with a seed" {
+  seed(7)
+  let a = [random_int(1, 100) for _ in 0..5]
+  seed(7)
+  let b = [random_int(1, 100) for _ in 0..5]
+  assert a == b
+  assert a.all(fn(x) => 1 <= x and x <= 100)
+}

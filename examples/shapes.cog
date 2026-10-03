@@ -1,0 +1,48 @@
+# Algebraic data types, exhaustive pattern matching and overloading.
+
+type Point = { x: Float, y: Float }
+
+type Shape =
+  | Circle(center: Point, radius: Float)
+  | Rect(corner: Point, width: Float, height: Float)
+  | Triangle(a: Point, b: Point, c: Point)
+
+fn area(s: Shape) -> Float
+  ensures result >= 0.0
+=> match s {
+  Circle(_, r) => pi * r * r
+  Rect(_, w, h) => abs(w * h)
+  Triangle(a, b, c) => abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) / 2.0
+}
+
+fn perimeter(s: Shape) -> Float => match s {
+  Circle(_, r) => 2.0 * pi * r
+  Rect(_, w, h) => 2.0 * (abs(w) + abs(h))
+  Triangle(a, b, c) => dist(a, b) + dist(b, c) + dist(c, a)
+}
+
+fn dist(p: Point, q: Point) -> Float => hypot(p.x - q.x, p.y - q.y)
+
+# Overloading: `describe` has one definition per type.
+fn describe(p: Point) -> Str => "({p.x}, {p.y})"
+fn describe(s: Shape) -> Str => match s {
+  Circle(c, r) => "circle at {c.describe()} with radius {r}"
+  Rect(p, w, h) => "{w}x{h} rectangle at {p.describe()}"
+  Triangle(..) => "triangle"
+}
+
+fn main() {
+  let o = Point(0.0, 0.0)
+  let shapes = [
+    Circle(o, 1.0),
+    Rect(Point(1.0, 1.0), 3, 4),
+    Triangle(o, Point(4.0, 0.0), Point(0.0, 3.0)),
+  ]
+  for s in shapes {
+    print("{s.describe():<36} area {s.area():>7.3}  perimeter {s.perimeter():>7.3}")
+  }
+  let biggest = shapes.max_by(area).unwrap()
+  print("largest: {biggest.describe()}")
+  let total = shapes.map(area).sum()
+  print("total area: {total:.2}")
+}

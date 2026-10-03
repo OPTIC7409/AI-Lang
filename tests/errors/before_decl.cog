@@ -1,0 +1,3 @@
+# expect: E0103
+print(y)
+let y = 1

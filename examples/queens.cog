@@ -1,0 +1,40 @@
+# The N-queens puzzle, by backtracking.
+
+fn safe(queens: List[Int], col: Int) -> Bool {
+  let row = queens.len()
+  for (r, c) in queens.enumerate() {
+    if c == col or abs(c - col) == row - r {
+      return false
+    }
+  }
+  true
+}
+
+fn solve(n: Int, queens: List[Int]) -> List[List[Int]] {
+  if queens.len() == n {
+    return [queens]
+  }
+  var out = []
+  for col in 0..n {
+    if safe(queens, col) {
+      out.extend!(solve(n, queens.push(col)))
+    }
+  }
+  out
+}
+
+fn show(n: Int, queens: List[Int]) -> Str =>
+  queens.map(fn(c) => ("." * c) + "Q" + ("." * (n - c - 1))).join("\n")
+
+fn main() {
+  for n in 1..=8 {
+    print("{n} queens: {solve(n, []).len()} solutions")
+  }
+  print()
+  print(show(8, solve(8, [])[0]))
+}
+
+test "known solution counts" {
+  assert solve(4, []).len() == 2
+  assert solve(6, []).len() == 4
+}

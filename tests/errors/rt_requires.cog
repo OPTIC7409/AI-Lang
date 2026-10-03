@@ -1,0 +1,5 @@
+# expect: E0301
+fn f(x: Int) -> Int
+  requires x > 0
+=> x
+f(-1)

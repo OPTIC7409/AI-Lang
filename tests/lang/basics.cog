@@ -1,0 +1,132 @@
+# Core values and operators.
+
+test "integer arithmetic" {
+  assert 1 + 2 * 3 == 7
+  assert (1 + 2) * 3 == 9
+  assert 7 // 2 == 3
+  assert -7 // 2 == -4
+  assert 7 % 3 == 1
+  assert -7 % 3 == 2
+  assert 2 ** 10 == 1024
+  assert -2 ** 2 == -4
+  assert 2 ** 3 ** 2 == 512
+}
+
+test "division always produces a Float" {
+  assert 7 / 2 == 3.5
+  assert 6 / 3 == 2.0
+  assert type_of(6 / 3) == "Float"
+}
+
+test "mixed Int and Float arithmetic" {
+  assert 1 + 0.5 == 1.5
+  assert 2 * 1.5 == 3.0
+  assert 1 == 1.0
+  assert 3 > 2.5
+}
+
+test "integer overflow is an error, not a wraparound" {
+  assert catch(fn() => max_int + 1).is_err()
+  assert catch(fn() => min_int - 1).is_err()
+  assert catch(fn() => max_int * 2).is_err()
+  assert catch(fn() => 2 ** 64).is_err()
+}
+
+test "division by zero is an error" {
+  assert catch(fn() => 1 // 0).is_err()
+  assert catch(fn() => 1 / 0).is_err()
+  assert catch(fn() => 1.0 / 0.0).is_err()
+  assert catch(fn() => 5 % 0).is_err()
+}
+
+test "number literals" {
+  assert 1_000_000 == 1000000
+  assert 0xff == 255
+  assert 0b1010 == 10
+  assert 0o17 == 15
+  assert 1e3 == 1000.0
+  assert 2.5e-1 == 0.25
+}
+
+test "booleans are strict" {
+  assert true and not false
+  assert (false or true) == true
+  assert catch(fn() => if 1 { 0 } else { 1 }).is_err()
+  assert catch(fn() => not 0).is_err()
+}
+
+test "short-circuit evaluation" {
+  let xs: List[Int] = []
+  assert xs.len() == 0 or xs[0] == 1
+  assert not (xs.len() > 0 and xs[0] == 1)
+}
+
+test "comparisons" {
+  assert "apple" < "banana"
+  assert [1, 2] < [1, 3]
+  assert [1, 2] < [1, 2, 0]
+  assert (1, "b") > (1, "a")
+  assert catch(fn() => 1 < "a").is_err()
+}
+
+test "membership with in" {
+  assert 2 in [1, 2, 3]
+  assert 4 not in [1, 2, 3]
+  assert "ell" in "hello"
+  assert "k" in ["k": 1]
+  assert 5 in 0..10
+  assert 10 not in 0..10
+  assert 10 in 0..=10
+}
+
+test "strings and interpolation" {
+  let name = "Ada"
+  let n = 3
+  assert "hi {name}" == "hi Ada"
+  assert "{n} + {n} = {n + n}" == "3 + 3 = 6"
+  assert "braces: \{\}".len() == 10
+  assert "nested {"inner {name}"}" == "nested inner Ada"
+  assert "a" + "b" == "ab"
+  assert "ab" * 3 == "ababab"
+  assert "héllo".len() == 5
+  assert "hello"[1] == "e"
+  assert "hello"[-1] == "o"
+  assert "hello"[1..3] == "el"
+}
+
+test "format specs" {
+  assert "{3.14159:.2}" == "3.14"
+  assert "{42:>5}" == "   42"
+  assert "{"ab":<4}|" == "ab  |"
+  assert "{"ab":^6}" == "  ab  "
+  assert "{7:03}" == "007"
+  assert "{-7:04}" == "-007"
+  assert "{255:x}" == "ff"
+  assert "{5:b}" == "101"
+  assert "{0.256:.1%}" == "25.6%"
+  assert "{5:+}" == "+5"
+  assert "{"x":*>3}" == "**x"
+}
+
+test "multi-line strings" {
+  let s = """
+    line one
+      indented
+    line three
+    """
+  assert s == "line one\n  indented\nline three"
+}
+
+test "printing values" {
+  assert str(1.0) == "1.0"
+  assert str(0.1 + 0.2) == "0.30000000000000004"
+  assert str([1, "a", true]) == "[1, \"a\", true]"
+  assert str(["k": 1]) == "[\"k\": 1]"
+  assert str((1,)) == "(1,)"
+  assert str(()) == "()"
+  assert str({ x: 1, y: 2 }) == "\{ x: 1, y: 2 \}"
+  assert str(Some(1)) == "Some(1)"
+  assert str(None) == "None"
+  assert repr("a\nb") == "\"a\\nb\""
+  assert str(1e20) == "1e20"
+}

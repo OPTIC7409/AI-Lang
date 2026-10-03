@@ -1,0 +1,2 @@
+# expect: E0115
+let x = Some(1)?

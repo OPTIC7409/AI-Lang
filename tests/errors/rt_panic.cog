@@ -1,0 +1,2 @@
+# expect: E0217
+panic("boom")

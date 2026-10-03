@@ -1,0 +1,49 @@
+# A generic binary search tree, with properties that check its invariants.
+
+type Tree[T] =
+  | Leaf
+  | Node(left: Tree[T], key: T, right: Tree[T])
+
+fn insert(t: Tree[Int], k: Int) -> Tree[Int] => match t {
+  Leaf => Node(Leaf, k, Leaf)
+  Node(l, x, r) => if k < x {
+    Node(l.insert(k), x, r)
+  } else if k > x {
+    Node(l, x, r.insert(k))
+  } else {
+    t
+  }
+}
+
+fn contains(t: Tree[Int], k: Int) -> Bool => match t {
+  Leaf => false
+  Node(l, x, r) => if k == x { true } else if k < x { l.contains(k) } else { r.contains(k) }
+}
+
+fn to_list(t: Tree[Int]) -> List[Int] => match t {
+  Leaf => []
+  Node(l, x, r) => [..l.to_list(), x, ..r.to_list()]
+}
+
+fn height(t: Tree[Int]) -> Int => match t {
+  Leaf => 0
+  Node(l, _, r) => 1 + max(l.height(), r.height())
+}
+
+fn from_list(xs: List[Int]) -> Tree[Int] => xs.fold(Leaf, insert)
+
+fn main() {
+  let t = from_list([50, 30, 70, 20, 40, 60, 80, 30])
+  print("in order: {t.to_list()}")
+  print("height: {t.height()}")
+  print("contains 60? {t.contains(60)}, contains 65? {t.contains(65)}")
+}
+
+property "in-order traversal is sorted and duplicate-free" (xs: List[Int]) {
+  assert from_list(xs).to_list() == xs.unique().sort()
+}
+
+property "every inserted key is found" (xs: List[Int], k: Int) {
+  let t = from_list(xs)
+  assert t.contains(k) == (k in xs)
+}

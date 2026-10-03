@@ -354,6 +354,10 @@ impl<'a> Lexer<'a> {
                 self.number()?;
                 continue;
             }
+            if c == b'r' && self.peek_at(1) == b'"' {
+                self.raw_string()?;
+                continue;
+            }
             if is_ident_start(c) {
                 self.ident();
                 continue;
@@ -736,6 +740,40 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Raw strings: `r"..."` or `r"""..."""`. No escapes, no interpolation;
+    /// ideal for JSON, regular expressions and Windows paths. Triple-quoted
+    /// raw strings are dedented like ordinary triple-quoted strings.
+    fn raw_string(&mut self) -> Result<(), Diagnostic> {
+        let start = self.pos;
+        self.pos += 1;
+        if self.b[self.pos..self.end].starts_with(b"\"\"\"") {
+            let body_start = self.pos + 3;
+            let Some(rel) = self.src[body_start..self.end].find("\"\"\"") else {
+                return Err(self.err("E0002", "unterminated raw string", start, start + 4).label("raw string starts here"));
+            };
+            let raw = &self.src[body_start..body_start + rel];
+            self.pos = body_start + rel + 3;
+            let text = dedent(raw);
+            self.push(Tok::Str(vec![StrPart::Lit(text)]), start);
+            return Ok(());
+        }
+        let body_start = self.pos + 1;
+        let mut p = body_start;
+        while p < self.end && self.b[p] != b'"' {
+            if self.b[p] == b'\n' {
+                return Err(self.err("E0002", "unterminated raw string", start, p).help("raw strings cannot span lines unless they use triple quotes: r\"\"\"...\"\"\""));
+            }
+            p += 1;
+        }
+        if p >= self.end {
+            return Err(self.err("E0002", "unterminated raw string", start, p));
+        }
+        let text = self.src[body_start..p].to_string();
+        self.pos = p + 1;
+        self.push(Tok::Str(vec![StrPart::Lit(text)]), start);
+        Ok(())
+    }
+
     /// Triple-quoted strings may span lines. A newline directly after the
     /// opening quotes is dropped, as is the final line if it holds only
     /// whitespace before the closing quotes. The common indentation of all
@@ -828,6 +866,26 @@ impl<'a> Lexer<'a> {
         self.push(Tok::Str(parts), start);
         Ok(())
     }
+}
+
+/// Remove a leading blank line, a trailing whitespace-only line, and the
+/// common indentation of the remaining non-blank lines.
+pub fn dedent(raw: &str) -> String {
+    let raw = raw.replace("\r\n", "\n");
+    let mut lines: Vec<&str> = raw.split('\n').collect();
+    if lines.len() > 1 && lines[0].trim().is_empty() {
+        lines.remove(0);
+    }
+    if lines.len() > 1 && lines.last().map_or(false, |l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start_matches([' ', '\t']).len())
+        .min()
+        .unwrap_or(0);
+    lines.iter().map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() }).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]

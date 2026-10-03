@@ -1,0 +1,6 @@
+# expect: E0215
+type A = { a: Int }
+type B = { b: Int }
+fn g(x: A) => 1
+fn g(x: B) => 2
+g(3)

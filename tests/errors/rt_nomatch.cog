@@ -1,0 +1,4 @@
+# expect: E0208
+let r = match 5 {
+  1 => "one"
+}

@@ -56,6 +56,11 @@ pub struct Ctx {
     pub known_fields: HashSet<Name>,
     /// Signatures of user functions, per global slot (several when overloaded).
     pub sigs: HashMap<u32, Vec<FnSig>>,
+    /// For types declared in an imported module: that module. Method calls
+    /// on values of these types also look for functions in the module.
+    pub type_home: HashMap<u32, Rc<Module>>,
+    /// Names of all functions defined by imported modules.
+    pub module_fns: HashSet<Name>,
 }
 
 impl Ctx {
@@ -69,6 +74,8 @@ impl Ctx {
             loading: Vec::new(),
             known_fields: HashSet::new(),
             sigs: HashMap::new(),
+            type_home: HashMap::new(),
+            module_fns: HashSet::new(),
         };
         let types = ctx.types.clone();
         for td in &types {

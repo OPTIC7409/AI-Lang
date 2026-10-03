@@ -51,17 +51,19 @@ pub fn needs_more(src: &str) -> bool {
 
 pub fn run(it: &mut Interp, color: bool) {
     let c = Colors::new(color);
-    println!("{}Cogito {}{} — a programming language designed by an AI", c.bold, crate::VERSION, c.reset);
-    println!("{}Type an expression or statement. :help for help, :quit to exit.{}", c.dim, c.reset);
     let stdin = std::io::stdin();
     let interactive = stdin.is_terminal();
+    if interactive {
+        println!("{}Cogito {}{} — a programming language designed by an AI", c.bold, crate::VERSION, c.reset);
+        println!("{}Type an expression or statement. :help for help, :quit to exit.{}", c.dim, c.reset);
+    }
     let mut ns = Namespace::default();
     let mut input_no = 0;
     loop {
         let mut src = String::new();
         let mut first = true;
         loop {
-            if interactive || first {
+            if interactive {
                 print!("{}", if first { ">>> " } else { "... " });
                 let _ = std::io::stdout().flush();
             }
@@ -69,7 +71,9 @@ pub fn run(it: &mut Interp, color: bool) {
             match stdin.lock().read_line(&mut line) {
                 Ok(0) | Err(_) => {
                     if src.trim().is_empty() {
-                        println!();
+                        if interactive {
+                            println!();
+                        }
                         return;
                     }
                     break;

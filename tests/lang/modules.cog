@@ -1,0 +1,27 @@
+import "lib/geometry.cog"
+import "lib/geometry.cog" as geo
+
+fn norm(v: geometry.Vec2) -> Float => geometry.length(v)
+
+test "qualified access to module members" {
+  let v = geometry.Vec2(3.0, 4.0)
+  assert geometry.length(v) == 5.0
+  assert norm(v) == 5.0
+  assert v.length() == 5.0
+  assert geometry.add(v, geometry.origin) == v
+}
+
+test "aliases refer to the same module" {
+  assert geo.origin == geometry.origin
+}
+
+test "mutating functions from modules" {
+  var v = geo.Vec2(1.0, 2.0)
+  geo.scale!(v, 2.0)
+  assert v == geo.Vec2(2.0, 4.0)
+}
+
+test "modules are values" {
+  let m = geo
+  assert m.length(m.Vec2(0.0, 2.0)) == 2.0
+}

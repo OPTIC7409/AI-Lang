@@ -1,0 +1,7 @@
+1 + 2 * 3      = 7.0
+(1 + 2) * 3    = 9.0
+2 ^ 3 ^ 2      = 512.0
+-4 + 10 / 4    = -1.5
+1 / (2 - 2)    ! division by zero
+3 + * 4        ! unexpected token
+7 $ 2          ! unexpected character `$` at position 2
