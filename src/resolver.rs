@@ -44,6 +44,7 @@ struct Local {
     used: bool,
     span: Span,
     kind: LocalKind,
+    ty: Option<Ty>,
 }
 
 struct Scope {
@@ -67,6 +68,8 @@ struct FnCtx {
     self_name: Option<Name>,
     parent_visible: bool,
     loop_depth: u32,
+    /// The declared return type, if any (used to check `?`).
+    ret: Option<Ty>,
 }
 
 impl FnCtx {
@@ -80,6 +83,7 @@ impl FnCtx {
             self_name,
             parent_visible,
             loop_depth: 0,
+            ret: None,
         }
     }
 }
@@ -90,6 +94,7 @@ struct Found {
     span: Span,
     captured: bool,
     is_fn: bool,
+    ty: Option<Ty>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -203,7 +208,7 @@ impl<'a> Resolver<'a> {
         let slot = f.next_slot;
         f.next_slot += 1;
         f.max_slot = f.max_slot.max(f.next_slot);
-        f.scopes.last_mut().unwrap().locals.push(Local { name, slot, mutable, used: false, span, kind });
+        f.scopes.last_mut().unwrap().locals.push(Local { name, slot, mutable, used: false, span, kind, ty: None });
         slot
     }
 
@@ -224,16 +229,17 @@ impl<'a> Resolver<'a> {
                             span: local.span,
                             captured: false,
                             is_fn: local.kind == LocalKind::Fn,
+                            ty: local.ty.clone(),
                         });
                     }
                 }
             }
             if f.self_name.as_deref() == Some(name) {
-                return Some(Found { res: VarRes::SelfFn, mutable: false, span: Span::default(), captured: false, is_fn: true });
+                return Some(Found { res: VarRes::SelfFn, mutable: false, span: Span::default(), captured: false, is_fn: true, ty: None });
             }
             if let Some(i) = f.captures.iter().position(|c| &*c.name == name) {
                 let c = &f.captures[i];
-                return Some(Found { res: VarRes::Capture(i as u32), mutable: c.mutable, span: c.span, captured: true, is_fn: false });
+                return Some(Found { res: VarRes::Capture(i as u32), mutable: c.mutable, span: c.span, captured: true, is_fn: false, ty: None });
             }
             if !f.parent_visible || level == 0 {
                 return None;
@@ -254,7 +260,80 @@ impl<'a> Resolver<'a> {
             span: found.span,
             captured: true,
             is_fn: found.is_fn,
+            ty: None,
         })
+    }
+
+    /// Which of Option/Result a call returns, when that is known statically.
+    fn static_result_kind(&self, e: &Expr) -> Option<u32> {
+        let slot = match &e.kind {
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Var(Var { res: VarRes::Global(s), .. }) => *s,
+                _ => return None,
+            },
+            ExprKind::MethodCall { method: Var { res: VarRes::Global(s), .. }, .. } => *s,
+            _ => return None,
+        };
+        let kind_of = |t: &Ty| match t {
+            Ty::Named { id, .. } if *id == crate::types::OPTION_ID || *id == crate::types::RESULT_ID => Some(*id),
+            _ => None,
+        };
+        match &self.ctx.globals[slot as usize].kind {
+            GlobalKind::Builtin(i) => {
+                let sig = crate::builtins::BUILTINS[*i as usize].doc.lines().next().unwrap_or("");
+                match (sig.contains("-> Option"), sig.contains("-> Result")) {
+                    (true, false) => Some(crate::types::OPTION_ID),
+                    (false, true) => Some(crate::types::RESULT_ID),
+                    _ => None,
+                }
+            }
+            GlobalKind::Fn => {
+                let sigs = self.ctx.sigs.get(&slot)?;
+                let kinds: Vec<Option<u32>> = sigs.iter().map(|s| s.ret.as_ref().and_then(kind_of)).collect();
+                if kinds.iter().all(|k| *k == kinds[0]) {
+                    kinds[0]
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// `?` on an Option inside a function returning a Result (or vice versa)
+    /// cannot work; report it before the program runs.
+    fn check_try_kinds(&mut self, inner: &Expr, span: Span) {
+        let fn_kind = match &self.cur().ret {
+            Some(Ty::Named { id, .. }) if *id == crate::types::OPTION_ID || *id == crate::types::RESULT_ID => *id,
+            _ => return,
+        };
+        let Some(inner_kind) = self.static_result_kind(inner) else { return };
+        if inner_kind == fn_kind {
+            return;
+        }
+        let d = if inner_kind == crate::types::OPTION_ID {
+            Diagnostic::error("E0117", "`?` on an Option inside a function that returns a Result")
+                .at(span)
+                .label("this would return `None`, which is not a Result")
+                .help("convert the Option first: `.ok_or(\"what went wrong\")?`")
+        } else {
+            Diagnostic::error("E0117", "`?` on a Result inside a function that returns an Option")
+                .at(span)
+                .label("this would return `Err(..)`, which is not an Option")
+                .help("convert the Result first: `.ok()?`")
+        };
+        self.error(d);
+    }
+
+    /// The global slot of a function (or constructor) with this name, if any.
+    fn function_slot(&self, name: &str) -> Option<u32> {
+        let is_fn = |slot: u32| matches!(self.ctx.globals[slot as usize].kind, GlobalKind::Fn | GlobalKind::Builtin(_) | GlobalKind::Ctor(_));
+        if let Some(&s) = self.ns.values.get(name) {
+            if is_fn(s) {
+                return Some(s);
+            }
+        }
+        self.ctx.builtins.values.get(name).copied().filter(|s| is_fn(*s))
     }
 
     fn global_slot(&self, name: &str) -> Option<u32> {
@@ -274,6 +353,7 @@ impl<'a> Resolver<'a> {
             span: info.span,
             captured: false,
             is_fn: matches!(info.kind, GlobalKind::Fn | GlobalKind::Builtin(_)),
+            ty: info.ty.clone(),
         })
     }
 
@@ -386,6 +466,13 @@ impl<'a> Resolver<'a> {
     // ------------------------------------------------------------ program
 
     fn program(&mut self, prog: &mut Program) {
+        // Pass 0: load imported modules first; they add their own types to the
+        // registry, so this program's type ids must be assigned afterwards.
+        for item in prog.items.iter_mut() {
+            if let Item::Import(imp) = item {
+                self.import(imp);
+            }
+        }
         // Pass 1: register every top-level name, so that functions can refer
         // to each other (and to types) regardless of order.
         let first_new_type = self.ctx.types.len() as u32;
@@ -412,6 +499,7 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
+        let mut type_spans: std::collections::HashMap<Name, Span> = std::collections::HashMap::new();
         for item in prog.items.iter_mut() {
             match item {
                 Item::Type(td) if matches!(td.body, TypeBody::Alias(_)) => {
@@ -431,7 +519,10 @@ impl<'a> Resolver<'a> {
                     td.id = id;
                     if let Some(&old) = self.ns.types.get(&td.name) {
                         if !self.repl {
-                            let prev = self.ctx.types.get(old as usize).map(|t| t.span).unwrap_or_default();
+                            let prev = type_spans
+                                .get(&td.name)
+                                .copied()
+                                .unwrap_or_else(|| self.ctx.types.get(old as usize).map(|t| t.span).unwrap_or_default());
                             let d = Diagnostic::error("E0102", format!("type `{}` is defined more than once", td.name))
                                 .at(td.name_span)
                                 .note(format!("first defined at {}", self.line_of(prev)));
@@ -444,6 +535,7 @@ impl<'a> Resolver<'a> {
                     }
                     self.ns.types.insert(td.name.clone(), id);
                     self.ns.aliases.remove(&td.name);
+                    type_spans.entry(td.name.clone()).or_insert(td.name_span);
                     match &mut td.body {
                         TypeBody::Record(_) => {
                             td.slot = self.define_global(
@@ -485,7 +577,6 @@ impl<'a> Resolver<'a> {
                         }
                     }
                 }
-                Item::Import(imp) => self.import(imp),
                 Item::Stmt(Stmt { kind: StmtKind::Let { pat, mutable, .. }, .. }) => {
                     let mut names = vec![];
                     Self::bound_names(pat, &mut names);
@@ -540,6 +631,7 @@ impl<'a> Resolver<'a> {
                 self.generics.clear();
                 let sig = FnSig {
                     params: def.params.iter().map(|p| (p.name.clone(), p.default.is_some(), p.ty.as_ref().map(|t| t.ty.clone()))).collect(),
+                    ret: def.ret.as_ref().map(|t| t.ty.clone()),
                     span: def.name_span,
                 };
                 let slot = def.global_slot.unwrap();
@@ -884,6 +976,7 @@ impl<'a> Resolver<'a> {
         let saved_generics = self.generics.clone();
         self.generics.extend(def.generics.iter().cloned());
         self.fns.push(FnCtx::new(kind, parent_visible, self_name));
+        self.cur().ret = def.ret.as_ref().map(|t| t.ty.clone());
         let mut seen: Vec<Name> = Vec::new();
         let mutating = def.mutating;
         if mutating && def.params.is_empty() {
@@ -910,6 +1003,21 @@ impl<'a> Resolver<'a> {
                 self.expr(d);
             }
             p.slot = self.declare_local(p.name.clone(), p.span, mutating && i == 0, LocalKind::Param);
+            if let Some(pat) = &mut p.pat {
+                if mutating && i == 0 {
+                    let d = Diagnostic::error("E0111", "the first parameter of a mutating function must be a plain name").at(pat.span);
+                    self.diags.push(d);
+                }
+                self.pattern(pat, BindMode::Local);
+            }
+            if mutating && i == 0 {
+                if let Some(t) = &p.ty {
+                    if !t.ty.is_any() {
+                        let ty = t.ty.clone();
+                        self.set_declared_type(VarRes::Local(p.slot), ty);
+                    }
+                }
+            }
         }
         if let Some(t) = &mut def.ret {
             if !sig_done {
@@ -918,6 +1026,17 @@ impl<'a> Resolver<'a> {
         }
         for r in def.requires.iter_mut() {
             self.expr(r);
+        }
+        // `old(expr)` in postconditions: evaluated on entry, into dedicated slots.
+        let mut olds: Vec<Expr> = Vec::new();
+        for en in def.ensures.iter_mut() {
+            extract_olds(en, &mut olds);
+        }
+        def.olds.clear();
+        for (i, mut e) in olds.into_iter().enumerate() {
+            self.expr(&mut e);
+            let slot = self.declare_local(Rc::from(format!("old#{}", i).as_str()), e.span, false, LocalKind::Param);
+            def.olds.push((e, slot));
         }
         self.expr(&mut def.body);
         if !def.ensures.is_empty() {
@@ -951,10 +1070,16 @@ impl<'a> Resolver<'a> {
                     BindMode::Local
                 };
                 self.pattern(pat, mode);
+                // Remember the annotation, so that later writes are checked too.
+                if let (Some(t), PatKind::Bind { res, sub: None, .. }) = (ty.as_ref(), &pat.kind) {
+                    if !t.ty.is_any() {
+                        self.set_declared_type(*res, t.ty.clone());
+                    }
+                }
             }
-            StmtKind::Assign { target, op: _, value } => {
+            StmtKind::Assign { target, op: _, value, ty } => {
                 self.expr(value);
-                self.place(target, "E0101");
+                *ty = self.place(target, "E0101");
             }
             StmtKind::Fn { def, res } => {
                 let def = Rc::get_mut(def).unwrap();
@@ -978,14 +1103,14 @@ impl<'a> Resolver<'a> {
 
     /// Resolve an assignment target (or the receiver of a mutating call) and
     /// check that its root is mutable.
-    fn place(&mut self, e: &mut Expr, code: &'static str) {
+    fn place(&mut self, e: &mut Expr, code: &'static str) -> Option<Ty> {
         let span = e.span;
         match &mut e.kind {
             ExprKind::Var(v) => {
                 let name = v.name.clone();
-                let Some(found) = self.resolve_var(v, span) else { return };
+                let found = self.resolve_var(v, span)?;
                 if found.mutable && !found.captured {
-                    return;
+                    return found.ty;
                 }
                 let mut d;
                 if found.captured {
@@ -1019,11 +1144,12 @@ impl<'a> Resolver<'a> {
                     d.message = format!("cannot call a mutating function on `{}`, because it is not a `var`", name);
                 }
                 self.error(d);
+                None
             }
             ExprKind::Field { target, .. } => self.place(target, code),
             ExprKind::Index { target, index } => {
                 self.expr(index);
-                self.place(target, code);
+                self.place(target, code)
             }
             _ => {
                 self.expr(e);
@@ -1032,7 +1158,24 @@ impl<'a> Resolver<'a> {
                     .label("this is a temporary value")
                     .help("store the value in a `var` first, or use the non-mutating version (without `!`), which returns a new value");
                 self.error(d);
+                None
             }
+        }
+    }
+
+    fn set_declared_type(&mut self, res: VarRes, ty: Ty) {
+        match res {
+            VarRes::Local(slot) => {
+                let f = self.cur();
+                for scope in f.scopes.iter_mut().rev() {
+                    if let Some(l) = scope.locals.iter_mut().rev().find(|l| l.slot == slot) {
+                        l.ty = Some(ty);
+                        return;
+                    }
+                }
+            }
+            VarRes::Global(slot) => self.ctx.globals[slot as usize].ty = Some(ty),
+            _ => {}
         }
     }
 
@@ -1229,7 +1372,7 @@ impl<'a> Resolver<'a> {
                 }
                 None => {}
             },
-            ExprKind::MethodCall { receiver, method, method_span, args, mutating } => match self.module_member(receiver, &method.name) {
+            ExprKind::MethodCall { receiver, method, method_span, args, mutating, .. } => match self.module_member(receiver, &method.name) {
                 Some(Ok(slot)) => {
                     let callee = Expr { kind: ExprKind::Var(Var { name: method.name.clone(), res: VarRes::Global(slot) }), span: *method_span };
                     let args = std::mem::take(args);
@@ -1247,6 +1390,7 @@ impl<'a> Resolver<'a> {
                             method_span: *method_span,
                             args,
                             mutating: true,
+                            root_ty: None,
                         });
                     } else {
                         replacement = Some(ExprKind::Call { callee: Box::new(callee), args });
@@ -1273,9 +1417,9 @@ impl<'a> Resolver<'a> {
                     }
                     return;
                 }
-                ExprKind::MethodCall { receiver, args, .. } => {
+                ExprKind::MethodCall { receiver, args, root_ty, .. } => {
                     self.args(args);
-                    self.place(receiver, "E0111");
+                    *root_ty = self.place(receiver, "E0111");
                     return;
                 }
                 _ => {}
@@ -1348,10 +1492,10 @@ impl<'a> Resolver<'a> {
                     self.check_call(slot, 0, args, span);
                 }
             }
-            ExprKind::MethodCall { receiver, method, method_span, args, mutating } => {
+            ExprKind::MethodCall { receiver, method, method_span, args, mutating, root_ty } => {
                 self.args(args);
                 if *mutating {
-                    self.place(receiver, "E0111");
+                    *root_ty = self.place(receiver, "E0111");
                     match self.lookup(&method.name) {
                         Some(f) => {
                             method.res = f.res;
@@ -1360,15 +1504,32 @@ impl<'a> Resolver<'a> {
                             }
                         }
                         None => {
-                            let n = method.name.clone();
-                            self.undefined(&n, *method_span, "function");
+                            // It may be defined in the module of the receiver's type.
+                            if !self.ctx.module_fns.contains(&method.name) {
+                                let n = method.name.clone();
+                                self.undefined(&n, *method_span, "function");
+                            }
                         }
                     }
                 } else {
                     self.expr(receiver);
                     match self.lookup(&method.name) {
                         Some(f) => {
-                            method.res = f.res;
+                            // A variable named like a function does not hide the
+                            // function from method-call syntax (`lines.len()` with a
+                            // variable called `len` still calls the built-in).
+                            let shadowing_var = match f.res {
+                                VarRes::Local(_) | VarRes::Capture(_) => !f.is_fn,
+                                VarRes::Global(slot) => {
+                                    matches!(self.ctx.globals[slot as usize].kind, GlobalKind::Let | GlobalKind::Var | GlobalKind::Const)
+                                }
+                                _ => false,
+                            };
+                            method.res = match (shadowing_var, self.function_slot(&method.name)) {
+                                (true, Some(g)) => VarRes::Global(g),
+                                _ => f.res,
+                            };
+                            let f = Found { res: method.res, ..f };
                             if let VarRes::Global(slot) = f.res {
                                 if !self.ctx.known_fields.contains(&method.name) {
                                     self.check_call(slot, 1, args, span);
@@ -1397,6 +1558,8 @@ impl<'a> Resolver<'a> {
                         .at(span)
                         .help("at the top level, use `match` or `.unwrap()` to get the value out");
                     self.error(d);
+                } else {
+                    self.check_try_kinds(inner, span);
                 }
             }
             ExprKind::If { cond, then, els } => {
@@ -1408,6 +1571,7 @@ impl<'a> Resolver<'a> {
             }
             ExprKind::Match { scrutinee, arms } => {
                 self.expr(scrutinee);
+                let errors_before = self.diags.iter().filter(|d| d.is_error()).count();
                 for arm in arms.iter_mut() {
                     self.push_scope();
                     self.pattern(&mut arm.pat, BindMode::Local);
@@ -1418,7 +1582,9 @@ impl<'a> Resolver<'a> {
                     self.pop_scope();
                 }
                 let head = Span { end: scrutinee.span.end, ..span };
-                self.check_exhaustive(arms, head);
+                if self.diags.iter().filter(|d| d.is_error()).count() == errors_before {
+                    self.check_exhaustive(arms, head);
+                }
             }
             ExprKind::Block(stmts) => self.block(stmts),
             ExprKind::Lambda(def) => {
@@ -1570,7 +1736,14 @@ impl<'a> Resolver<'a> {
                 self.or_bindings = outer;
             }
             PatKind::Ctor { name, args, rest, ctor, field_idx } => {
-                let Some(slot) = self.global_slot(name) else {
+                let slot = match name.split_once('.') {
+                    Some((module, member)) => self.ns.values.get(module).and_then(|m| match &self.ctx.globals[*m as usize].kind {
+                        GlobalKind::Module(m) => m.ns.values.get(member).copied(),
+                        _ => None,
+                    }),
+                    None => self.global_slot(name),
+                };
+                let Some(slot) = slot else {
                     let n = name.clone();
                     self.undefined(&n, span, "constructor");
                     for (_, a) in args.iter_mut() {
@@ -1662,72 +1835,201 @@ impl<'a> Resolver<'a> {
     }
 
     fn check_exhaustive(&mut self, arms: &[Arm], span: Span) {
-        fn flatten<'p>(p: &'p Pattern, out: &mut Vec<&'p Pattern>) {
-            match &p.kind {
-                PatKind::Or(alts) => alts.iter().for_each(|a| flatten(a, out)),
-                PatKind::Bind { sub: Some(s), .. } => flatten(s, out),
-                _ => out.push(p),
-            }
-        }
-        let mut enum_id: Option<u32> = None;
-        let mut covered: HashSet<u32> = HashSet::new();
-        let mut bools: HashSet<bool> = HashSet::new();
-        let mut kind_bool = false;
-        for arm in arms {
-            if arm.guard.is_none() && arm.pat.covers() {
-                return;
-            }
-            let mut pats = vec![];
-            flatten(&arm.pat, &mut pats);
-            for p in pats {
-                match &p.kind {
-                    PatKind::Ctor { ctor, args, .. } if !ctor.is_record => {
-                        if enum_id.is_some_and(|id| id != ctor.type_id) {
-                            return;
-                        }
-                        enum_id = Some(ctor.type_id);
-                        if arm.guard.is_none() && args.iter().all(|(_, a)| a.covers()) {
-                            covered.insert(ctor.tag);
-                        }
-                    }
-                    PatKind::Lit(Lit::Bool(b)) => {
-                        kind_bool = true;
-                        if arm.guard.is_none() {
-                            bools.insert(*b);
-                        }
-                    }
-                    _ => return,
-                }
-            }
-        }
-        if kind_bool && enum_id.is_none() {
-            if bools.len() < 2 {
-                let missing = if bools.contains(&true) { "false" } else { "true" };
-                let d = Diagnostic::error("E0109", format!("non-exhaustive match: `{}` is not handled", missing))
-                    .at(span)
-                    .help(format!("add an arm `{} => ...`", missing));
-                self.error(d);
-            }
+        // Only matches over constructors (enum variants, Bools, tuples) are
+        // checked statically; other matches are checked at runtime.
+        let analyzable = arms.iter().any(|a| {
+            let mut ps = vec![];
+            flatten_alts(&a.pat, &mut ps);
+            ps.iter().any(|p| matches!(p.kind, PatKind::Ctor { .. } | PatKind::Lit(Lit::Bool(_)) | PatKind::Tuple(_)))
+        });
+        if !analyzable {
             return;
         }
-        let Some(id) = enum_id else { return };
-        let td = self.ctx.type_by_id(id).clone();
-        let TypeKind::Enum { variants } = &td.kind else { return };
-        let missing: Vec<String> = variants
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !covered.contains(&(*i as u32)))
-            .map(|(_, v)| if v.fields.is_empty() { v.name.to_string() } else { format!("{}(..)", v.name) })
-            .collect();
-        if !missing.is_empty() {
-            let list = missing.iter().map(|m| format!("`{}`", m)).collect::<Vec<_>>().join(", ");
-            let d = Diagnostic::error("E0109", format!("non-exhaustive match on `{}`: {} not handled", td.name, list)).at(span).help(format!(
-                "add {} for {}, or a catch-all arm `_ => ...`",
-                if missing.len() == 1 { "an arm" } else { "arms" },
-                list
-            ));
+        let rows: Vec<Vec<Option<&Pattern>>> = arms.iter().filter(|a| a.guard.is_none()).map(|a| vec![Some(&a.pat)]).collect();
+        if let Some(w) = self.missing(rows, 1, 0) {
+            let witness = w.into_iter().next().unwrap_or_else(|| "_".into());
+            let d = Diagnostic::error("E0109", format!("non-exhaustive match: `{}` is not handled", witness))
+                .at(span)
+                .help(format!("add an arm for `{}`, or a catch-all arm `_ => ...`", witness));
             self.error(d);
         }
+    }
+
+    /// Returns a value (as pattern text, one per column) that no row matches,
+    /// or None if the rows are exhaustive (or cannot be analyzed).
+    fn missing<'p>(&self, rows: Vec<Vec<Option<&'p Pattern>>>, n: usize, depth: usize) -> Option<Vec<String>> {
+        if depth > 64 {
+            return None;
+        }
+        if n == 0 {
+            return if rows.is_empty() { Some(vec![]) } else { None };
+        }
+        // Normalize the first column: bindings and catch-alls become wildcards,
+        // `x @ p` becomes p, and or-patterns become several rows.
+        let mut norm: Vec<Vec<Option<&'p Pattern>>> = Vec::new();
+        for row in rows {
+            let mut heads = vec![];
+            match row[0] {
+                None => heads.push(None),
+                Some(p) => {
+                    let mut ps = vec![];
+                    flatten_alts(p, &mut ps);
+                    for p in ps {
+                        heads.push(if p.covers() && !matches!(p.kind, PatKind::Tuple(_) | PatKind::Ctor { .. }) { None } else { Some(p) });
+                    }
+                }
+            }
+            for h in heads {
+                let mut r = row.clone();
+                r[0] = h;
+                norm.push(r);
+            }
+        }
+        let rows = norm;
+        let first = rows.iter().find_map(|r| r[0]);
+        let Some(first) = first else {
+            // Only wildcards in this column.
+            let rest: Vec<_> = rows.into_iter().map(|r| r[1..].to_vec()).collect();
+            return self.missing(rest, n - 1, depth + 1).map(|mut w| {
+                w.insert(0, "_".into());
+                w
+            });
+        };
+        // The constructors that can appear in this column: (label, arity, matcher).
+        type Spec<'p> = Box<dyn Fn(&'p Pattern, usize) -> Option<Vec<Option<&'p Pattern>>> + 'p>;
+        let mut ctors: Vec<(String, usize, Spec<'p>)> = Vec::new();
+        match &first.kind {
+            PatKind::Ctor { ctor, .. } => {
+                let td = self.ctx.types.get(ctor.type_id as usize)?.clone();
+                let type_id = ctor.type_id;
+                match &td.kind {
+                    TypeKind::Enum { variants } if !ctor.is_record => {
+                        for (tag, v) in variants.iter().enumerate() {
+                            let tag = tag as u32;
+                            let arity = v.fields.len();
+                            ctors.push((
+                                v.name.to_string(),
+                                arity,
+                                Box::new(move |p: &'p Pattern, arity: usize| match &p.kind {
+                                    PatKind::Ctor { ctor, args, field_idx, .. } if ctor.type_id == type_id && ctor.tag == tag && !ctor.is_record => {
+                                        let mut sub = vec![None; arity];
+                                        for ((_, a), idx) in args.iter().zip(field_idx) {
+                                            if (*idx as usize) < arity {
+                                                sub[*idx as usize] = Some(a);
+                                            }
+                                        }
+                                        Some(sub)
+                                    }
+                                    _ => None,
+                                }),
+                            ));
+                        }
+                    }
+                    TypeKind::Record { fields, .. } if ctor.is_record => {
+                        let arity = fields.len();
+                        ctors.push((
+                            td.name.to_string(),
+                            arity,
+                            Box::new(move |p: &'p Pattern, arity: usize| match &p.kind {
+                                PatKind::Ctor { ctor, args, field_idx, .. } if ctor.type_id == type_id && ctor.is_record => {
+                                    let mut sub = vec![None; arity];
+                                    for ((_, a), idx) in args.iter().zip(field_idx) {
+                                        if (*idx as usize) < arity {
+                                            sub[*idx as usize] = Some(a);
+                                        }
+                                    }
+                                    Some(sub)
+                                }
+                                _ => None,
+                            }),
+                        ));
+                    }
+                    _ => return None,
+                }
+            }
+            PatKind::Lit(Lit::Bool(_)) => {
+                for b in [true, false] {
+                    ctors.push((
+                        b.to_string(),
+                        0,
+                        Box::new(move |p: &'p Pattern, _| match &p.kind {
+                            PatKind::Lit(Lit::Bool(x)) if *x == b => Some(vec![]),
+                            _ => None,
+                        }),
+                    ));
+                }
+            }
+            PatKind::Tuple(items) => {
+                let k = items.len();
+                ctors.push((
+                    String::new(),
+                    k,
+                    Box::new(move |p: &'p Pattern, _| match &p.kind {
+                        PatKind::Tuple(ps) if ps.len() == k => Some(ps.iter().map(Some).collect()),
+                        _ => None,
+                    }),
+                ));
+            }
+            // Literals, ranges, lists, strings: not analyzed statically.
+            _ => return None,
+        }
+        for (label, arity, spec) in &ctors {
+            let mut sub_rows = Vec::new();
+            for r in &rows {
+                match r[0] {
+                    None => {
+                        let mut nr = vec![None; *arity];
+                        nr.extend_from_slice(&r[1..]);
+                        sub_rows.push(nr);
+                    }
+                    Some(p) => {
+                        if let Some(mut nr) = spec(p, *arity) {
+                            nr.extend_from_slice(&r[1..]);
+                            sub_rows.push(nr);
+                        }
+                    }
+                }
+            }
+            if let Some(w) = self.missing(sub_rows, arity + n - 1, depth + 1) {
+                let (args, rest) = w.split_at(*arity);
+                let text = if label.is_empty() {
+                    format!("({})", args.join(", "))
+                } else if *arity == 0 {
+                    label.clone()
+                } else if args.iter().all(|a| a == "_") {
+                    format!("{}(..)", label)
+                } else {
+                    format!("{}({})", label, args.join(", "))
+                };
+                let mut out = vec![text];
+                out.extend_from_slice(rest);
+                return Some(out);
+            }
+        }
+        None
+    }
+}
+
+/// Replace each `old(x)` in an expression with a reference to `old#i`,
+/// collecting the `x`s.
+fn extract_olds(e: &mut Expr, out: &mut Vec<Expr>) {
+    if let ExprKind::Call { callee, args } = &mut e.kind {
+        if matches!(&callee.kind, ExprKind::Var(v) if &*v.name == "old") && args.len() == 1 && args[0].name.is_none() {
+            let inner = std::mem::replace(&mut args[0].value, Expr { kind: ExprKind::Unit, span: e.span });
+            let name: Name = Rc::from(format!("old#{}", out.len()).as_str());
+            out.push(inner);
+            e.kind = ExprKind::Var(Var::new(name));
+            return;
+        }
+    }
+    for_each_child_mut(e, &mut |c| extract_olds(c, out));
+}
+
+fn flatten_alts<'p>(p: &'p Pattern, out: &mut Vec<&'p Pattern>) {
+    match &p.kind {
+        PatKind::Or(alts) => alts.iter().for_each(|a| flatten_alts(a, out)),
+        PatKind::Bind { sub: Some(s), .. } => flatten_alts(s, out),
+        _ => out.push(p),
     }
 }
 

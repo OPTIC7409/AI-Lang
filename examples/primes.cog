@@ -1,8 +1,9 @@
 # The sieve of Eratosthenes, checked against trial division.
 
 fn sieve(limit: Int) -> List[Int]
-  requires limit >= 0
-  ensures result.all(is_prime)
+  requires limit >= 0 and limit <= 100_000
+  ensures result.all(fn(p) => 2 <= p and p <= limit)
+  ensures result == result.sort().unique()
 {
   if limit < 2 { return [] }
   var marks = [true] * (limit + 1)

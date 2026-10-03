@@ -101,6 +101,8 @@ pub struct Interp {
     /// `Budget` error; used to stop runaway test cases.
     pub budget: Option<u64>,
     pub ticks: u64,
+    /// Where the most recent `?` returned early (for error messages).
+    try_span: Option<Span>,
     stdout: std::io::BufWriter<std::io::Stdout>,
     stdout_tty: bool,
     pub none: Value,
@@ -152,7 +154,7 @@ impl Interp {
             ctx,
             globals,
             stack: Vec::new(),
-            max_depth: 10_000,
+            max_depth: std::env::var("COGITO_MAX_DEPTH").ok().and_then(|s| s.parse().ok()).unwrap_or(100_000),
             rng: Rng::new(seed),
             args: Vec::new(),
             silent: false,
@@ -160,6 +162,7 @@ impl Interp {
             contracts: true,
             budget: None,
             ticks: 0,
+            try_span: None,
             stdout: std::io::BufWriter::with_capacity(1 << 16, std::io::stdout()),
             stdout_tty: std::io::stdout().is_terminal(),
             none,
@@ -186,8 +189,17 @@ impl Interp {
         let _ = self.stdout.flush();
     }
 
+    /// Count `n` steps at once (for bulk operations such as building a large list).
+    pub fn tick_n(&mut self, n: u64, span: Span) -> R<()> {
+        if self.budget.is_some() {
+            self.ticks = self.ticks.saturating_add(n.saturating_sub(1));
+            return self.tick(span);
+        }
+        Ok(())
+    }
+
     #[inline]
-    fn tick(&mut self, span: Span) -> R<()> {
+    pub fn tick(&mut self, span: Span) -> R<()> {
         self.ticks += 1;
         if let Some(b) = self.budget {
             if self.ticks > b {
@@ -445,7 +457,7 @@ impl Interp {
                     ));
                 }
             }
-            StmtKind::Assign { target, op, value } => self.assign(target, *op, value, env)?,
+            StmtKind::Assign { target, op, value, ty } => self.assign(target, *op, value, ty.as_ref(), env)?,
             StmtKind::Fn { def, res } => {
                 let c = self.make_closure(def, env);
                 self.store(*res, c, env);
@@ -522,11 +534,11 @@ impl Interp {
         out
     }
 
-    fn assign(&mut self, target: &Expr, op: Option<BinOp>, value: &Expr, env: &mut Env) -> R<()> {
+    fn assign(&mut self, target: &Expr, op: Option<BinOp>, value: &Expr, decl: Option<&Ty>, env: &mut Env) -> R<()> {
         let rhs = self.eval(value, env)?;
         let span = target.span;
-        // Fast paths for plain variables.
-        if let ExprKind::Var(v) = &target.kind {
+        // Fast paths for plain variables without a declared type.
+        if let (ExprKind::Var(v), None) = (&target.kind, decl) {
             match v.res {
                 VarRes::Local(s) => {
                     let s = s as usize;
@@ -562,23 +574,109 @@ impl Interp {
             }
         }
         let (root, steps) = self.eval_place(target, env)?;
+        let expected = self.expected_type(&root, &steps, decl, env);
+        let mismatch = |me: &Self, m: String| {
+            me.fail(
+                me.diag(span, "E0200", format!("type mismatch in assignment to `{}`: {}", me.snippet(span), m))
+                    .help("the variable (or field) was declared with a type, and every write must respect it"),
+            )
+        };
         match op {
             None => {
-                self.with_place(&root, &steps, true, env, span, |p| *p = rhs)?;
+                let v = match &expected {
+                    Some(t) => self.conform(rhs, t).map_err(|m| mismatch(self, m))?,
+                    None => rhs,
+                };
+                self.with_place(&root, &steps, true, env, span, |p| *p = v)?;
             }
             Some(op) => {
-                let done = {
+                // `+=` on strings and lists appends in place; only the new
+                // elements need checking against the declared element type.
+                let fast = op == BinOp::Add
+                    && match (&expected, &rhs) {
+                        (None, _) => true,
+                        (Some(Ty::Str), Value::Str(_)) => true,
+                        (Some(Ty::List(et)), Value::List(ys)) => ys.iter().all(|y| self.has_type(y, et, false)),
+                        _ => false,
+                    };
+                if fast {
+                    let fp = expected.as_ref().map(|t| t.fingerprint());
                     let rhs_ref = &rhs;
-                    self.with_place(&root, &steps, false, env, span, |p| append_in_place(op, p, rhs_ref))?
-                };
-                if !done {
-                    let cur = self.with_place(&root, &steps, false, env, span, |p| p.clone())?;
-                    let nv = self.binop(op, cur, rhs, span)?;
-                    self.with_place(&root, &steps, false, env, span, |p| *p = nv)?;
+                    let done = self.with_place(&root, &steps, false, env, span, |p| {
+                        let valid = matches!((&*p, fp), (Value::List(xs), Some(f)) if xs.checked() == f);
+                        let ok = append_in_place(op, p, rhs_ref);
+                        if let (true, true, Value::List(xs), Some(f)) = (ok, valid, &*p, fp) {
+                            xs.set_checked(f);
+                        }
+                        ok
+                    })?;
+                    if done {
+                        return Ok(());
+                    }
                 }
+                let cur = self.with_place(&root, &steps, false, env, span, |p| p.clone())?;
+                let mut nv = self.binop(op, cur, rhs, span)?;
+                if let Some(t) = &expected {
+                    nv = self.conform(nv, t).map_err(|m| mismatch(self, m))?;
+                }
+                self.with_place(&root, &steps, false, env, span, |p| *p = nv)?;
             }
         }
         Ok(())
+    }
+
+    /// The type that a write to this place must have: the declared type of
+    /// the root variable walked along the path, or the declared type of a
+    /// field of a nominal record or variant.
+    fn expected_type(&self, root: &PlaceRoot, steps: &[Step], decl: Option<&Ty>, env: &Env) -> Option<Ty> {
+        if let Some(t) = decl {
+            if let Some(w) = self.walk_ty(t, steps) {
+                return Some(w);
+            }
+        }
+        let last = steps.last()?;
+        if !matches!(last, Step::Field(_)) {
+            return None;
+        }
+        let root_val = self.root_value(root, env)?;
+        let parent = peek_place(root_val, &steps[..steps.len() - 1])?;
+        nominal_field_ty(parent, last)
+    }
+
+    fn root_value<'a>(&'a self, root: &PlaceRoot, env: &'a Env) -> Option<&'a Value> {
+        match root {
+            PlaceRoot::Local(s) => env.locals.get(*s as usize),
+            PlaceRoot::Global(s) => self.globals.get(*s as usize)?.as_ref(),
+        }
+    }
+
+    fn walk_ty(&self, ty: &Ty, steps: &[Step]) -> Option<Ty> {
+        let mut cur = ty.clone();
+        for st in steps {
+            cur = match (&cur, st) {
+                (Ty::List(t), Step::Index(_)) => (**t).clone(),
+                (Ty::Map(_, v), Step::Index(_)) => (**v).clone(),
+                (Ty::Tuple(ts), Step::Field(n)) => ts.get(n.parse::<usize>().ok()?)?.clone(),
+                (Ty::Tuple(ts), Step::Index(Value::Int(i))) => ts.get(norm_index(*i, ts.len())?)?.clone(),
+                (Ty::Record(fs), Step::Field(n)) => fs.iter().find(|(f, _)| f == n)?.1.clone(),
+                (Ty::Named { id, args, .. }, Step::Field(n)) => {
+                    let td = self.ctx.types.get(*id as usize)?;
+                    match &td.kind {
+                        TypeKind::Record { fields, tys } => tys[fields.iter().position(|f| f == n)?].subst(args),
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+            if cur.is_any() {
+                return None;
+            }
+        }
+        if cur.is_any() {
+            None
+        } else {
+            Some(cur)
+        }
     }
 
     fn eval_place(&mut self, e: &Expr, env: &mut Env) -> R<(PlaceRoot, Vec<Step>)> {
@@ -719,7 +817,7 @@ impl Interp {
                         }
                     }
                 }
-                Ok(Value::Str(Rc::new(s)))
+                Ok(Value::str(s))
             }
             ExprKind::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -732,12 +830,12 @@ impl Interp {
                         out.push(v);
                     }
                 }
-                Ok(Value::List(Rc::new(out)))
+                Ok(Value::list(out))
             }
             ExprKind::Comprehension { body, clauses } => {
                 let mut out = Vec::new();
                 self.comprehension(clauses, 0, body, env, &mut out)?;
-                Ok(Value::List(Rc::new(out)))
+                Ok(Value::list(out))
             }
             ExprKind::Map(entries) => {
                 let mut m = MapVal::with_capacity(entries.len());
@@ -753,7 +851,7 @@ impl Interp {
                 for it in items {
                     out.push(self.eval(it, env)?);
                 }
-                Ok(Value::Tuple(Rc::new(out)))
+                Ok(Value::tuple(out))
             }
             ExprKind::Record { names, values, spread } => {
                 let mut vals = Vec::with_capacity(values.len());
@@ -814,9 +912,9 @@ impl Interp {
                 let (pos, named) = self.eval_args(args, env, None)?;
                 self.call_value(&f, pos, named, e.span)
             }
-            ExprKind::MethodCall { receiver, method, method_span, args, mutating } => {
+            ExprKind::MethodCall { receiver, method, method_span, args, mutating, root_ty } => {
                 if *mutating {
-                    return self.mutating_call(receiver, method, args, e.span, env);
+                    return self.mutating_call(receiver, method, *method_span, args, e.span, root_ty.as_ref(), env);
                 }
                 let recv = self.eval(receiver, env)?;
                 match &recv {
@@ -907,6 +1005,7 @@ impl Interp {
                         if vv.tag == 0 {
                             Ok(vv.values[0].clone())
                         } else {
+                            self.try_span = Some(e.span);
                             Err(Ctrl::Return(v))
                         }
                     }
@@ -928,6 +1027,15 @@ impl Interp {
             ExprKind::Match { scrutinee, arms } => {
                 let v = self.eval(scrutinee, env)?;
                 for arm in arms {
+                    // With a guard, each alternative of an or-pattern gets its own chance.
+                    if let (PatKind::Or(alts), Some(g)) = (&arm.pat.kind, &arm.guard) {
+                        for alt in alts {
+                            if self.match_pattern(alt, &v, env) && self.eval_cond(g, env, "the match guard")? {
+                                return self.eval(&arm.body, env);
+                            }
+                        }
+                        continue;
+                    }
                     if self.match_pattern(&arm.pat, &v, env) {
                         if let Some(g) = &arm.guard {
                             if !self.eval_cond(g, env, "the match guard")? {
@@ -980,6 +1088,7 @@ impl Interp {
                     Some(x) => self.eval(x, env)?,
                     None => Value::Unit,
                 };
+                self.try_span = None;
                 Err(Ctrl::Return(v))
             }
         }
@@ -1000,6 +1109,7 @@ impl Interp {
                 let it = self.eval(iter, env)?;
                 let items = self.iter_values(it, iter.span)?;
                 for item in items {
+                    self.tick(iter.span)?;
                     self.bind_loop(pat, item, env)?;
                     self.comprehension(clauses, i + 1, body, env, out)?;
                 }
@@ -1087,14 +1197,15 @@ impl Interp {
     /// Materialize an iterable value into a vector of its elements.
     pub fn iter_values(&mut self, v: Value, span: Span) -> R<Vec<Value>> {
         match v {
-            Value::List(xs) => Ok(Rc::try_unwrap(xs).unwrap_or_else(|rc| (*rc).clone())),
-            Value::Tuple(xs) => Ok((*xs).clone()),
+            Value::List(xs) => Ok(list_into_vec(xs)),
+            Value::Tuple(xs) => Ok(list_into_vec(xs)),
             Value::Range(r) => match r.end {
                 Some(end) => {
                     let n = r.len().unwrap_or(0);
                     if n > 100_000_000 {
                         return Err(self.err(span, "E0216", format!("range {}..{} is too large to collect into a list", r.start, end)));
                     }
+                    self.tick_n(n as u64, span)?;
                     Ok((r.start..end).map(Value::Int).collect())
                 }
                 None => Err(self.err(span, "E0216", "cannot collect an unbounded range").map_help("give the range an end: `0..n`")),
@@ -1185,16 +1296,16 @@ impl Interp {
                 Ok(Value::list(xs[a..b].to_vec()))
             }
             (Value::Str(s), Value::Int(i)) => {
-                let n = s.chars().count();
+                let n = s.char_len();
                 match norm_index(*i, n) {
-                    Some(i) => Ok(Value::str(s.chars().nth(i).unwrap().to_string())),
+                    Some(i) => Ok(Value::str(s.char_at(i).unwrap_or(""))),
                     None => Err(self.err(span, "E0204", format!("index {} is out of bounds for a string of length {}", i, n))),
                 }
             }
             (Value::Str(s), Value::Range(r)) => {
-                let n = s.chars().count();
+                let n = s.char_len();
                 let (a, b) = slice_bounds(r, n);
-                Ok(Value::str(s.chars().skip(a).take(b - a).collect::<String>()))
+                Ok(Value::str(s.slice_chars(a, b)))
             }
             (Value::Map(m), k) => match m.get(k) {
                 Some(x) => Ok(x.clone()),
@@ -1292,6 +1403,7 @@ impl Interp {
                     if (s.len() as u128) * (n as u128) > 1 << 31 {
                         return Err(self.err(span, "E0216", "repeated string would be too large"));
                     }
+                    self.tick_n((s.len() as u64 * n as u64) / 64, span)?;
                     Ok(Value::str(s.repeat(n as usize)))
                 }
                 (List(xs), Int(n)) | (Int(n), List(xs)) => {
@@ -1301,6 +1413,7 @@ impl Interp {
                     if (xs.len() as u128) * (n as u128) > 1 << 28 {
                         return Err(self.err(span, "E0216", "repeated list would be too large"));
                     }
+                    self.tick_n(xs.len() as u64 * n as u64, span)?;
                     let mut out = Vec::with_capacity(xs.len() * n as usize);
                     for _ in 0..n {
                         out.extend(xs.iter().cloned());
@@ -1435,8 +1548,16 @@ impl Interp {
                 }
             }
             (Some('e'), x) if numeric => {
+                // Python style: 1.234500e+03
                 let f = x.as_f64().unwrap();
-                format!("{:.*e}", spec.precision.unwrap_or(6), f)
+                let s = format!("{:.*e}", spec.precision.unwrap_or(6), f);
+                match s.split_once('e') {
+                    Some((m, e)) => {
+                        let n: i32 = e.parse().unwrap_or(0);
+                        format!("{}e{}{:02}", m, if n < 0 { '-' } else { '+' }, n.abs())
+                    }
+                    None => s,
+                }
             }
             (Some('%'), x) if numeric => {
                 let f = x.as_f64().unwrap() * 100.0;
@@ -1450,6 +1571,9 @@ impl Interp {
             (None, Value::Str(s)) if spec.precision.is_some() => s.chars().take(spec.precision.unwrap()).collect(),
             _ => display(v),
         };
+        if spec.group && numeric && spec.kind.is_none() {
+            body = group_thousands(&body);
+        }
         if spec.plus && numeric && !body.starts_with('-') {
             body.insert(0, '+');
         }
@@ -1575,9 +1699,34 @@ impl Interp {
             (Ty::Int, Value::Int(_)) | (Ty::Float, Value::Float(_)) | (Ty::Str, Value::Str(_)) | (Ty::Bool, Value::Bool(_)) => true,
             (Ty::Float, Value::Int(_)) => coerce,
             (Ty::Unit, Value::Unit) | (Ty::Range, Value::Range(_)) => true,
-            (Ty::List(t), Value::List(xs)) => t.is_any() || xs.iter().all(|x| self.has_type(x, t, coerce)),
+            (Ty::List(t), Value::List(xs)) => {
+                if t.is_any() {
+                    return true;
+                }
+                // Memoize successful exact checks: an unchanged list is not re-scanned.
+                let fp = if coerce { 0 } else { ty.fingerprint() };
+                if fp != 0 && xs.checked() == fp {
+                    return true;
+                }
+                let ok = xs.iter().all(|x| self.has_type(x, t, coerce));
+                if ok && fp != 0 {
+                    xs.set_checked(fp);
+                }
+                ok
+            }
             (Ty::Map(k, t), Value::Map(m)) => {
-                (k.is_any() && t.is_any()) || m.entries.iter().all(|(a, b)| self.has_type(a, k, coerce) && self.has_type(b, t, coerce))
+                if k.is_any() && t.is_any() {
+                    return true;
+                }
+                let fp = if coerce { 0 } else { ty.fingerprint() };
+                if fp != 0 && m.checked() == fp {
+                    return true;
+                }
+                let ok = m.entries.iter().all(|(a, b)| self.has_type(a, k, coerce) && self.has_type(b, t, coerce));
+                if ok && fp != 0 {
+                    m.set_checked(fp);
+                }
+                ok
             }
             (Ty::Tuple(ts), Value::Tuple(xs)) => ts.len() == xs.len() && ts.iter().zip(xs.iter()).all(|(t, x)| self.has_type(x, t, coerce)),
             (Ty::Record(fs), Value::Record(r)) => fs.iter().all(|(n, t)| r.get(n).is_some_and(|x| self.has_type(x, t, coerce))),
@@ -1586,6 +1735,20 @@ impl Interp {
                 vv.ty.id == *id && {
                     let (_, tys, _) = vv.ty.fields_of(vv.tag);
                     args.is_empty() || vv.values.iter().zip(tys).all(|(x, t)| self.has_type(x, &t.subst(args), coerce))
+                }
+            }
+            (Ty::Named { id, args, .. }, Value::Record(r)) if r.ty.is_none() => {
+                // An anonymous record is accepted (and converted) where a record
+                // type with exactly the same fields is expected.
+                coerce && {
+                    let td = &self.ctx.types[*id as usize];
+                    match &td.kind {
+                        TypeKind::Record { fields, tys } => {
+                            fields.len() == r.names.len()
+                                && fields.iter().zip(tys).all(|(f, t)| r.get(f).is_some_and(|x| self.has_type(x, &t.subst(args), true)))
+                        }
+                        _ => false,
+                    }
                 }
             }
             (Ty::Named { id, args, .. }, Value::Record(r)) => {
@@ -1657,6 +1820,29 @@ impl Interp {
                         .map_err(|e| format!("expected {}, but field `{}` of {} is wrong: {}", ty, fields[i], vv.name(), e))?;
                 }
                 return Ok(Value::Variant(Rc::new(vv2)));
+            }
+            (Ty::Named { id, args, .. }, Value::Record(r)) if r.ty.is_none() => {
+                let td = self.ctx.types[*id as usize].clone();
+                if let TypeKind::Record { fields, tys } = &td.kind {
+                    let extra: Vec<&Name> = r.names.iter().filter(|n| !fields.contains(n)).collect();
+                    let missing: Vec<&Name> = fields.iter().filter(|n| r.get(n).is_none()).collect();
+                    if extra.is_empty() && missing.is_empty() {
+                        let mut values = Vec::with_capacity(fields.len());
+                        for (f, t) in fields.iter().zip(tys) {
+                            let v = r.get(f).cloned().unwrap_or_default();
+                            values.push(self.conform(v, &t.subst(args)).map_err(|e| format!("expected {}, but field `{}` is wrong: {}", ty, f, e))?);
+                        }
+                        return Ok(Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values })));
+                    }
+                    let mut why = Vec::new();
+                    if !missing.is_empty() {
+                        why.push(format!("missing {}", missing.iter().map(|n| format!("`{}`", n)).collect::<Vec<_>>().join(", ")));
+                    }
+                    if !extra.is_empty() {
+                        why.push(format!("unexpected {}", extra.iter().map(|n| format!("`{}`", n)).collect::<Vec<_>>().join(", ")));
+                    }
+                    return Err(format!("expected {}, got a record with different fields ({})", ty, why.join("; ")));
+                }
             }
             (Ty::Named { id, args, .. }, Value::Record(r)) if r.ty.as_ref().is_some_and(|t| t.id == *id) => {
                 let td = r.ty.clone().unwrap();
@@ -1875,7 +2061,7 @@ impl Interp {
         if self.stack.len() >= self.max_depth {
             return Err(self.fail(
                 self.diag(span, "E0213", format!("stack overflow: more than {} nested calls (in `{}`)", self.max_depth, def.display_name()))
-                    .help("check that the recursion has a base case that is always reached"),
+                    .help("check that the recursion has a base case that is always reached;\nfor legitimately deep recursion, raise the limit with `cogito --max-depth N ...`"),
             ));
         }
         let nparams = def.params.len();
@@ -1970,15 +2156,34 @@ impl Interp {
                     match self.conform(v, &t.ty) {
                         Ok(v) => env.locals[p.slot as usize] = v,
                         Err(m) => {
+                            let pname = match &p.pat {
+                                Some(pat) => self.snippet(pat.span),
+                                None => p.name.to_string(),
+                            };
                             let mut d =
-                                Diagnostic::error("E0200", format!("type mismatch for parameter `{}` of `{}`: {}", p.name, def.display_name(), m))
+                                Diagnostic::error("E0200", format!("type mismatch for parameter `{}` of `{}`: {}", pname, def.display_name(), m))
                                     .at(span)
                                     .label(format!("`{}` expects {} here", def.display_name(), t.ty))
-                                    .note(format!("`{}` is declared as `{}: {}` at {}", p.name, p.name, t.ty, self.location(p.span)));
+                                    .note(format!("`{}` is declared as `{}: {}` at {}", pname, pname, t.ty, self.location(p.span)));
                             d.trace = self.trace(span, true);
                             return Err(self.fail(d));
                         }
                     }
+                }
+            }
+        }
+        for p in def.params.iter() {
+            if let Some(pat) = &p.pat {
+                let v = env.locals[p.slot as usize].clone();
+                if !self.match_pattern(pat, &v, env) {
+                    let mut d = Diagnostic::error(
+                        "E0212",
+                        format!("argument of `{}` does not match the parameter pattern `{}`", def.display_name(), self.snippet(pat.span)),
+                    )
+                    .at(span)
+                    .note(format!("the argument is {}", short_repr(&v)));
+                    d.trace = self.trace(span, true);
+                    return Err(self.fail(d));
                 }
             }
         }
@@ -2004,13 +2209,39 @@ impl Interp {
                 }
             }
         }
+        if self.contracts && !def.ensures.is_empty() {
+            for (e, slot) in &def.olds {
+                let v = self.eval(e, env)?;
+                env.locals[*slot as usize] = v;
+            }
+        }
+        let mut from_try = None;
         let mut result = match self.eval(&def.body, env) {
             Ok(v) => v,
-            Err(Ctrl::Return(v)) => v,
+            Err(Ctrl::Return(v)) => {
+                from_try = self.try_span.take();
+                v
+            }
             Err(Ctrl::Break(_)) | Err(Ctrl::Continue) => Value::Unit,
             Err(e) => return Err(e),
         };
         if let Some(t) = &def.ret {
+            if let (Some(tsp), false) = (from_try, self.has_type(&result, &t.ty, false)) {
+                let (what, help) = if result.is_option() {
+                    ("`None`", "convert the Option first: `.ok_or(\"what went wrong\")?`")
+                } else {
+                    ("an `Err(..)`", "convert the Result first: `.ok()?`")
+                };
+                return Err(self.fail(
+                    self.diag(
+                        tsp,
+                        "E0117",
+                        format!("`?` returned {} early from `{}`, which is declared to return {}", what, def.display_name(), t.ty),
+                    )
+                    .label("returns early here")
+                    .help(help),
+                ));
+            }
             if !self.has_type(&result, &t.ty, false) {
                 result = self.conform(result, &t.ty).map_err(|m| {
                     self.fail(
@@ -2053,13 +2284,65 @@ impl Interp {
         Ok(result)
     }
 
-    fn mutating_call(&mut self, receiver: &Expr, method: &Var, args: &[Arg], span: Span, env: &mut Env) -> R {
-        let f = self.load(method, span, env)?;
+    #[allow(clippy::too_many_arguments)]
+    fn mutating_call(&mut self, receiver: &Expr, method: &Var, method_span: Span, args: &[Arg], span: Span, decl: Option<&Ty>, env: &mut Env) -> R {
         let (pos, named) = self.eval_args(args, env, None)?;
         let (root, steps) = self.eval_place(receiver, env)?;
+        let f = if method.res == VarRes::Unresolved {
+            // A mutating function from the module that declared the receiver's type.
+            let found = self.root_value(&root, env).and_then(|v| peek_place(v, &steps)).and_then(|v| self.home_method(v, &method.name));
+            match found {
+                Some(f) => f,
+                None => return Err(self.err(method_span, "E0100", format!("undefined function `{}`", method.name))),
+            }
+        } else {
+            self.load(method, span, env)?
+        };
+        let expected = self.expected_type(&root, &steps, decl, env);
         let mut target = self.with_place(&root, &steps, false, env, receiver.span, std::mem::take)?;
+        let pre = match (&expected, &target) {
+            (Some(t @ Ty::List(_)), Value::List(xs)) => Some((xs.checked() == t.fingerprint(), xs.len())),
+            _ => None,
+        };
         let result = self.call_mutating(&f, &mut target, pos, named, span);
+        let mut type_error = None;
+        if let (Ok(_), Some(t)) = (&result, &expected) {
+            // push!/extend! only append: if the list was known to match before,
+            // only the new elements need checking.
+            let appended_ok = match (&pre, &target, t, &f) {
+                (Some((true, pre_len)), Value::List(xs), Ty::List(et), Value::Builtin(i))
+                    if matches!(BUILTINS[*i as usize].name, "push!" | "extend!") && xs.len() >= *pre_len =>
+                {
+                    let ok = xs[*pre_len..].iter().all(|x| self.has_type(x, et, false));
+                    if ok {
+                        xs.set_checked(t.fingerprint());
+                    }
+                    ok
+                }
+                _ => false,
+            };
+            if !appended_ok && !self.has_type(&target, t, false) {
+                match self.conform(target.clone(), t) {
+                    Ok(v) => target = v,
+                    Err(m) => {
+                        type_error = Some(
+                            self.fail(
+                                self.diag(
+                                    span,
+                                    "E0200",
+                                    format!("`{}` broke the declared type of `{}`: {}", method.name, self.snippet(receiver.span), m),
+                                )
+                                .help("the variable (or field) was declared with a type, and every change must respect it"),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
         self.with_place(&root, &steps, false, env, receiver.span, |p| *p = target)?;
+        if let Some(e) = type_error {
+            return Err(e);
+        }
         result
     }
 
@@ -2137,6 +2420,54 @@ fn append_in_place(op: BinOp, cur: &mut Value, rhs: &Value) -> bool {
             Rc::make_mut(xs).extend(ys.iter().cloned());
             true
         }
+        _ => false,
+    }
+}
+
+/// Follow a path without modifying anything.
+fn peek_place<'v>(mut v: &'v Value, steps: &[Step]) -> Option<&'v Value> {
+    for st in steps {
+        v = match (v, st) {
+            (Value::Record(r), Step::Field(n)) => r.get(n)?,
+            (Value::Variant(vv), Step::Field(n)) => {
+                let (fields, _, _) = vv.ty.fields_of(vv.tag);
+                vv.values.get(fields.iter().position(|f| f == n)?)?
+            }
+            (Value::Tuple(t), Step::Field(n)) => t.get(n.parse::<usize>().ok()?)?,
+            (Value::List(xs) | Value::Tuple(xs), Step::Index(Value::Int(i))) => xs.get(norm_index(*i, xs.len())?)?,
+            (Value::Map(m), Step::Index(k)) => m.get(k)?,
+            _ => return None,
+        };
+    }
+    Some(v)
+}
+
+/// The declared type of a field of a nominal record or variant.
+fn nominal_field_ty(parent: &Value, step: &Step) -> Option<Ty> {
+    let Step::Field(n) = step else { return None };
+    let (td, tag) = match parent {
+        Value::Record(r) => (r.ty.as_ref()?, 0),
+        Value::Variant(v) => (&v.ty, v.tag),
+        _ => return None,
+    };
+    let (fields, tys, _) = td.fields_of(tag);
+    let t = tys.get(fields.iter().position(|f| f == n)?)?;
+    if t.is_any() || contains_param(t) {
+        None
+    } else {
+        Some(t.clone())
+    }
+}
+
+fn contains_param(t: &Ty) -> bool {
+    match t {
+        Ty::Param(..) | Ty::Generic(_) => true,
+        Ty::List(x) => contains_param(x),
+        Ty::Map(k, v) => contains_param(k) || contains_param(v),
+        Ty::Tuple(ts) => ts.iter().any(contains_param),
+        Ty::Record(fs) => fs.iter().any(|(_, t)| contains_param(t)),
+        Ty::Fn(ps, r) => ps.iter().any(contains_param) || contains_param(r),
+        Ty::Named { args, .. } => args.iter().any(contains_param),
         _ => false,
     }
 }
@@ -2228,6 +2559,23 @@ pub fn slice_bounds(r: &RangeVal, len: usize) -> (usize, usize) {
     } else {
         (a, b)
     }
+}
+
+/// "1234567.5" -> "1,234,567.5"
+fn group_thousands(s: &str) -> String {
+    let (sign, rest) = if let Some(r) = s.strip_prefix('-') { ("-", r) } else { ("", s) };
+    let (int_part, frac) = match rest.find('.') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let mut out = String::new();
+    for (i, c) in int_part.chars().enumerate() {
+        if i > 0 && (int_part.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    format!("{}{}{}", sign, out, frac)
 }
 
 fn lit_value(l: &Lit) -> Value {

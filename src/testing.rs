@@ -1,7 +1,7 @@
 //! `cogito test` (unit tests and property tests) and `cogito verify`
 //! (contract checking by random testing).
 
-use crate::ast::{FnDef, Item, Program};
+use crate::ast::{BinOp, Expr, ExprKind, FnDef, Item, Program, UnOp};
 use crate::diagnostic::{Colors, Diagnostic};
 use crate::interp::{Ctrl, Env, Interp, Rng};
 use crate::proptest::{shrink, Gen};
@@ -32,6 +32,8 @@ impl Default for Options {
 pub struct Summary {
     pub passed: u32,
     pub failed: u32,
+    /// Properties for which too few generated inputs satisfied `where`/`requires`.
+    pub gave_up: u32,
     pub skipped: u32,
     pub cases: u64,
 }
@@ -40,6 +42,7 @@ impl Summary {
     pub fn add(&mut self, o: Summary) {
         self.passed += o.passed;
         self.failed += o.failed;
+        self.gave_up += o.gave_up;
         self.skipped += o.skipped;
         self.cases += o.cases;
     }
@@ -126,19 +129,20 @@ fn param_types(def: &FnDef) -> Result<Vec<Ty>, String> {
     Ok(tys)
 }
 
-fn quickcheck(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, budget: u64) -> PropOutcome {
+fn quickcheck(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, budget: u64, extremes: bool) -> PropOutcome {
     let saved_budget = it.budget;
     it.budget = Some(budget);
-    let r = quickcheck_inner(it, def, cases, seed);
+    let r = quickcheck_inner(it, def, cases, seed, extremes);
     it.budget = saved_budget;
     r
 }
 
-fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64) -> PropOutcome {
+fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, extremes: bool) -> PropOutcome {
     let tys = match param_types(def) {
         Ok(t) => t,
         Err(m) => return PropOutcome::CannotGenerate(m),
     };
+    let bounds = int_bounds(def);
     let c = Rc::new(Closure { def: def.clone(), captures: vec![] });
     let mut rng = Rng::new(seed);
     let mut passed = 0u32;
@@ -154,9 +158,13 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64) -> 
         }
         let size = 2 + passed * 40 / cases.max(1);
         let mut args = Vec::with_capacity(tys.len());
-        let mut gen = Gen { it, rng: &mut rng };
+        let mut gen = Gen { it, rng: &mut rng, extremes };
         let mut gen_err = None;
-        for t in &tys {
+        for (i, t) in tys.iter().enumerate() {
+            if let (Ty::Int, Some((lo, hi))) = (t, bounds.get(i).copied().flatten()) {
+                args.push(gen.int_in(lo, hi, size));
+                continue;
+            }
             match gen.value(t, size, 0) {
                 Ok(v) => args.push(v),
                 Err(m) => {
@@ -181,13 +189,88 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64) -> 
     result
 }
 
+/// Inclusive bounds on Int parameters that can be read off the `requires` /
+/// `where` clauses: comparisons with literals, joined by `and`, and `in` ranges.
+fn int_bounds(def: &FnDef) -> Vec<Option<(Option<i64>, Option<i64>)>> {
+    let mut out: Vec<Option<(Option<i64>, Option<i64>)>> = vec![None; def.params.len()];
+    fn lit(e: &Expr) -> Option<i64> {
+        match &e.kind {
+            ExprKind::Int(n) => Some(*n),
+            ExprKind::Unary { op: UnOp::Neg, expr } => match &expr.kind {
+                ExprKind::Int(n) => n.checked_neg(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn param_index(def: &FnDef, e: &Expr) -> Option<usize> {
+        match &e.kind {
+            ExprKind::Var(v) => def.params.iter().position(|p| p.name == v.name && p.pat.is_none()),
+            _ => None,
+        }
+    }
+    fn visit(def: &FnDef, e: &Expr, out: &mut Vec<Option<(Option<i64>, Option<i64>)>>) {
+        let mut set = |i: usize, lo: Option<i64>, hi: Option<i64>| {
+            let cur = out[i].get_or_insert((None, None));
+            if let Some(l) = lo {
+                cur.0 = Some(cur.0.map_or(l, |c: i64| c.max(l)));
+            }
+            if let Some(h) = hi {
+                cur.1 = Some(cur.1.map_or(h, |c: i64| c.min(h)));
+            }
+        };
+        match &e.kind {
+            ExprKind::And(a, b) => {
+                visit(def, a, out);
+                visit(def, b, out);
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                if let (Some(i), Some(c)) = (param_index(def, lhs), lit(rhs)) {
+                    match op {
+                        BinOp::Ge => set(i, Some(c), None),
+                        BinOp::Gt => set(i, c.checked_add(1), None),
+                        BinOp::Le => set(i, None, Some(c)),
+                        BinOp::Lt => set(i, None, c.checked_sub(1)),
+                        BinOp::Eq => set(i, Some(c), Some(c)),
+                        _ => {}
+                    }
+                } else if let (Some(c), Some(i)) = (lit(lhs), param_index(def, rhs)) {
+                    match op {
+                        BinOp::Le => set(i, Some(c), None),
+                        BinOp::Lt => set(i, c.checked_add(1), None),
+                        BinOp::Ge => set(i, None, Some(c)),
+                        BinOp::Gt => set(i, None, c.checked_sub(1)),
+                        BinOp::Eq => set(i, Some(c), Some(c)),
+                        _ => {}
+                    }
+                } else if let (BinOp::In, Some(i), ExprKind::Range { start, end: Some(end), inclusive }) = (op, param_index(def, lhs), &rhs.kind) {
+                    if let (Some(a), Some(b)) = (lit(start), lit(end)) {
+                        set(i, Some(a), if *inclusive { Some(b) } else { b.checked_sub(1) });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for r in &def.requires {
+        visit(def, r, &mut out);
+    }
+    out
+}
+
 fn shrink_failure(it: &mut Interp, c: &Rc<Closure>, mut cur: Vec<Value>, mut diag: Box<Diagnostic>) -> (Vec<Value>, Box<Diagnostic>, u32) {
     let code = diag.code;
     let mut steps = 0u32;
     let mut tries = 0u32;
-    'outer: while steps < 1000 && tries < 20_000 {
+    // Every attempt at shrinking a "took too long" failure runs to the full
+    // budget, so only try a few.
+    let max_tries = if code == "E0219" { 24 } else { 20_000 };
+    'outer: while steps < 1000 && tries < max_tries {
         for i in 0..cur.len() {
             for cand in shrink(&cur[i]) {
+                if tries >= max_tries {
+                    break 'outer;
+                }
                 tries += 1;
                 let mut trial = cur.clone();
                 trial[i] = cand;
@@ -268,7 +351,7 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                 }
                 any = true;
                 let seed = opts.seed.unwrap_or_else(|| name_seed(&p.name));
-                match quickcheck(it, &p.func, opts.cases, seed, opts.budget) {
+                match quickcheck(it, &p.func, opts.cases, seed, opts.budget, false) {
                     PropOutcome::Passed { cases, discarded } => {
                         sum.passed += 1;
                         sum.cases += cases as u64;
@@ -276,10 +359,10 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                         out.push_str(&format!("  {}✓{} {} {}({} cases{}){}\n", c.green, c.reset, p.name, c.dim, cases, disc, c.reset));
                     }
                     PropOutcome::GaveUp { cases, discarded } => {
-                        sum.passed += 1;
+                        sum.gave_up += 1;
                         sum.cases += cases as u64;
                         out.push_str(&format!(
-                            "  {}?{} {} {}(gave up: only {} of {} generated inputs satisfied the `where` clause){}\n",
+                            "  {}?{} {} {}(gave up: only {} of {} generated inputs satisfied the `where` clause; narrow the input types or the clause){}\n",
                             c.yellow,
                             c.reset,
                             p.name,
@@ -303,6 +386,7 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
             }
             _ => {}
         }
+        flush_out(it, &mut out);
     }
     if !any {
         out.push_str(&format!("  {}(no tests){}\n", c.dim, c.reset));
@@ -338,17 +422,15 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
         if !def.has_contracts() && !opts.all {
             continue;
         }
-        if def.mutating {
-            continue;
-        }
         any = true;
         if def.params.is_empty() {
             sum.skipped += 1;
             out.push_str(&format!("  {}-{} {:w$}  {}skipped: no inputs to generate{}\n", c.dim, c.reset, name, c.dim, c.reset, w = width));
+            flush_out(it, &mut out);
             continue;
         }
         let seed = opts.seed.unwrap_or_else(|| name_seed(&name));
-        match quickcheck(it, &def, opts.cases, seed, opts.budget) {
+        match quickcheck(it, &def, opts.cases, seed, opts.budget, true) {
             PropOutcome::Passed { cases, discarded } => {
                 sum.passed += 1;
                 sum.cases += cases as u64;
@@ -357,7 +439,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
                 out.push_str(&format!("  {}✓{} {:w$}  {}{} cases, {}{}{}\n", c.green, c.reset, name, c.dim, cases, what, disc, c.reset, w = width));
             }
             PropOutcome::GaveUp { cases, discarded } => {
-                sum.passed += 1;
+                sum.gave_up += 1;
                 sum.cases += cases as u64;
                 out.push_str(&format!(
                     "  {}?{} {:w$}  {}gave up: only {} of {} random inputs satisfied `requires`{}\n",
@@ -389,6 +471,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
                 out.push_str(&format!("  {}-{} {:w$}  {}skipped: {}{}\n", c.dim, c.reset, name, c.dim, m, c.reset, w = width));
             }
         }
+        flush_out(it, &mut out);
     }
     if !any {
         out.push_str(&format!("  {}(no functions with contracts; use --all to check every annotated function){}\n", c.dim, c.reset));
@@ -398,6 +481,10 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
     sum
 }
 
-pub fn dummy_span() -> Span {
-    Span::default()
+fn flush_out(it: &mut Interp, out: &mut String) {
+    use std::io::Write;
+    it.flush();
+    print!("{}", out);
+    let _ = std::io::stdout().flush();
+    out.clear();
 }

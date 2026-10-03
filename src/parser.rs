@@ -21,6 +21,7 @@ use crate::diagnostic::Diagnostic;
 use crate::lexer::{lex, StrPart, Tok, Token};
 use crate::span::Span;
 use crate::types::{Name, Ty};
+use crate::value::Text;
 use std::rc::Rc;
 
 type PResult<T> = Result<T, Diagnostic>;
@@ -71,6 +72,7 @@ fn new_fn(name: Option<Name>, name_span: Span, span: Span, params: Vec<Param>, b
         num_slots: 0,
         captures: vec![],
         result_slot: 0,
+        olds: vec![],
         global_slot: None,
         overload_fallback: None,
     }
@@ -186,12 +188,10 @@ impl<'s> Parser<'s> {
                 Tok::RBrace => "{",
                 _ => "",
             };
-            Err(self.unexpected(what).note(format!(
-                "the `{}` that needs closing is at offset {} (line {})",
-                open,
-                open_span.start,
-                self.src[..open_span.start as usize].matches('\n').count() + 1
-            )))
+            let before = &self.src[..open_span.start as usize];
+            let line = before.matches('\n').count() + 1;
+            let col = before.chars().rev().take_while(|c| *c != '\n').count() + 1;
+            Err(self.unexpected(what).note(format!("the `{}` that needs closing is at line {}, column {}", open, line, col)))
         }
     }
 
@@ -367,13 +367,20 @@ impl<'s> Parser<'s> {
             if self.at(&Tok::RParen) {
                 break;
             }
-            let (name, span) = self.lower_ident("parameter name")?;
-            if name.ends_with('!') {
-                return Err(Diagnostic::error("E0013", "parameter names cannot end with `!`").at(span));
-            }
+            // A parameter may be a destructuring pattern: `fn((k, v)) => ...`.
+            let (name, span, pat) = if matches!(self.peek(), Tok::LParen | Tok::LBracket | Tok::LBrace) {
+                let pat = self.pattern_primary()?;
+                (Rc::from(format!("__arg{}", params.len()).as_str()), pat.span, Some(pat))
+            } else {
+                let (name, span) = self.lower_ident("parameter name")?;
+                if name.ends_with('!') {
+                    return Err(Diagnostic::error("E0013", "parameter names cannot end with `!`").at(span));
+                }
+                (name, span, None)
+            };
             let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
             let default = if self.eat(&Tok::Assign) { Some(self.expr()?) } else { None };
-            params.push(Param { name, span, ty, default, slot: 0 });
+            params.push(Param { name, span, ty, default, slot: 0, pat });
             if !self.eat(&Tok::Comma) {
                 break;
             }
@@ -606,7 +613,7 @@ impl<'s> Parser<'s> {
                     self.skip_newlines();
                     let value = self.expr()?;
                     let span = e.span.to(value.span);
-                    return Ok(Stmt { kind: StmtKind::Assign { target: e, op, value }, span });
+                    return Ok(Stmt { kind: StmtKind::Assign { target: e, op, value, ty: None }, span });
                 }
                 let span = e.span;
                 Ok(Stmt { kind: StmtKind::Expr(e), span })
@@ -723,9 +730,9 @@ impl<'s> Parser<'s> {
                         .at(rhs.span)
                         .help("mutating functions (ending in `!`) need a variable to change; call them directly"))
                 }
-                ExprKind::MethodCall { receiver, method, method_span, mut args, mutating } => {
+                ExprKind::MethodCall { receiver, method, method_span, mut args, mutating, root_ty } => {
                     args.insert(0, Arg { name: None, value: lhs });
-                    mk(ExprKind::MethodCall { receiver, method, method_span, args, mutating }, span)
+                    mk(ExprKind::MethodCall { receiver, method, method_span, args, mutating, root_ty }, span)
                 }
                 _ => {
                     let callee = rhs;
@@ -867,6 +874,11 @@ impl<'s> Parser<'s> {
                 None
             };
             let value = self.expr()?;
+            if name.is_none() && args.iter().any(|a: &Arg| a.name.is_some()) {
+                return Err(Diagnostic::error("E0108", "positional arguments must come before named arguments")
+                    .at(value.span)
+                    .help("move this argument before the named ones, or name it too"));
+            }
             args.push(Arg { name, value });
             if !self.eat(&Tok::Comma) {
                 break;
@@ -894,7 +906,10 @@ impl<'s> Parser<'s> {
                             let receiver = args.remove(0).value;
                             let method = Var::new(v.name.clone());
                             let method_span = e.span;
-                            e = mk(ExprKind::MethodCall { receiver: Box::new(receiver), method, method_span, args, mutating: true }, span);
+                            e = mk(
+                                ExprKind::MethodCall { receiver: Box::new(receiver), method, method_span, args, mutating: true, root_ty: None },
+                                span,
+                            );
                             continue;
                         }
                     }
@@ -925,7 +940,14 @@ impl<'s> Parser<'s> {
                                 let span = e.span.to(aspan);
                                 let mutating = name.ends_with('!');
                                 e = mk(
-                                    ExprKind::MethodCall { receiver: Box::new(e), method: Var::new(name), method_span: name_span, args, mutating },
+                                    ExprKind::MethodCall {
+                                        receiver: Box::new(e),
+                                        method: Var::new(name),
+                                        method_span: name_span,
+                                        args,
+                                        mutating,
+                                        root_ty: None,
+                                    },
                                     span,
                                 );
                             } else if name.ends_with('!') {
@@ -964,13 +986,13 @@ impl<'s> Parser<'s> {
     fn string_expr(&mut self, parts: Vec<StrPart>, span: Span) -> PResult<Expr> {
         if parts.len() == 1 {
             if let StrPart::Lit(s) = &parts[0] {
-                return Ok(mk(ExprKind::Str(Rc::new(s.clone())), span));
+                return Ok(mk(ExprKind::Str(Rc::new(Text::new(s.clone()))), span));
             }
         }
         let mut out = Vec::new();
         for p in parts {
             match p {
-                StrPart::Lit(s) => out.push(InterpPart::Lit(Rc::new(s))),
+                StrPart::Lit(s) => out.push(InterpPart::Lit(Rc::new(Text::new(s)))),
                 StrPart::Expr { start, end, spec } => {
                     let e = parse_expr_range(self.src, self.file, start as usize, end as usize)?;
                     let spec = match spec {
@@ -1259,6 +1281,29 @@ impl<'s> Parser<'s> {
         Ok(mk(ExprKind::List(items), open.to(close)))
     }
 
+    /// A match-arm body: an expression, or an assignment (`x += 1`), which
+    /// is treated as a block containing that statement.
+    fn arm_body(&mut self) -> PResult<Expr> {
+        let e = self.expr()?;
+        let op = match self.peek() {
+            Tok::Assign => Some(None),
+            Tok::PlusAssign => Some(Some(BinOp::Add)),
+            Tok::MinusAssign => Some(Some(BinOp::Sub)),
+            Tok::StarAssign => Some(Some(BinOp::Mul)),
+            Tok::SlashAssign => Some(Some(BinOp::Div)),
+            Tok::PercentAssign => Some(Some(BinOp::Mod)),
+            _ => None,
+        };
+        let Some(op) = op else { return Ok(e) };
+        self.bump();
+        check_place(&e)?;
+        self.skip_newlines();
+        let value = self.expr()?;
+        let span = e.span.to(value.span);
+        let stmt = Stmt { kind: StmtKind::Assign { target: e, op, value, ty: None }, span };
+        Ok(mk(ExprKind::Block(vec![stmt]), span))
+    }
+
     fn if_expr(&mut self) -> PResult<Expr> {
         let start = self.expect(&Tok::If, "`if`")?;
         let cond = self.expr()?;
@@ -1323,7 +1368,7 @@ impl<'s> Parser<'s> {
             }
             self.bump();
             self.skip_newlines();
-            let body = self.expr()?;
+            let body = self.arm_body()?;
             arms.push(Arm { pat, guard, body });
             if !matches!(self.peek(), Tok::Newline | Tok::Comma | Tok::Semi | Tok::RBrace) {
                 return Err(self.unexpected("a newline or `,` after the match arm"));
@@ -1483,7 +1528,7 @@ impl<'s> Parser<'s> {
                         }
                     }
                 }
-                Lit::Str(Rc::new(s))
+                Lit::Str(Rc::new(Text::new(s)))
             }
             Tok::True if !neg => Lit::Bool(true),
             Tok::False if !neg => Lit::Bool(false),
@@ -1491,6 +1536,39 @@ impl<'s> Parser<'s> {
         };
         self.bump();
         Ok(Some(lit))
+    }
+
+    /// The rest of a constructor pattern, after its (possibly qualified) name.
+    fn ctor_pattern(&mut self, name: Name, start: Span) -> PResult<Pattern> {
+        self.bump();
+        let mut args = Vec::new();
+        let mut rest = false;
+        if self.at(&Tok::LParen) {
+            let open = self.bump().span;
+            loop {
+                if self.at(&Tok::RParen) {
+                    break;
+                }
+                if self.at(&Tok::DotDot) {
+                    self.bump();
+                    rest = true;
+                    break;
+                }
+                if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon {
+                    let (n, _) = self.lower_ident("field name")?;
+                    self.bump();
+                    let p = self.pattern()?;
+                    args.push((Some(n), p));
+                } else {
+                    args.push((None, self.pattern()?));
+                }
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect_closing(&Tok::RParen, open, "`,` or `)` in pattern")?;
+        }
+        Ok(Pattern { kind: PatKind::Ctor { name, args, rest, ctor: CtorRef::default(), field_idx: vec![] }, span: start.to(self.prev_span()) })
     }
 
     fn pattern_primary(&mut self) -> PResult<Pattern> {
@@ -1513,6 +1591,14 @@ impl<'s> Parser<'s> {
         if neg {
             return Err(self.unexpected("a number after `-` in pattern"));
         }
+        // `module.Ctor(...)`: a constructor from an imported module.
+        if let (Tok::Ident(module), Tok::Dot, Tok::Upper(ctor)) = (self.peek().clone(), self.peek_at(1).clone(), self.peek_at(2).clone()) {
+            self.bump();
+            self.bump();
+            let qualified: Name = Rc::from(format!("{}.{}", module, ctor).as_str());
+            let _ = ctor;
+            return self.ctor_pattern(qualified, start);
+        }
         match self.peek().clone() {
             Tok::Ident(name) => {
                 self.bump();
@@ -1525,40 +1611,7 @@ impl<'s> Parser<'s> {
                 let sub = if self.eat(&Tok::At) { Some(Box::new(self.pattern_primary()?)) } else { None };
                 Ok(Pattern { kind: PatKind::Bind { name, res: VarRes::Unresolved, sub }, span: start.to(self.prev_span()) })
             }
-            Tok::Upper(name) => {
-                self.bump();
-                let mut args = Vec::new();
-                let mut rest = false;
-                if self.at(&Tok::LParen) {
-                    let open = self.bump().span;
-                    loop {
-                        if self.at(&Tok::RParen) {
-                            break;
-                        }
-                        if self.at(&Tok::DotDot) {
-                            self.bump();
-                            rest = true;
-                            break;
-                        }
-                        if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon {
-                            let (n, _) = self.lower_ident("field name")?;
-                            self.bump();
-                            let p = self.pattern()?;
-                            args.push((Some(n), p));
-                        } else {
-                            args.push((None, self.pattern()?));
-                        }
-                        if !self.eat(&Tok::Comma) {
-                            break;
-                        }
-                    }
-                    self.expect_closing(&Tok::RParen, open, "`,` or `)` in pattern")?;
-                }
-                Ok(Pattern {
-                    kind: PatKind::Ctor { name, args, rest, ctor: CtorRef::default(), field_idx: vec![] },
-                    span: start.to(self.prev_span()),
-                })
-            }
+            Tok::Upper(name) => self.ctor_pattern(name, start),
             Tok::LParen => {
                 self.bump();
                 if self.eat(&Tok::RParen) {
@@ -1694,6 +1747,10 @@ pub fn parse_fmt_spec(s: &str) -> Result<FmtSpec, String> {
     if i > ws {
         spec.width = chars[ws..i].iter().collect::<String>().parse().map_err(|_| "width is too large")?;
     }
+    if i < chars.len() && chars[i] == ',' {
+        spec.group = true;
+        i += 1;
+    }
     if i < chars.len() && chars[i] == '.' {
         i += 1;
         let ps = i;
@@ -1710,6 +1767,9 @@ pub fn parse_fmt_spec(s: &str) -> Result<FmtSpec, String> {
             'x' | 'X' | 'b' | 'o' | 'e' | '%' => {
                 spec.kind = Some(chars[i]);
                 i += 1;
+            }
+            '{' => {
+                return Err("format specs must be written literally; for a computed width use `pad_left(s, width)` or `pad_right(s, width)`".into())
             }
             c => return Err(format!("unknown format type `{}`", c)),
         }

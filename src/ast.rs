@@ -3,6 +3,7 @@
 
 use crate::span::Span;
 use crate::types::{Name, Ty};
+use crate::value::Text;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -66,6 +67,8 @@ pub struct Param {
     pub ty: Option<TypeExpr>,
     pub default: Option<Expr>,
     pub slot: u32,
+    /// A destructuring pattern, as in `fn((key, value)) => ...`.
+    pub pat: Option<Pattern>,
 }
 
 #[derive(Debug)]
@@ -85,6 +88,9 @@ pub struct FnDef {
     pub num_slots: u32,
     pub captures: Vec<CaptureSrc>,
     pub result_slot: u32,
+    /// `old(expr)` inside `ensures`: each expression is evaluated on entry
+    /// and stored in its slot (filled in by the resolver).
+    pub olds: Vec<(Expr, u32)>,
     pub global_slot: Option<u32>,
     /// For a top-level function that shares its name with a built-in: the
     /// built-in's global slot, used as the last overload candidate.
@@ -223,10 +229,12 @@ pub enum StmtKind {
         value: Expr,
         mutable: bool,
     },
+    /// `ty` is the declared type of the target's root variable (from the resolver).
     Assign {
         target: Expr,
         op: Option<BinOp>,
         value: Expr,
+        ty: Option<Ty>,
     },
     Fn {
         def: Rc<FnDef>,
@@ -309,13 +317,15 @@ pub struct FmtSpec {
     pub plus: bool,
     pub zero: bool,
     pub width: usize,
+    /// Group thousands with commas (`{n:,}`).
+    pub group: bool,
     pub precision: Option<usize>,
     pub kind: Option<char>,
 }
 
 #[derive(Debug)]
 pub enum InterpPart {
-    Lit(Rc<String>),
+    Lit(Rc<Text>),
     Expr(Expr, Option<FmtSpec>),
 }
 
@@ -344,31 +354,83 @@ pub enum ExprKind {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Str(Rc<String>),
+    Str(Rc<Text>),
     Interp(Vec<InterpPart>),
     Var(Var),
     List(Vec<ListItem>),
-    Comprehension { body: Box<Expr>, clauses: Vec<CompClause> },
+    Comprehension {
+        body: Box<Expr>,
+        clauses: Vec<CompClause>,
+    },
     Map(Vec<(Expr, Expr)>),
     Tuple(Vec<Expr>),
-    Record { names: Rc<[Name]>, values: Vec<Expr>, spread: Option<Box<Expr>> },
-    Field { target: Box<Expr>, name: Name, name_span: Span },
-    Index { target: Box<Expr>, index: Box<Expr> },
-    Call { callee: Box<Expr>, args: Vec<Arg> },
-    MethodCall { receiver: Box<Expr>, method: Var, method_span: Span, args: Vec<Arg>, mutating: bool },
-    Unary { op: UnOp, expr: Box<Expr> },
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    Record {
+        names: Rc<[Name]>,
+        values: Vec<Expr>,
+        spread: Option<Box<Expr>>,
+    },
+    Field {
+        target: Box<Expr>,
+        name: Name,
+        name_span: Span,
+    },
+    Index {
+        target: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Arg>,
+    },
+    /// For mutating calls, `root_ty` is the declared type of the receiver's root variable.
+    MethodCall {
+        receiver: Box<Expr>,
+        method: Var,
+        method_span: Span,
+        args: Vec<Arg>,
+        mutating: bool,
+        root_ty: Option<Ty>,
+    },
+    Unary {
+        op: UnOp,
+        expr: Box<Expr>,
+    },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
-    Range { start: Box<Expr>, end: Option<Box<Expr>>, inclusive: bool },
+    Range {
+        start: Box<Expr>,
+        end: Option<Box<Expr>>,
+        inclusive: bool,
+    },
     Try(Box<Expr>),
-    If { cond: Box<Expr>, then: Box<Expr>, els: Option<Box<Expr>> },
-    Match { scrutinee: Box<Expr>, arms: Vec<Arm> },
+    If {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Option<Box<Expr>>,
+    },
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<Arm>,
+    },
     Block(Vec<Stmt>),
     Lambda(Rc<FnDef>),
-    While { cond: Box<Expr>, body: Box<Expr> },
-    For { pat: Pattern, iter: Box<Expr>, body: Box<Expr> },
-    Loop { body: Box<Expr> },
+    While {
+        cond: Box<Expr>,
+        body: Box<Expr>,
+    },
+    For {
+        pat: Pattern,
+        iter: Box<Expr>,
+        body: Box<Expr>,
+    },
+    Loop {
+        body: Box<Expr>,
+    },
     Break(Option<Box<Expr>>),
     Continue,
     Return(Option<Box<Expr>>),
@@ -380,7 +442,7 @@ pub enum Lit {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Str(Rc<String>),
+    Str(Rc<Text>),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -429,6 +491,118 @@ pub enum PatKind {
         rest: bool,
     },
     Or(Vec<Pattern>),
+}
+
+/// Visit every direct sub-expression of `e` mutably (descending into lambdas).
+pub fn for_each_child_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
+    match &mut e.kind {
+        ExprKind::Unit | ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Var(_) | ExprKind::Continue => {}
+        ExprKind::Interp(parts) => {
+            for p in parts.iter_mut() {
+                if let InterpPart::Expr(x, _) = p {
+                    f(x);
+                }
+            }
+        }
+        ExprKind::List(items) => items.iter_mut().for_each(|i| f(&mut i.expr)),
+        ExprKind::Comprehension { body, clauses } => {
+            for c in clauses.iter_mut() {
+                match c {
+                    CompClause::For(_, x) | CompClause::If(x) => f(x),
+                }
+            }
+            f(body);
+        }
+        ExprKind::Map(es) => es.iter_mut().for_each(|(k, v)| {
+            f(k);
+            f(v);
+        }),
+        ExprKind::Tuple(items) => items.iter_mut().for_each(|x| f(x)),
+        ExprKind::Record { values, spread, .. } => {
+            values.iter_mut().for_each(|x| f(x));
+            if let Some(s) = spread {
+                f(s);
+            }
+        }
+        ExprKind::Field { target, .. } => f(target),
+        ExprKind::Index { target, index } => {
+            f(target);
+            f(index);
+        }
+        ExprKind::Call { callee, args } => {
+            f(callee);
+            args.iter_mut().for_each(|a| f(&mut a.value));
+        }
+        ExprKind::MethodCall { receiver, args, .. } => {
+            f(receiver);
+            args.iter_mut().for_each(|a| f(&mut a.value));
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => f(expr),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::And(lhs, rhs) | ExprKind::Or(lhs, rhs) => {
+            f(lhs);
+            f(rhs);
+        }
+        ExprKind::Range { start, end, .. } => {
+            f(start);
+            if let Some(x) = end {
+                f(x);
+            }
+        }
+        ExprKind::If { cond, then, els } => {
+            f(cond);
+            f(then);
+            if let Some(x) = els {
+                f(x);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            f(scrutinee);
+            for a in arms.iter_mut() {
+                if let Some(g) = &mut a.guard {
+                    f(g);
+                }
+                f(&mut a.body);
+            }
+        }
+        ExprKind::Block(stmts) => {
+            for s in stmts.iter_mut() {
+                match &mut s.kind {
+                    StmtKind::Let { value, .. } => f(value),
+                    StmtKind::Assign { target, value, .. } => {
+                        f(target);
+                        f(value);
+                    }
+                    StmtKind::Fn { .. } => {}
+                    StmtKind::Assert { cond, msg } => {
+                        f(cond);
+                        if let Some(m) = msg {
+                            f(m);
+                        }
+                    }
+                    StmtKind::Expr(x) => f(x),
+                }
+            }
+        }
+        ExprKind::Lambda(def) => {
+            if let Some(d) = Rc::get_mut(def) {
+                f(&mut d.body);
+            }
+        }
+        ExprKind::While { cond, body } => {
+            f(cond);
+            f(body);
+        }
+        ExprKind::For { iter, body, .. } => {
+            f(iter);
+            f(body);
+        }
+        ExprKind::Loop { body } => f(body),
+        ExprKind::Break(v) | ExprKind::Return(v) => {
+            if let Some(x) = v {
+                f(x);
+            }
+        }
+    }
 }
 
 impl Pattern {

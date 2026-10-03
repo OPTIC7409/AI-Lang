@@ -194,7 +194,10 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("collections", "merge", 2, 2, b_merge, "merge(a: Map, b: Map) -> Map\nAll entries of a and b (b wins on conflicts)."),
     b!("collections", "map_values", 2, 2, b_map_values, "map_values(m: Map[K, V], f: fn(V) -> W) -> Map[K, W]\nApply f to every value."),
     // ---- strings
-    b!("strings", "split", 1, 2, b_split, "split(s: Str, sep: Str) -> List[Str]\nSplit on a separator (on whitespace, when sep is omitted)."),
+    b!("strings", "split", 1, 3, b_split, "split(s: Str, sep: Str, limit: Int) -> List[Str]\nSplit on a separator (on whitespace, when sep is omitted), into at most `limit` pieces if given."),
+    b!("strings", "split_once", 2, 2, b_split_once, "split_once(s: Str, sep: Str) -> Option[(Str, Str)]\nThe parts before and after the first occurrence of sep."),
+    b!("strings", "strip_prefix", 2, 2, b_strip_prefix, "strip_prefix(s: Str, prefix: Str) -> Option[Str]\nThe rest of s after the prefix, or None if s does not start with it."),
+    b!("strings", "strip_suffix", 2, 2, b_strip_suffix, "strip_suffix(s: Str, suffix: Str) -> Option[Str]\nThe rest of s before the suffix, or None if s does not end with it."),
     b!("strings", "lines", 1, 1, b_lines, "lines(s: Str) -> List[Str]\nSplit into lines."),
     b!("strings", "words", 1, 1, b_words, "words(s: Str) -> List[Str]\nSplit on whitespace."),
     b!("strings", "chars", 1, 1, b_chars, "chars(s: Str) -> List[Str]\nThe characters, as one-character strings."),
@@ -228,6 +231,10 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("option", "map_err", 2, 2, b_map_err, "map_err(x: Result[T, E], f: fn(E) -> F) -> Result[T, F]\nTransform the error value."),
     b!("option", "ok_or", 2, 2, b_ok_or, "ok_or(x: Option[T], err: E) -> Result[T, E]\nSome(v) becomes Ok(v); None becomes Err(err)."),
     b!("option", "ok", 1, 1, b_ok, "ok(x: Result[T, E]) -> Option[T]\nOk(v) becomes Some(v); Err becomes None."),
+    b!("option", "err", 1, 1, b_err, "err(x: Result[T, E]) -> Option[E]\nErr(e) becomes Some(e); Ok becomes None."),
+    b!("option", "unwrap_err", 1, 1, b_unwrap_err, "unwrap_err(x: Result[T, E]) -> E\nThe error inside Err; an error for Ok."),
+    b!("option", "collect_ok", 1, 1, b_collect_ok, "collect_ok(xs: List[Result[T, E]]) -> Result[List[T], E]\nOk with all the values, or the first Err."),
+    b!("option", "collect_some", 1, 1, b_collect_some, "collect_some(xs: List[Option[T]]) -> Option[List[T]]\nSome with all the values, or None if any element is None."),
 ];
 
 pub fn builtin_index(name: &str) -> Option<usize> {
@@ -398,7 +405,7 @@ fn ordering_of(it: &Interp, v: &Value, sp: Span) -> R<Ordering> {
     }
 }
 
-fn list_arg(it: &Interp, a: &[Value], i: usize, f: &str, sp: Span) -> R<Rc<Vec<Value>>> {
+fn list_arg(it: &Interp, a: &[Value], i: usize, f: &str, sp: Span) -> R<Rc<List>> {
     match &a[i] {
         Value::List(xs) => Ok(xs.clone()),
         v => Err(type_err(it, f, i, "a List", v, sp)),
@@ -412,8 +419,8 @@ fn map_arg(it: &Interp, a: &[Value], i: usize, f: &str, sp: Span) -> R<Rc<MapVal
     }
 }
 
-fn io_err(it: &Interp, e: std::io::Error) -> Value {
-    it.err_val(Value::str(e.to_string()))
+fn io_err(it: &Interp, path: &str, e: std::io::Error) -> Value {
+    it.err_val(Value::str(format!("{}: {}", path, e)))
 }
 
 // ============================================================ io
@@ -491,7 +498,7 @@ fn b_read_file(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let p = str_arg(it, &a, 0, "read_file", sp)?;
     Ok(match std::fs::read_to_string(p) {
         Ok(s) => it.ok(Value::str(s)),
-        Err(e) => io_err(it, e),
+        Err(e) => io_err(it, p, e),
     })
 }
 
@@ -500,7 +507,7 @@ fn b_write_file(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let t = str_arg(it, &a, 1, "write_file", sp)?;
     Ok(match std::fs::write(p, t) {
         Ok(()) => it.ok(Value::Unit),
-        Err(e) => io_err(it, e),
+        Err(e) => io_err(it, p, e),
     })
 }
 
@@ -510,7 +517,7 @@ fn b_append_file(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let r = std::fs::OpenOptions::new().create(true).append(true).open(p).and_then(|mut f| f.write_all(t.as_bytes()));
     Ok(match r {
         Ok(()) => it.ok(Value::Unit),
-        Err(e) => io_err(it, e),
+        Err(e) => io_err(it, p, e),
     })
 }
 
@@ -527,7 +534,7 @@ fn b_list_dir(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
             names.sort();
             Ok(it.ok(Value::list(names.into_iter().map(Value::str).collect())))
         }
-        Err(e) => Ok(io_err(it, e)),
+        Err(e) => Ok(io_err(it, p, e)),
     }
 }
 
@@ -990,7 +997,7 @@ fn b_max(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 
 fn b_len(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     Ok(Value::Int(match &a[0] {
-        Value::Str(s) => s.chars().count() as i64,
+        Value::Str(s) => s.char_len() as i64,
         Value::List(xs) | Value::Tuple(xs) => xs.len() as i64,
         Value::Map(m) => m.len() as i64,
         Value::Range(r) => match r.len() {
@@ -1039,7 +1046,7 @@ fn b_range(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 
 fn owned_list(it: &Interp, v: Value, f: &str, i: usize, sp: Span) -> R<Vec<Value>> {
     match v {
-        Value::List(xs) => Ok(Rc::try_unwrap(xs).unwrap_or_else(|rc| (*rc).clone())),
+        Value::List(xs) => Ok(list_into_vec(xs)),
         other => Err(type_err(it, f, i, "a List", &other, sp)),
     }
 }
@@ -1085,7 +1092,7 @@ fn b_insert(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     match take_arg(&mut a, 0) {
         Value::List(xs) => {
             let i = int_arg(it, &a, 1, "insert", sp)?;
-            let mut xs = Rc::try_unwrap(xs).unwrap_or_else(|rc| (*rc).clone());
+            let mut xs = list_into_vec(xs);
             let j = insert_index(it, i, xs.len(), sp)?;
             xs.insert(j, x);
             Ok(Value::list(xs))
@@ -1122,7 +1129,7 @@ fn b_remove(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
             let Some(j) = norm_index(i, xs.len()) else {
                 return Err(it.err(sp, "E0204", format!("index {} is out of bounds for a list of length {}", i, xs.len())));
             };
-            let mut xs = Rc::try_unwrap(xs).unwrap_or_else(|rc| (*rc).clone());
+            let mut xs = list_into_vec(xs);
             xs.remove(j);
             Ok(Value::list(xs))
         }
@@ -1212,7 +1219,7 @@ fn m_swap(it: &mut Interp, t: &mut Value, a: Vec<Value>, sp: Span) -> R {
 fn get_impl(it: &mut Interp, a: &[Value], sp: Span, name: &str) -> R<Option<Value>> {
     Ok(match (&a[0], &a[1]) {
         (Value::List(xs), Value::Int(i)) | (Value::Tuple(xs), Value::Int(i)) => norm_index(*i, xs.len()).map(|j| xs[j].clone()),
-        (Value::Str(s), Value::Int(i)) => norm_index(*i, s.chars().count()).map(|j| Value::str(s.chars().nth(j).unwrap().to_string())),
+        (Value::Str(s), Value::Int(i)) => norm_index(*i, s.char_len()).map(|j| Value::str(s.char_at(j).unwrap_or(""))),
         (Value::Map(m), k) => m.get(k).cloned(),
         (Value::Record(r), Value::Str(k)) => r.get(k).cloned(),
         (Value::List(_) | Value::Str(_), other) => return Err(type_err(it, name, 1, "an Int index", other, sp)),
@@ -1450,7 +1457,7 @@ fn m_sort_by(it: &mut Interp, t: &mut Value, a: Vec<Value>, sp: Span) -> R {
     let f = fn_arg(it, &a, 0, "sort_by!", sp)?;
     let v = std::mem::take(t);
     let xs = match &v {
-        Value::List(xs) => (**xs).clone(),
+        Value::List(xs) => xs.to_vec(),
         other => {
             let e = type_err(it, "sort_by!", 0, "a List", other, sp);
             *t = v;
@@ -1621,7 +1628,10 @@ fn b_drop(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let n = usize_arg(it, &a, 1, "drop", sp)?;
     let v = take_arg(&mut a, 0);
     match v {
-        Value::Str(s) => Ok(Value::str(s.chars().skip(n).collect::<String>())),
+        Value::Str(s) => {
+            let len = s.char_len();
+            Ok(Value::str(s.slice_chars(n.min(len), len)))
+        }
         v => {
             let xs = items(it, v, "drop", 0, sp)?;
             Ok(Value::list(xs.into_iter().skip(n).collect()))
@@ -1814,6 +1824,7 @@ fn b_repeat(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     if n > 100_000_000 {
         return Err(it.err(sp, "E0216", "repeat count is too large"));
     }
+    it.tick_n(n as u64, sp)?;
     let x = take_arg(&mut a, 0);
     if let Value::Str(s) = &x {
         if s.len().saturating_mul(n) > 1 << 31 {
@@ -1911,7 +1922,35 @@ fn b_split(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     if sep.is_empty() {
         return Ok(Value::list(s.chars().map(|c| Value::str(c.to_string())).collect()));
     }
+    if a.len() == 3 {
+        let n = usize_arg(it, &a, 2, "split", sp)?;
+        if n == 0 {
+            return Err(it.err(sp, "E0216", "`split` limit must be at least 1"));
+        }
+        return Ok(Value::list(s.splitn(n, sep).map(Value::str).collect()));
+    }
     Ok(Value::list(s.split(sep).map(Value::str).collect()))
+}
+
+fn b_split_once(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let s = str_arg(it, &a, 0, "split_once", sp)?;
+    let sep = str_arg(it, &a, 1, "split_once", sp)?;
+    let r = s.split_once(sep).map(|(x, y)| Value::tuple(vec![Value::str(x), Value::str(y)]));
+    Ok(it.option(r))
+}
+
+fn b_strip_prefix(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let s = str_arg(it, &a, 0, "strip_prefix", sp)?;
+    let p = str_arg(it, &a, 1, "strip_prefix", sp)?;
+    let r = s.strip_prefix(p).map(Value::str);
+    Ok(it.option(r))
+}
+
+fn b_strip_suffix(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let s = str_arg(it, &a, 0, "strip_suffix", sp)?;
+    let p = str_arg(it, &a, 1, "strip_suffix", sp)?;
+    let r = s.strip_suffix(p).map(Value::str);
+    Ok(it.option(r))
 }
 
 fn b_lines(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -2150,6 +2189,55 @@ fn b_ok_or(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     }
 }
 
+fn b_err(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    match a[0].as_variant(RESULT_ID) {
+        Some((1, Some(e))) => {
+            let e = e.clone();
+            Ok(it.some(e))
+        }
+        Some(_) => Ok(it.none()),
+        None => Err(type_err(it, "err", 0, "a Result", &a[0], sp)),
+    }
+}
+
+fn b_unwrap_err(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    match a[0].as_variant(RESULT_ID) {
+        Some((1, Some(e))) => Ok(e.clone()),
+        Some(_) => Err(it.err(sp, "E0210", format!("called `unwrap_err` on {}", short_repr(&a[0])))),
+        None => Err(type_err(it, "unwrap_err", 0, "a Result", &a[0], sp)),
+    }
+}
+
+fn collect_variants(it: &mut Interp, mut a: Vec<Value>, sp: Span, type_id: u32, name: &str) -> R {
+    let v = take_arg(&mut a, 0);
+    let xs = items(it, v, name, 0, sp)?;
+    let mut out = Vec::with_capacity(xs.len());
+    for x in xs {
+        match &x {
+            Value::Variant(vv) if vv.ty.id == type_id => {
+                if vv.tag == 0 {
+                    out.push(vv.values[0].clone());
+                } else {
+                    return Ok(x);
+                }
+            }
+            other => {
+                let want = if type_id == OPTION_ID { "Options" } else { "Results" };
+                return Err(it.err(sp, "E0200", format!("`{}` needs a list of {}, but found {}", name, want, describe(other))));
+            }
+        }
+    }
+    Ok(if type_id == OPTION_ID { it.some(Value::list(out)) } else { it.ok(Value::list(out)) })
+}
+
+fn b_collect_ok(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    collect_variants(it, a, sp, RESULT_ID, "collect_ok")
+}
+
+fn b_collect_some(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    collect_variants(it, a, sp, OPTION_ID, "collect_some")
+}
+
 fn b_ok(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     match a[0].as_variant(RESULT_ID) {
         Some((0, Some(v))) => {
@@ -2315,7 +2403,10 @@ impl<'a> JsonParser<'a> {
     }
 
     fn err<T>(&self, msg: &str) -> Result<T, String> {
-        Err(format!("{} at byte {}", msg, self.pos))
+        let before = &self.s[..self.pos.min(self.s.len())];
+        let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+        let col = before.iter().rev().take_while(|b| **b != b'\n').count() + 1;
+        Err(format!("{} at line {}, column {}", msg, line, col))
     }
 
     fn value(&mut self, it: &Interp, depth: usize) -> Result<Value, String> {
@@ -2406,6 +2497,10 @@ impl<'a> JsonParser<'a> {
                     self.pos += 1;
                 }
                 let text = std::str::from_utf8(&self.s[start..self.pos]).unwrap_or("");
+                let digits = text.trim_start_matches('-');
+                if digits.len() > 1 && digits.starts_with('0') && digits.as_bytes()[1].is_ascii_digit() {
+                    return self.err("numbers may not have leading zeros");
+                }
                 if !float {
                     if let Ok(n) = text.parse::<i64>() {
                         return Ok(Value::Int(n));

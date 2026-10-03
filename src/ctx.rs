@@ -28,6 +28,8 @@ pub struct GlobalInfo {
     pub span: Span,
     /// False for a top-level `let`/`var` until its declaration has been resolved.
     pub declared: bool,
+    /// The declared type of a top-level `var`/`let` with an annotation.
+    pub ty: Option<Ty>,
 }
 
 /// The static signature of one user-defined function (for arity checks and
@@ -35,6 +37,7 @@ pub struct GlobalInfo {
 #[derive(Clone, Debug)]
 pub struct FnSig {
     pub params: Vec<(Name, bool, Option<Ty>)>,
+    pub ret: Option<Ty>,
     pub span: Span,
 }
 
@@ -95,7 +98,7 @@ impl Ctx {
     }
 
     pub fn add_global(&mut self, name: Name, kind: GlobalKind, span: Span) -> u32 {
-        self.globals.push(GlobalInfo { name, kind, span, declared: true });
+        self.globals.push(GlobalInfo { name, kind, span, declared: true, ty: None });
         (self.globals.len() - 1) as u32
     }
 

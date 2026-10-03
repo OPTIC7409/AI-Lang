@@ -673,6 +673,11 @@ impl<'a> Lexer<'a> {
     fn interpolation(&mut self) -> Result<StrPart, Diagnostic> {
         let open = self.pos;
         self.pos += 1;
+        if self.peek() == b'{' {
+            return Err(self
+                .err("E0005", "`{{` is not an escape sequence in Cogito strings", open, open + 2)
+                .help("write `\\{` for a literal `{` and `\\}` for `}`, or use a raw string r\"...\" (no interpolation)"));
+        }
         let expr_start = self.pos;
         let mut depth: i32 = 0;
         let mut spec_start: Option<usize> = None;
@@ -686,7 +691,12 @@ impl<'a> Lexer<'a> {
             let c = self.peek();
             match c {
                 b'"' => {
-                    self.skip_nested_string()?;
+                    if self.skip_nested_string().is_err() {
+                        return Err(self
+                            .err("E0005", "unclosed `{` in string", open, open + 1)
+                            .label("this `{` starts an interpolation that is never closed")
+                            .help("write `\\{` for a literal brace, or use a raw string r\"...\""));
+                    }
                     continue;
                 }
                 b'(' | b'[' | b'{' => depth += 1,

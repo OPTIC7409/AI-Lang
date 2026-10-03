@@ -24,3 +24,8 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "unwind"
+
+# The interpreter is much faster with basic optimizations, which keeps
+# `cargo test` (which runs many Cogito programs) quick.
+[profile.dev]
+opt-level = 1

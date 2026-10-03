@@ -33,6 +33,9 @@ OPTIONS (test / verify):
     --filter TEXT    only run tests/functions whose name contains TEXT
     --all            verify: also check functions without contracts
     --budget N       maximum steps (calls + loop iterations) per generated case (default 10000000)
+
+GLOBAL OPTIONS:
+    --max-depth N    maximum number of nested calls before a stack-overflow error (default 100000)
     --no-color       disable colored output
 ",
         cogito::VERSION
@@ -81,8 +84,9 @@ fn cmd_run(path: &Path, prog_args: Vec<String>, color: bool) -> ExitCode {
     }
 }
 
-fn cmd_eval(code: &str, color: bool) -> ExitCode {
+fn cmd_eval(code: &str, prog_args: Vec<String>, color: bool) -> ExitCode {
     let mut it = Interp::new();
+    it.args = prog_args;
     let mut ns = Namespace::default();
     let (prog, _) = match cogito::load_source(&mut it, "<eval>", code, Path::new("."), &mut ns, false) {
         Ok(p) => p,
@@ -91,8 +95,15 @@ fn cmd_eval(code: &str, color: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match cogito::run(&mut it, &prog, &ns) {
-        Ok(()) => ExitCode::SUCCESS,
+    match cogito::run_with_value(&mut it, &prog, &ns) {
+        Ok(v) => {
+            if let Some(v) = v {
+                if !matches!(v, cogito::value::Value::Unit) {
+                    println!("{}", cogito::value::repr(&v));
+                }
+            }
+            ExitCode::SUCCESS
+        }
         Err(d) => {
             eprint!("{}", d.render(&it.ctx.sm, color));
             ExitCode::from(1)
@@ -172,9 +183,12 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
         total.add(s);
     }
     let secs = start.elapsed().as_secs_f64();
-    let ok = total.failed == 0 && load_errors == 0;
+    let ok = total.failed == 0 && total.gave_up == 0 && load_errors == 0;
     let status = if ok { format!("{}ok{}", c.green, c.reset) } else { format!("{}FAILED{}", c.red, c.reset) };
     let mut parts = vec![format!("{} passed", total.passed), format!("{} failed", total.failed)];
+    if total.gave_up > 0 {
+        parts.push(format!("{} gave up", total.gave_up));
+    }
     if total.skipped > 0 {
         parts.push(format!("{} skipped", total.skipped));
     }
@@ -305,7 +319,20 @@ fn parse_opts(args: &[String], color: bool, default_cases: u32) -> Result<(Optio
 
 fn real_main() -> ExitCode {
     cogito::builtins::start_clock();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Global option: --max-depth N (maximum number of nested calls).
+    if let Some(i) = args.iter().position(|a| a == "--max-depth") {
+        match args.get(i + 1).and_then(|n| n.parse::<usize>().ok()) {
+            Some(n) => {
+                std::env::set_var("COGITO_MAX_DEPTH", n.to_string());
+                args.drain(i..i + 2);
+            }
+            None => {
+                eprintln!("error: --max-depth needs a number");
+                return ExitCode::from(2);
+            }
+        }
+    }
     let color = color_enabled(&args);
     let Some(cmd) = args.first() else {
         let mut it = Interp::new();
@@ -334,7 +361,7 @@ fn real_main() -> ExitCode {
             }
         },
         "eval" | "-e" => match args.get(1) {
-            Some(code) => cmd_eval(code, color),
+            Some(code) => cmd_eval(code, args[2..].to_vec(), color),
             None => {
                 eprintln!("usage: cogito eval \"CODE\"");
                 ExitCode::from(2)
@@ -389,6 +416,9 @@ fn real_main() -> ExitCode {
 fn main() -> ExitCode {
     // Run on a thread with a large stack so that deeply recursive Cogito
     // programs hit Cogito's own (friendly) recursion limit first.
-    let child = std::thread::Builder::new().stack_size(1 << 30).spawn(real_main).expect("failed to start interpreter thread");
+    // The stack is reserved, not committed, so a large size costs nothing
+    // until it is used.
+    let stack = usize::try_from(4u64 << 30).unwrap_or(512 << 20);
+    let child = std::thread::Builder::new().stack_size(stack).spawn(real_main).expect("failed to start interpreter thread");
     child.join().unwrap_or(ExitCode::from(101))
 }

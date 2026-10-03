@@ -58,14 +58,37 @@ pub fn load_file(it: &mut Interp, path: &Path, ns: &mut Namespace) -> Result<(Pr
 
 /// Run a whole program: top-level statements, then `main()` if defined.
 pub fn run(it: &mut Interp, prog: &Program, ns: &Namespace) -> Result<(), Diagnostic> {
-    let r = it.run_program(prog).and_then(|_| match it.global_by_name(ns, "main") {
-        Some(f) if f.is_callable() => it.call(&f, vec![], span::Span::default()).map(|_| ()),
-        _ => Ok(()),
-    });
+    run_with_value(it, prog, ns).map(|_| ())
+}
+
+/// Like [`run`], but also returns the value of the program's last top-level
+/// statement when it is an expression (as the REPL and `cogito eval` show).
+pub fn run_with_value(it: &mut Interp, prog: &Program, ns: &Namespace) -> Result<Option<value::Value>, Diagnostic> {
+    let r = (|| -> interp::R<Option<value::Value>> {
+        it.install(prog)?;
+        let mut env = interp::Env::new(prog.num_slots);
+        let n = prog.items.len();
+        let mut last = None;
+        for (i, item) in prog.items.iter().enumerate() {
+            if let ast::Item::Stmt(s) = item {
+                if let (true, ast::StmtKind::Expr(e)) = (i + 1 == n, &s.kind) {
+                    last = Some(it.eval(e, &mut env)?);
+                    continue;
+                }
+                it.exec_stmt(s, &mut env)?;
+            }
+        }
+        if let Some(f) = it.global_by_name(ns, "main") {
+            if f.is_callable() {
+                it.call(&f, vec![], span::Span::default())?;
+            }
+        }
+        Ok(last)
+    })();
     it.flush();
     match r {
-        Ok(()) => Ok(()),
+        Ok(v) => Ok(v),
         Err(interp::Ctrl::Error(d)) => Err(*d),
-        Err(_) => Ok(()),
+        Err(_) => Ok(None),
     }
 }

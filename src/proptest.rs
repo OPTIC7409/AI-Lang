@@ -11,7 +11,12 @@ const UNICODE: &[&str] = &["é", "ß", "中", "😀", "ñ", "Ω", "ü", "й"];
 pub struct Gen<'a> {
     pub it: &'a Interp,
     pub rng: &'a mut Rng,
+    /// Occasionally produce extreme Ints (such as max_int) for top-level parameters.
+    pub extremes: bool,
 }
+
+/// Extreme Int values, likely to expose overflow.
+const EXTREME_INTS: [i64; 9] = [i64::MAX, i64::MIN, i64::MAX - 1, i64::MIN + 1, 1 << 31, -(1 << 31), 1 << 32, 1 << 53, -(1 << 53)];
 
 fn mentions(ty: &Ty, id: u32) -> bool {
     match ty {
@@ -32,7 +37,9 @@ impl<'a> Gen<'a> {
             Ty::Bool => Value::Bool(self.rng.next_u64() & 1 == 1),
             Ty::Int => {
                 let r = self.rng.below(100);
-                if r < 15 {
+                if self.extremes && depth == 0 && r < 4 {
+                    Value::Int(EXTREME_INTS[self.rng.below(EXTREME_INTS.len())])
+                } else if r < 15 {
                     Value::Int([0, 1, -1, 2, -2, 3, 10, -10][self.rng.below(8)])
                 } else if r < 85 {
                     Value::Int(self.rng.range(-size, size))
@@ -130,10 +137,64 @@ impl<'a> Gen<'a> {
                 self.named(&td, args, size as u32, depth)?
             }
             Ty::Fn(..) => return Err(format!("cannot generate random functions (type `{}`)", ty)),
-            Ty::Any | Ty::Generic(_) | Ty::Param(..) => {
-                return Err(format!("cannot generate values of type `{}`; give the input a concrete type such as Int or List[Str]", ty))
-            }
+            // Generic type parameters are instantiated with Int.
+            Ty::Generic(_) | Ty::Param(..) => return self.value(&Ty::Int, size as u32, depth),
+            Ty::Any => return Err(format!("cannot generate values of type `{}`; give the input a concrete type such as Int or List[Str]", ty)),
         })
+    }
+
+    /// An Int within optional inclusive bounds, favouring the boundaries.
+    pub fn int_in(&mut self, lo: Option<i64>, hi: Option<i64>, size: u32) -> Value {
+        let natural = match self.value(&Ty::Int, size, 1) {
+            Ok(Value::Int(n)) => n,
+            _ => 0,
+        };
+        let r = self.rng.below(100);
+        if self.extremes && r < 4 {
+            let ok: Vec<i64> = EXTREME_INTS.iter().copied().filter(|x| lo.is_none_or(|l| *x >= l) && hi.is_none_or(|h| *x <= h)).collect();
+            if !ok.is_empty() {
+                return Value::Int(ok[self.rng.below(ok.len())]);
+            }
+        }
+        let v = match (lo, hi) {
+            (Some(l), Some(h)) if l <= h => {
+                if r < 10 {
+                    let edges = [l, l.saturating_add(1).min(h), h.saturating_sub(1).max(l), h];
+                    edges[self.rng.below(4)]
+                } else if r < 25 {
+                    self.rng.range(l, h)
+                } else {
+                    // Mostly values of a size that grows during the run, measured
+                    // from whichever bound is closer to zero.
+                    let span = natural.unsigned_abs().min(i64::MAX as u64) as i64;
+                    if l >= 0 || (h >= 0 && l.unsigned_abs() > h.unsigned_abs()) {
+                        if l >= 0 {
+                            l.saturating_add(span).min(h)
+                        } else {
+                            natural.clamp(l, h)
+                        }
+                    } else {
+                        h.saturating_sub(span).max(l)
+                    }
+                }
+            }
+            (Some(l), None) => {
+                if r < 20 {
+                    l
+                } else {
+                    l.saturating_add(natural.unsigned_abs().min(i64::MAX as u64) as i64)
+                }
+            }
+            (None, Some(h)) => {
+                if r < 20 {
+                    h
+                } else {
+                    h.saturating_sub(natural.unsigned_abs().min(i64::MAX as u64) as i64)
+                }
+            }
+            _ => natural,
+        };
+        Value::Int(v)
     }
 
     fn named(&mut self, td: &Rc<TypeDef>, args: &[Ty], size: u32, depth: u32) -> Result<Value, String> {
@@ -235,13 +296,13 @@ pub fn shrink(v: &Value) -> Vec<Value> {
                     out.push(Value::list(xs[xs.len() / 2..].to_vec()));
                 }
                 for i in 0..xs.len().min(32) {
-                    let mut c = (**xs).clone();
+                    let mut c = xs.to_vec();
                     c.remove(i);
                     out.push(Value::list(c));
                 }
                 for i in 0..xs.len().min(16) {
                     for s in shrink(&xs[i]).into_iter().take(4) {
-                        let mut c = (**xs).clone();
+                        let mut c = xs.to_vec();
                         c[i] = s;
                         out.push(Value::list(c));
                     }
@@ -251,7 +312,7 @@ pub fn shrink(v: &Value) -> Vec<Value> {
         Value::Tuple(xs) => {
             for i in 0..xs.len() {
                 for s in shrink(&xs[i]).into_iter().take(6) {
-                    let mut c = (**xs).clone();
+                    let mut c = xs.to_vec();
                     c[i] = s;
                     out.push(Value::tuple(c));
                 }

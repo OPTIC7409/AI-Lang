@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 pub type Name = Rc<str>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Ty {
     Any,
     Unit,
@@ -45,6 +45,14 @@ impl Ty {
             Ty::Named { id, name, args: a } => Ty::Named { id: *id, name: name.clone(), args: a.iter().map(|t| t.subst(args)).collect() },
             other => other.clone(),
         }
+    }
+
+    /// A non-zero fingerprint of this type, used to memoize annotation checks.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish() | 1
     }
 
     pub fn is_any(&self) -> bool {

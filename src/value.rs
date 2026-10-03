@@ -7,10 +7,12 @@
 
 use crate::ast::{FnDef, Module};
 use crate::types::{Name, TypeDef, OPTION_ID, RESULT_ID};
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 #[derive(Clone, Default)]
@@ -20,9 +22,9 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Str(Rc<String>),
-    List(Rc<Vec<Value>>),
-    Tuple(Rc<Vec<Value>>),
+    Str(Rc<Text>),
+    List(Rc<List>),
+    Tuple(Rc<List>),
     Map(Rc<MapVal>),
     Record(Rc<RecordVal>),
     Variant(Rc<VariantVal>),
@@ -36,6 +38,160 @@ pub enum Value {
     /// A record constructor (tag 0) or an enum variant constructor.
     Ctor(Rc<TypeDef>, u32),
     Module(Rc<Module>),
+}
+
+/// The storage of a string. It derefs to `String`, and caches its length in
+/// characters so that `len` and indexing are O(1) for ASCII text. Any
+/// mutable access clears the cache.
+pub struct Text {
+    s: String,
+    /// Character count plus one; 0 means "not yet computed".
+    chars: Cell<usize>,
+}
+
+impl Text {
+    pub fn new(s: String) -> Text {
+        Text { s, chars: Cell::new(0) }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.s
+    }
+
+    pub fn char_len(&self) -> usize {
+        let c = self.chars.get();
+        if c != 0 {
+            return c - 1;
+        }
+        let n = if self.s.is_ascii() { self.s.len() } else { self.s.chars().count() };
+        self.chars.set(n + 1);
+        n
+    }
+
+    pub fn is_ascii_text(&self) -> bool {
+        self.char_len() == self.s.len()
+    }
+
+    /// The character at a character index.
+    pub fn char_at(&self, i: usize) -> Option<&str> {
+        if self.is_ascii_text() {
+            return self.s.get(i..i + 1);
+        }
+        let (b, c) = self.s.char_indices().nth(i)?;
+        Some(&self.s[b..b + c.len_utf8()])
+    }
+
+    /// The substring between two character indexes (already clamped).
+    pub fn slice_chars(&self, a: usize, b: usize) -> &str {
+        if self.is_ascii_text() {
+            return &self.s[a..b];
+        }
+        let mut it = self.s.char_indices().map(|(i, _)| i).chain(std::iter::once(self.s.len()));
+        let start = it.nth(a).unwrap_or(self.s.len());
+        let end = if b > a { it.nth(b - a - 1).unwrap_or(self.s.len()) } else { start };
+        &self.s[start..end]
+    }
+}
+
+impl Deref for Text {
+    type Target = String;
+    fn deref(&self) -> &String {
+        &self.s
+    }
+}
+
+impl DerefMut for Text {
+    fn deref_mut(&mut self) -> &mut String {
+        self.chars.set(0);
+        &mut self.s
+    }
+}
+
+impl Clone for Text {
+    fn clone(&self) -> Text {
+        Text { s: self.s.clone(), chars: Cell::new(self.chars.get()) }
+    }
+}
+
+impl PartialEq for Text {
+    fn eq(&self, other: &Text) -> bool {
+        self.s == other.s
+    }
+}
+
+impl Eq for Text {}
+
+impl Hash for Text {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.s.hash(h)
+    }
+}
+
+impl std::fmt::Debug for Text {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.s.fmt(f)
+    }
+}
+
+impl std::fmt::Display for Text {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.s.fmt(f)
+    }
+}
+
+/// The storage of a list or tuple. It derefs to `Vec<Value>`; it also
+/// remembers which type annotation its elements were last checked against,
+/// so that passing the same unchanged list through many annotated calls costs
+/// O(1) per call. Any mutable access clears that memo.
+pub struct List {
+    items: Vec<Value>,
+    checked: Cell<u64>,
+}
+
+impl List {
+    pub fn new(items: Vec<Value>) -> List {
+        List { items, checked: Cell::new(0) }
+    }
+
+    pub fn into_vec(self) -> Vec<Value> {
+        self.items
+    }
+
+    pub fn checked(&self) -> u64 {
+        self.checked.get()
+    }
+
+    pub fn set_checked(&self, h: u64) {
+        self.checked.set(h)
+    }
+}
+
+impl Deref for List {
+    type Target = Vec<Value>;
+    fn deref(&self) -> &Vec<Value> {
+        &self.items
+    }
+}
+
+impl DerefMut for List {
+    fn deref_mut(&mut self) -> &mut Vec<Value> {
+        self.checked.set(0);
+        &mut self.items
+    }
+}
+
+impl Clone for List {
+    fn clone(&self) -> List {
+        List { items: self.items.clone(), checked: Cell::new(self.checked.get()) }
+    }
+}
+
+/// Take the elements out of a shared list, copying only if it is shared.
+pub fn list_into_vec(rc: Rc<List>) -> Vec<Value> {
+    match Rc::try_unwrap(rc) {
+        Ok(l) => l.items,
+        Err(rc) => rc.items.clone(),
+    }
 }
 
 pub struct Closure {
@@ -178,6 +334,8 @@ fn hash_value<H: Hasher>(v: &Value, h: &mut H) {
 pub struct MapVal {
     pub entries: Vec<(Value, Value)>,
     index: HashMap<HKey, usize>,
+    /// Memo of the last type annotation the map was checked against (see `List`).
+    checked: Cell<u64>,
 }
 
 impl MapVal {
@@ -186,7 +344,7 @@ impl MapVal {
     }
 
     pub fn with_capacity(n: usize) -> MapVal {
-        MapVal { entries: Vec::with_capacity(n), index: HashMap::with_capacity(n) }
+        MapVal { entries: Vec::with_capacity(n), index: HashMap::with_capacity(n), checked: Cell::new(0) }
     }
 
     pub fn len(&self) -> usize {
@@ -201,7 +359,16 @@ impl MapVal {
         self.index.get(&HKey(k.clone())).map(|&i| &self.entries[i].1)
     }
 
+    pub fn checked(&self) -> u64 {
+        self.checked.get()
+    }
+
+    pub fn set_checked(&self, h: u64) {
+        self.checked.set(h)
+    }
+
     pub fn get_mut(&mut self, k: &Value) -> Option<&mut Value> {
+        self.checked.set(0);
         match self.index.get(&HKey(k.clone())) {
             Some(&i) => Some(&mut self.entries[i].1),
             None => None,
@@ -213,6 +380,7 @@ impl MapVal {
     }
 
     pub fn insert(&mut self, k: Value, v: Value) -> Option<Value> {
+        self.checked.set(0);
         match self.index.get(&HKey(k.clone())) {
             Some(&i) => Some(std::mem::replace(&mut self.entries[i].1, v)),
             None => {
@@ -224,6 +392,7 @@ impl MapVal {
     }
 
     pub fn remove(&mut self, k: &Value) -> Option<Value> {
+        self.checked.set(0);
         let i = self.index.remove(&HKey(k.clone()))?;
         let (_, v) = self.entries.remove(i);
         for idx in self.index.values_mut() {
@@ -235,6 +404,7 @@ impl MapVal {
     }
 
     pub fn clear(&mut self) {
+        self.checked.set(0);
         self.entries.clear();
         self.index.clear();
     }
@@ -242,15 +412,15 @@ impl MapVal {
 
 impl Value {
     pub fn str(s: impl Into<String>) -> Value {
-        Value::Str(Rc::new(s.into()))
+        Value::Str(Rc::new(Text::new(s.into())))
     }
 
     pub fn list(v: Vec<Value>) -> Value {
-        Value::List(Rc::new(v))
+        Value::List(Rc::new(List::new(v)))
     }
 
     pub fn tuple(v: Vec<Value>) -> Value {
-        Value::Tuple(Rc::new(v))
+        Value::Tuple(Rc::new(List::new(v)))
     }
 
     pub fn as_int(&self) -> Option<i64> {
