@@ -273,7 +273,9 @@ impl Interp {
                 } else {
                     "this usually means an infinite loop, or an input too large for the algorithm;\nlimit the inputs with `where`/`requires`, or raise the limit with `--budget N`"
                 };
-                return Err(self.fail(self.diag(span, "E0219", format!("step budget exceeded: more than {} calls and loop iterations", b)).help(help)));
+                return Err(
+                    self.fail(self.diag(span, "E0219", format!("step budget exceeded: more than {} calls and loop iterations", b)).help(help))
+                );
             }
         }
         Ok(())
@@ -621,6 +623,9 @@ impl Interp {
                     return Ok(());
                 }
                 VarRes::Global(s) => {
+                    if let Some(e) = self.busy_error(s, &v.name, "changed", span) {
+                        return Err(e);
+                    }
                     let s = s as usize;
                     match op {
                         None => self.globals[s] = Some(rhs),
@@ -641,7 +646,24 @@ impl Interp {
             }
         }
         let (root, steps) = self.eval_place(target, env)?;
-        let expected = self.expected_type(&root, &steps, decl, env);
+        let types = self.place_types(&root, &steps, decl, env);
+        // Map keys must have the declared key type.
+        for (k, st) in steps.iter().enumerate() {
+            if let (Some(Ty::Map(kt, _)), Step::Index(key)) = (&types[k], st) {
+                if !self.has_type(key, kt, false) {
+                    return Err(self.fail(
+                        self.diag(
+                            span,
+                            "E0200",
+                            format!("type mismatch in assignment to `{}`: the key {} is not a {}", self.snippet(span), short_repr(key), kt),
+                        )
+                        .help("the map was declared with a key type, and every new key must have it"),
+                    ));
+                }
+            }
+        }
+        let expected = types[steps.len()].clone();
+        let stamps = if expected.is_some() { self.valid_stamps(&root, &steps, &types, env) } else { Vec::new() };
         let mismatch = |me: &Self, m: String| {
             me.fail(
                 me.diag(span, "E0200", format!("type mismatch in assignment to `{}`: {}", me.snippet(span), m))
@@ -655,6 +677,7 @@ impl Interp {
                     None => rhs,
                 };
                 self.with_place(&root, &steps, true, env, span, |p| *p = v)?;
+                self.restamp(&root, &steps, &stamps, env);
             }
             Some(op) => {
                 // `+=` on strings and lists appends in place; only the new
@@ -678,6 +701,9 @@ impl Interp {
                         ok
                     })?;
                     if done {
+                        if expected.is_some() {
+                            self.restamp(&root, &steps, &stamps, env);
+                        }
                         return Ok(());
                     }
                 }
@@ -687,27 +713,78 @@ impl Interp {
                     nv = self.conform(nv, t).map_err(|m| mismatch(self, m))?;
                 }
                 self.with_place(&root, &steps, false, env, span, |p| *p = nv)?;
+                self.restamp(&root, &steps, &stamps, env);
             }
         }
         Ok(())
     }
 
-    /// The type that a write to this place must have: the declared type of
-    /// the root variable walked along the path, or the declared type of a
-    /// field of a nominal record or variant.
-    fn expected_type(&self, root: &PlaceRoot, steps: &[Step], decl: Option<&Ty>, env: &Env) -> Option<Ty> {
-        if let Some(t) = decl {
-            if let Some(w) = self.walk_ty(t, steps) {
-                return Some(w);
+    /// The type expected at each level of a place (`types[0]` for the root,
+    /// `types[steps.len()]` for the place itself): the declared type of the
+    /// root walked along the path, or, where that says nothing, the declared
+    /// type of a field of a nominal record or variant.
+    fn place_types(&self, root: &PlaceRoot, steps: &[Step], decl: Option<&Ty>, env: &Env) -> Vec<Option<Ty>> {
+        let mut out = Vec::with_capacity(steps.len() + 1);
+        let mut ty = decl.filter(|t| !t.is_any()).cloned();
+        let mut val = self.root_value(root, env);
+        for st in steps {
+            let next = ty.as_ref().and_then(|t| self.walk_ty(t, std::slice::from_ref(st))).or_else(|| val.and_then(|v| nominal_field_ty(v, st)));
+            out.push(std::mem::replace(&mut ty, next));
+            val = val.and_then(|v| peek_place(v, std::slice::from_ref(st)));
+        }
+        out.push(ty);
+        out
+    }
+
+    /// Before a checked write to a place: the containers along the path whose
+    /// memo says they already match the type expected at their level. A write
+    /// that respects the type at the end of the path keeps them matching, so
+    /// [`Interp::restamp`] can restore their memos afterwards instead of
+    /// letting the next check re-scan whole collections.
+    fn valid_stamps(&self, root: &PlaceRoot, steps: &[Step], types: &[Option<Ty>], env: &Env) -> Vec<(usize, u64)> {
+        let mut out = Vec::new();
+        let Some(mut v) = self.root_value(root, env) else { return out };
+        for (k, st) in steps.iter().enumerate() {
+            if let Some(t) = &types[k] {
+                let fp = t.fingerprint();
+                let ok = match (v, t, st) {
+                    (Value::List(xs), _, _) => xs.checked() == fp,
+                    // A new key must have the key type, too.
+                    (Value::Map(m), Ty::Map(kt, _), Step::Index(key)) => m.checked() == fp && self.has_type(key, kt, false),
+                    _ => false,
+                };
+                if ok {
+                    out.push((k, fp));
+                }
+            }
+            match peek_place(v, std::slice::from_ref(st)) {
+                Some(n) => v = n,
+                None => break,
             }
         }
-        let last = steps.last()?;
-        if !matches!(last, Step::Field(_)) {
-            return None;
+        out
+    }
+
+    fn restamp(&self, root: &PlaceRoot, steps: &[Step], stamps: &[(usize, u64)], env: &Env) {
+        let Some(mut v) = self.root_value(root, env) else { return };
+        let mut si = 0;
+        for (k, st) in steps.iter().enumerate() {
+            if si == stamps.len() {
+                return;
+            }
+            if stamps[si].0 == k {
+                match v {
+                    Value::List(xs) => xs.set_checked(stamps[si].1),
+                    Value::Map(m) => m.set_checked(stamps[si].1),
+                    _ => {}
+                }
+                si += 1;
+            }
+            match peek_place(v, std::slice::from_ref(st)) {
+                Some(n) => v = n,
+                None => return,
+            }
         }
-        let root_val = self.root_value(root, env)?;
-        let parent = peek_place(root_val, &steps[..steps.len() - 1])?;
-        nominal_field_ty(parent, last)
     }
 
     fn root_value<'a>(&'a self, root: &PlaceRoot, env: &'a Env) -> Option<&'a Value> {
@@ -750,7 +827,10 @@ impl Interp {
         match &e.kind {
             ExprKind::Var(v) => match v.res {
                 VarRes::Local(s) => Ok((PlaceRoot::Local(s), vec![])),
-                VarRes::Global(s) => Ok((PlaceRoot::Global(s), vec![])),
+                VarRes::Global(s) => match self.busy_error(s, &v.name, "changed", e.span) {
+                    Some(err) => Err(err),
+                    None => Ok((PlaceRoot::Global(s), vec![])),
+                },
                 _ => Err(self.err(e.span, "E0012", format!("`{}` cannot be changed here", v.name))),
             },
             ExprKind::Field { target, name, .. } => {
@@ -766,6 +846,17 @@ impl Interp {
             }
             _ => Err(self.err(e.span, "E0012", "invalid assignment target")),
         }
+    }
+
+    /// The error for touching a global while a mutating call is changing it.
+    fn busy_error(&self, slot: u32, name: &str, how: &str, span: Span) -> Option<Ctrl> {
+        let (_, f) = self.busy_globals.iter().find(|(b, _)| *b == slot)?;
+        Some(
+            self.fail(
+                self.diag(span, "E0214", format!("`{}` cannot be {} while `{}` is changing it", name, how, f))
+                    .help(format!("`{}` receives `{}` as its first argument; change it through that parameter instead", f, name)),
+            ),
+        )
     }
 
     fn with_place<T>(
@@ -2396,7 +2487,9 @@ impl Interp {
         } else {
             self.load(method, span, env)?
         };
-        let expected = self.expected_type(&root, &steps, decl, env);
+        let types = self.place_types(&root, &steps, decl, env);
+        let expected = types[steps.len()].clone();
+        let stamps = if expected.is_some() { self.valid_stamps(&root, &steps, &types, env) } else { Vec::new() };
         let mut target = self.with_place(&root, &steps, false, env, receiver.span, std::mem::take)?;
         // While the call runs, the global is unavailable (it has been moved
         // into the call), so reading it gives a clear error instead of `()`.
@@ -2409,17 +2502,31 @@ impl Interp {
         };
         let pre = match (&expected, &target) {
             (Some(t @ Ty::List(_)), Value::List(xs)) => Some((xs.checked() == t.fingerprint(), xs.len())),
+            (Some(t @ Ty::Map(..)), Value::Map(m)) => Some((m.checked() == t.fingerprint(), m.len())),
             _ => None,
         };
         let result = self.call_mutating(&f, &mut target, pos, named, span);
         let mut type_error = None;
         if let (Ok(_), Some(t)) = (&result, &expected) {
-            // push!/extend! only append: if the list was known to match before,
-            // only the new elements need checking.
-            let appended_ok = match (&pre, &target, t, &f) {
-                (Some((true, pre_len)), Value::List(xs), Ty::List(et), Value::Builtin(i))
-                    if matches!(BUILTINS[*i as usize].name, "push!" | "extend!") && xs.len() >= *pre_len =>
+            // If the collection was known to match before, built-ins that only
+            // reorder or remove elements keep it matching, and push!/extend!
+            // only need their new elements checked.
+            let builtin = match &f {
+                Value::Builtin(i) => BUILTINS[*i as usize].name,
+                _ => "",
+            };
+            let appended_ok = match (&pre, &target, t) {
+                (Some((true, _)), Value::List(xs), _)
+                    if matches!(builtin, "pop!" | "remove!" | "swap!" | "sort!" | "sort_by!" | "reverse!" | "shuffle!" | "clear!") =>
                 {
+                    xs.set_checked(t.fingerprint());
+                    true
+                }
+                (Some((true, _)), Value::Map(m), _) if matches!(builtin, "remove!" | "clear!") => {
+                    m.set_checked(t.fingerprint());
+                    true
+                }
+                (Some((true, pre_len)), Value::List(xs), Ty::List(et)) if matches!(builtin, "push!" | "extend!") && xs.len() >= *pre_len => {
                     let ok = xs[*pre_len..].iter().all(|x| self.has_type(x, et, false));
                     if ok {
                         xs.set_checked(t.fingerprint());
@@ -2454,6 +2561,7 @@ impl Interp {
         if let Some(e) = type_error {
             return Err(e);
         }
+        self.restamp(&root, &steps, &stamps, env);
         result
     }
 

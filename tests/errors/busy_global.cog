@@ -1,0 +1,7 @@
+# expect: E0214
+var a = [1]
+fn f!(xs: List[Int]) {
+  a = [9]
+}
+a.f!()
+print(a)

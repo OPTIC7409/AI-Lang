@@ -1,0 +1,94 @@
+# Regression tests for issues found by the second round of AI dogfooding.
+
+type Heap = { items: List[Int] }
+
+fn set_at!(xs: List[Int], i: Int, v: Int) {
+  xs[i] = v
+}
+
+fn put!(m: Map[Str, Int], k: Str, v: Int) {
+  m[k] = v
+}
+
+test "typed writes stay checked after many fast writes" {
+  var xs: List[Int] = [0] * 100
+  for i in 0..100 {
+    xs[i] = i
+    xs.swap!(0, i)
+  }
+  assert xs.sum() == 4950
+  let r = catch(fn() => {
+    var ys: List[Int] = [0] * 10
+    for i in 0..10 { ys[i] = i }
+    ys.swap!(1, 2)
+    ys.pop!()
+    ys.push!("x")
+    ys
+  })
+  assert r.is_err()
+}
+
+test "mutating functions with annotated parameters keep checking" {
+  var zs = [0] * 50
+  for i in 0..50 { zs.set_at!(i, i * 2) }
+  assert zs[49] == 98
+  let r = catch(fn() => {
+    var bad = [1, 2, 3]
+    bad.set_at!(0, 1)
+    var worse = [1, "two"]
+    worse.set_at!(0, 1)
+  })
+  assert r.is_err()
+}
+
+test "map keys are checked against the declared key type" {
+  var m: Map[Str, Int] = [:]
+  m.put!("a", 1)
+  m["b"] = 2
+  assert m.len() == 2
+  let r = catch(fn() => {
+    var n: Map[Str, Int] = [:]
+    n[5] = 1
+    n
+  })
+  assert r.is_err()
+}
+
+test "writes through a nominal record field are checked without an annotation" {
+  var h = Heap(items: [1, 2, 3])
+  h.items[0] = 10
+  h.items.swap!(0, 2)
+  assert h.items == [3, 2, 10]
+  let r = catch(fn() => {
+    var g = Heap(items: [1])
+    g.items[0] = "x"
+    g
+  })
+  assert r.is_err()
+}
+
+test "nested typed collections" {
+  var grid: List[List[Int]] = [[0] * 3 for _ in 0..3]
+  grid[1][2] = 5
+  grid[0].push!(7)
+  assert grid[1][2] == 5 and grid[0].len() == 4
+  let r = catch(fn() => {
+    var g: List[List[Int]] = [[0]]
+    g[0][0] = 1
+    g[0].push!(2.5)
+    g
+  })
+  assert r.is_err()
+}
+
+property "length filters are satisfied by the generator" (xs: List[Int]) where xs.len() >= 3 {
+  assert xs.len() >= 3
+}
+
+property "where clauses can use names from parameter patterns" ((a, b): (Int, Int)) where b != 0 {
+  assert (a * b) // b == a
+}
+
+property "float bounds are steered" (r: Float) where r > 0.0 and r < 1000.0 {
+  assert r > 0.0 and r < 1000.0
+}

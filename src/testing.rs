@@ -1,7 +1,7 @@
 //! `cogito test` (unit tests and property tests) and `cogito verify`
 //! (contract checking by random testing).
 
-use crate::ast::{BinOp, Expr, ExprKind, FnDef, Item, Program, UnOp};
+use crate::ast::{BinOp, Expr, ExprKind, FnDef, Item, Param, Program, UnOp};
 use crate::diagnostic::{Colors, Diagnostic};
 use crate::interp::{Ctrl, Env, Interp, Rng};
 use crate::proptest::{shrink, Gen};
@@ -77,6 +77,14 @@ fn requires_hold(it: &mut Interp, c: &Rc<Closure>, args: &[Value]) -> Result<boo
         };
         env.locals[p.slot as usize] = v;
     }
+    for p in &def.params {
+        if let Some(pat) = &p.pat {
+            let v = env.locals[p.slot as usize].clone();
+            if !it.match_pattern(pat, &v, &mut env) {
+                return Ok(false);
+            }
+        }
+    }
     for r in &def.requires {
         match it.eval(r, &mut env)? {
             Value::Bool(true) => {}
@@ -138,12 +146,20 @@ enum PropOutcome {
     CannotGenerate(String),
 }
 
-fn param_types(def: &FnDef) -> Result<Vec<Ty>, String> {
+/// How to show a parameter to the user: its name, or its pattern's text.
+fn param_label(it: &Interp, p: &Param) -> String {
+    match &p.pat {
+        Some(pat) => it.ctx.sm.snippet(pat.span).to_string(),
+        None => p.name.to_string(),
+    }
+}
+
+fn param_types(it: &Interp, def: &FnDef) -> Result<Vec<Ty>, String> {
     let mut tys = Vec::new();
     for p in &def.params {
         match &p.ty {
             Some(t) => tys.push(t.ty.clone()),
-            None => return Err(format!("parameter `{}` has no type annotation", p.name)),
+            None => return Err(format!("parameter `{}` has no type annotation", param_label(it, p))),
         }
     }
     Ok(tys)
@@ -158,11 +174,11 @@ fn quickcheck(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, budget: u
 }
 
 fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, extremes: bool) -> PropOutcome {
-    let tys = match param_types(def) {
+    let tys = match param_types(it, def) {
         Ok(t) => t,
         Err(m) => return PropOutcome::CannotGenerate(m),
     };
-    let bounds = int_bounds(def);
+    let bounds = bounds(def);
     let c = Rc::new(Closure { def: def.clone(), captures: vec![] });
     let mut rng = Rng::new(seed);
     let mut passed = 0u32;
@@ -176,16 +192,20 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
         if discarded > cases.max(10) * 20 {
             break PropOutcome::GaveUp { cases: passed, discarded };
         }
-        let size = 2 + passed * 40 / cases.max(1);
+        // Inputs grow during the run. Discarded attempts count too, so that a
+        // filter such as `xs.len() >= 5` eventually sees inputs that pass it.
+        let size = 2 + (passed + discarded).min(cases) * 40 / cases.max(1);
         let mut args = Vec::with_capacity(tys.len());
         let mut gen = Gen { it, rng: &mut rng, extremes };
         let mut gen_err = None;
-        for (i, t) in tys.iter().enumerate() {
-            if let (Ty::Int, Some((lo, hi))) = (t, bounds.get(i).copied().flatten()) {
-                args.push(gen.int_in(lo, hi, size));
-                continue;
-            }
-            match gen.value(t, size, 0) {
+        for (t, b) in tys.iter().zip(&bounds) {
+            let v = match (t, b) {
+                (Ty::Int, Bound { int: Some((lo, hi)), .. }) => Ok(gen.int_in(*lo, *hi, size)),
+                (Ty::Float, Bound { float: Some((lo, hi)), .. }) => Ok(gen.float_in(*lo, *hi, size)),
+                (Ty::Str | Ty::List(_) | Ty::Map(..), Bound { len: Some((lo, hi)), .. }) => gen.sized(t, size, *lo, *hi),
+                _ => gen.value(t, size, 0),
+            };
+            match v {
                 Ok(v) => args.push(v),
                 Err(m) => {
                     gen_err = Some(m);
@@ -209,69 +229,145 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
     result
 }
 
-/// Inclusive bounds on Int parameters that can be read off the `requires` /
-/// `where` clauses: comparisons with literals, joined by `and`, and `in` ranges.
-fn int_bounds(def: &FnDef) -> Vec<Option<(Option<i64>, Option<i64>)>> {
-    let mut out: Vec<Option<(Option<i64>, Option<i64>)>> = vec![None; def.params.len()];
-    fn lit(e: &Expr) -> Option<i64> {
+/// What the `requires` / `where` clauses say about one parameter, read off
+/// comparisons with literals joined by `and`: inclusive bounds on its value
+/// (Int or Float) and on its length (`xs.len() >= 3`, `not s.is_empty()`).
+#[derive(Clone, Default)]
+struct Bound {
+    int: Option<(Option<i64>, Option<i64>)>,
+    float: Option<(Option<f64>, Option<f64>)>,
+    len: Option<(Option<i64>, Option<i64>)>,
+}
+
+fn bounds(def: &FnDef) -> Vec<Bound> {
+    enum Target {
+        Value(usize),
+        Len(usize),
+    }
+    enum Lit {
+        Int(i64),
+        Float(f64),
+    }
+    fn lit(e: &Expr) -> Option<Lit> {
         match &e.kind {
-            ExprKind::Int(n) => Some(*n),
+            ExprKind::Int(n) => Some(Lit::Int(*n)),
+            ExprKind::Float(f) => Some(Lit::Float(*f)),
             ExprKind::Unary { op: UnOp::Neg, expr } => match &expr.kind {
-                ExprKind::Int(n) => n.checked_neg(),
+                ExprKind::Int(n) => n.checked_neg().map(Lit::Int),
+                ExprKind::Float(f) => Some(Lit::Float(-f)),
                 _ => None,
             },
             _ => None,
         }
     }
-    fn param_index(def: &FnDef, e: &Expr) -> Option<usize> {
+    fn param(def: &FnDef, e: &Expr) -> Option<usize> {
         match &e.kind {
             ExprKind::Var(v) => def.params.iter().position(|p| p.name == v.name && p.pat.is_none()),
             _ => None,
         }
     }
-    fn visit(def: &FnDef, e: &Expr, out: &mut Vec<Option<(Option<i64>, Option<i64>)>>) {
-        let mut set = |i: usize, lo: Option<i64>, hi: Option<i64>| {
-            let cur = out[i].get_or_insert((None, None));
-            if let Some(l) = lo {
-                cur.0 = Some(cur.0.map_or(l, |c: i64| c.max(l)));
+    /// `x`, `x.len()` or `len(x)` for a parameter `x`.
+    fn target(def: &FnDef, e: &Expr) -> Option<Target> {
+        match &e.kind {
+            ExprKind::MethodCall { receiver, method, args, .. } if &*method.name == "len" && args.is_empty() => param(def, receiver).map(Target::Len),
+            ExprKind::Call { callee, args }
+                if args.len() == 1 && args[0].name.is_none() && matches!(&callee.kind, ExprKind::Var(v) if &*v.name == "len") =>
+            {
+                param(def, &args[0].value).map(Target::Len)
             }
-            if let Some(h) = hi {
-                cur.1 = Some(cur.1.map_or(h, |c: i64| c.min(h)));
-            }
-        };
+            _ => param(def, e).map(Target::Value),
+        }
+    }
+    fn flip(op: BinOp) -> BinOp {
+        match op {
+            BinOp::Lt => BinOp::Gt,
+            BinOp::Gt => BinOp::Lt,
+            BinOp::Le => BinOp::Ge,
+            BinOp::Ge => BinOp::Le,
+            other => other,
+        }
+    }
+    fn tighten<T: Copy + PartialOrd>(cur: &mut Option<(Option<T>, Option<T>)>, lo: Option<T>, hi: Option<T>) {
+        let cur = cur.get_or_insert((None, None));
+        if let Some(l) = lo {
+            cur.0 = Some(match cur.0 {
+                Some(c) if c > l => c,
+                _ => l,
+            });
+        }
+        if let Some(h) = hi {
+            cur.1 = Some(match cur.1 {
+                Some(c) if c < h => c,
+                _ => h,
+            });
+        }
+    }
+    fn int_range(op: BinOp, c: i64) -> Option<(Option<i64>, Option<i64>)> {
+        Some(match op {
+            BinOp::Ge => (Some(c), None),
+            BinOp::Gt => (Some(c.checked_add(1)?), None),
+            BinOp::Le => (None, Some(c)),
+            BinOp::Lt => (None, Some(c.checked_sub(1)?)),
+            BinOp::Eq => (Some(c), Some(c)),
+            _ => return None,
+        })
+    }
+    fn visit(def: &FnDef, e: &Expr, out: &mut [Bound]) {
         match &e.kind {
             ExprKind::And(a, b) => {
                 visit(def, a, out);
                 visit(def, b, out);
             }
+            ExprKind::Unary { op: UnOp::Not, expr } => {
+                if let ExprKind::MethodCall { receiver, method, args, .. } = &expr.kind {
+                    if &*method.name == "is_empty" && args.is_empty() {
+                        if let Some(i) = param(def, receiver) {
+                            tighten(&mut out[i].len, Some(1), None);
+                        }
+                    }
+                }
+            }
             ExprKind::Binary { op, lhs, rhs } => {
-                if let (Some(i), Some(c)) = (param_index(def, lhs), lit(rhs)) {
-                    match op {
-                        BinOp::Ge => set(i, Some(c), None),
-                        BinOp::Gt => set(i, c.checked_add(1), None),
-                        BinOp::Le => set(i, None, Some(c)),
-                        BinOp::Lt => set(i, None, c.checked_sub(1)),
-                        BinOp::Eq => set(i, Some(c), Some(c)),
+                if let (BinOp::In, Some(i), ExprKind::Range { start, end: Some(end), inclusive }) = (op, param(def, lhs), &rhs.kind) {
+                    if let (Some(Lit::Int(a)), Some(Lit::Int(b))) = (lit(start), lit(end)) {
+                        let hi = if *inclusive { Some(b) } else { b.checked_sub(1) };
+                        tighten(&mut out[i].int, Some(a), hi);
+                    }
+                    return;
+                }
+                let (t, c, op) = match (target(def, lhs), lit(rhs)) {
+                    (Some(t), Some(c)) => (t, c, *op),
+                    _ => match (lit(lhs), target(def, rhs)) {
+                        (Some(c), Some(t)) => (t, c, flip(*op)),
+                        _ => return,
+                    },
+                };
+                match (t, c) {
+                    (Target::Value(i), Lit::Int(c)) => {
+                        if let Some((lo, hi)) = int_range(op, c) {
+                            tighten(&mut out[i].int, lo, hi);
+                            tighten(&mut out[i].float, lo.map(|x| x as f64), hi.map(|x| x as f64));
+                        }
+                    }
+                    (Target::Value(i), Lit::Float(c)) => match op {
+                        BinOp::Ge | BinOp::Gt => tighten(&mut out[i].float, Some(c), None),
+                        BinOp::Le | BinOp::Lt => tighten(&mut out[i].float, None, Some(c)),
                         _ => {}
+                    },
+                    (Target::Len(i), Lit::Int(c)) => {
+                        if let (BinOp::Ne, 0) = (op, c) {
+                            tighten(&mut out[i].len, Some(1), None);
+                        } else if let Some((lo, hi)) = int_range(op, c) {
+                            tighten(&mut out[i].len, lo, hi);
+                        }
                     }
-                } else if let (Some(c), Some(i)) = (lit(lhs), param_index(def, rhs)) {
-                    match op {
-                        BinOp::Le => set(i, Some(c), None),
-                        BinOp::Lt => set(i, c.checked_add(1), None),
-                        BinOp::Ge => set(i, None, Some(c)),
-                        BinOp::Gt => set(i, None, c.checked_sub(1)),
-                        BinOp::Eq => set(i, Some(c), Some(c)),
-                        _ => {}
-                    }
-                } else if let (BinOp::In, Some(i), ExprKind::Range { start, end: Some(end), inclusive }) = (op, param_index(def, lhs), &rhs.kind) {
-                    if let (Some(a), Some(b)) = (lit(start), lit(end)) {
-                        set(i, Some(a), if *inclusive { Some(b) } else { b.checked_sub(1) });
-                    }
+                    _ => {}
                 }
             }
             _ => {}
         }
     }
+    let mut out = vec![Bound::default(); def.params.len()];
     for r in &def.requires {
         visit(def, r, &mut out);
     }
@@ -319,7 +415,7 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
     let shr = if f.shrinks > 0 { format!(", shrunk {} time{}", f.shrinks, if f.shrinks == 1 { "" } else { "s" }) } else { String::new() };
     out.push_str(&format!("      counterexample ({}{}):\n", what, shr));
     for (p, a) in def.params.iter().zip(&f.args) {
-        out.push_str(&format!("        {}{}{} = {}\n", c.bold, p.name, c.reset, repr(a)));
+        out.push_str(&format!("        {}{}{} = {}\n", c.bold, param_label(it, p), c.reset, repr(a)));
     }
     out.push_str(&indent(&f.diag.render(&it.ctx.sm, !c.red.is_empty()), 6));
     out.push('\n');

@@ -137,7 +137,10 @@ fn run(src: &str, input: Vec<u8>, mode: u32) -> Outcome {
             return Outcome { out: String::new(), diag, status: 2 };
         }
     };
-    let mut diag = render(&it, &warnings);
+    // As on the command line, `check` shows every warning; running shows only
+    // those that usually explain a wrong answer.
+    let shown: Vec<Diagnostic> = warnings.iter().filter(|w| mode == MODE_CHECK || w.code != "W0001").cloned().collect();
+    let mut diag = render(&it, &shown);
     match mode {
         MODE_CHECK => {
             diag.push_str(&format!("{}ok{}: no errors, {} warning{}\n", c.green, c.reset, warnings.len(), plural(warnings.len())));

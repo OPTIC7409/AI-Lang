@@ -163,6 +163,36 @@ fn confusion_hint(name: &str) -> Option<&'static str> {
         "new" => "values are built by calling their type: `Point(x: 1, y: 2)`",
         "throw" | "raise" => "errors are values: return `Err(...)`, or call `panic(message)` for bugs",
         "try" | "catch" => "errors are values: use `match` on a Result, or the `?` operator to propagate `Err`",
+        "to_upper" | "toUpperCase" | "uppercase" | "to_uppercase" | "upcase" => "use `upper`: `s.upper()`",
+        "to_lower" | "toLowerCase" | "lowercase" | "to_lowercase" | "downcase" => "use `lower`: `s.lower()`",
+        "trim_left" | "ltrim" | "lstrip" | "trimStart" | "trim_start_matches" => "use `trim_start` (or `strip_prefix` to remove a given prefix)",
+        "trim_right" | "rtrim" | "rstrip" | "trimEnd" | "trim_end_matches" => "use `trim_end` (or `strip_suffix` to remove a given suffix)",
+        "strip" => "use `trim` (whitespace), or `strip_prefix` / `strip_suffix`",
+        "substring" | "substr" | "subList" | "sublist" => "use `slice(start, end)` or indexing with a range: `s[1..4]`",
+        "indexOf" | "find_str" | "search" => "use `index_of(x)`, which returns an Option",
+        "includes" | "contains_key" | "has_key" | "containsKey" => "use `contains` (lists, strings) or `has` (map keys)",
+        "startswith" | "startsWith" => "use `starts_with`",
+        "endswith" | "endsWith" => "use `ends_with`",
+        "to_string" | "toString" | "to_str" | "as_str" | "String.valueOf" => "use `str(x)` (or interpolation: `\"{x}\"`)",
+        "parse" | "to_int" | "atoi" | "parseInt" | "Int.parse" => "use `parse_int(s)`, which returns an Option",
+        "to_float" | "parseFloat" | "atof" => "use `parse_float(s)` (returns an Option) or `float(n)` to convert a number",
+        "split_whitespace" => "use `words`",
+        "foreach" | "for_each" | "forEach" | "iter" => "use a `for` loop, or `each(f)` to call a function on every element",
+        "reversed" => "use `reverse` (a new value) or `reverse!` (in place)",
+        "sorted" => "use `sort` (a new value) or `sort!` (in place)",
+        "items" | "iteritems" | "pairs" => "use `entries` (a list of `(key, value)` tuples), or `for (k, v) in m`",
+        "extend" | "concat" | "append_all" => "use `xs + ys` (a new list) or `extend!` (in place)",
+        "pop" | "pop_back" => "use `pop!`, which removes the last element of a `var` and returns it as an Option",
+        "del" | "delete" | "erase" | "discard" => "use `remove(key_or_index)` (a new value) or `remove!` (in place)",
+        "assert_eq" | "assertEqual" | "assert_equal" | "expect_eq" => "use `assert a == b`; a failure shows both sides",
+        "isEmpty" | "empty" => "use `is_empty`",
+        "charAt" | "char_at" | "nth" => "index with `s[i]` (or `xs.get(i)`, which returns an Option)",
+        "format" | "sprintf" | "fmt" => "use string interpolation with a format spec: `\"{x:.2} {name:>10}\"`",
+        "filter_map" | "filterMap" | "compact_map" => "use a comprehension: `[f(x) for x in xs if keep(x)]`, or `collect_some`",
+        "Vec" | "vec" | "array" | "Array" | "list" => "lists are written `[1, 2, 3]`; the type is `List[Int]`",
+        "HashMap" | "dict" | "Dict" | "hashmap" | "map_new" => "maps are written `[\"a\": 1]` (empty: `[:]`); the type is `Map[Str, Int]`",
+        "mod" | "rem" => "use the `%` operator (the result takes the sign of the divisor)",
+        "div" | "floor_div" | "idiv" => "use the `//` operator (floor division); `/` always gives a Float",
         _ => return None,
     })
 }
@@ -388,10 +418,18 @@ impl<'a> Resolver<'a> {
         let upper = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
         let names = self.visible_names(upper);
         let mut d = Diagnostic::error("E0100", format!("undefined {} `{}`", what, name)).at(span).label("not found in this scope");
-        if let Some(s) = suggest(name, names.iter().map(|s| s.as_str())) {
-            d = d.help(format!("did you mean `{}`?", s));
+        if name == "result" {
+            d = Diagnostic::error("E0100", "`result` is only defined in `ensures` clauses")
+                .at(span)
+                .help("in a postcondition, `result` is the value the function returns: `ensures result >= 0`");
+        } else if name == "old" {
+            d = Diagnostic::error("E0100", "`old(...)` can only be used in `ensures` clauses")
+                .at(span)
+                .help("in a postcondition, `old(e)` is the value `e` had when the function was called");
         } else if let Some(h) = confusion_hint(name) {
             d = d.help(h);
+        } else if let Some(s) = suggest(name, names.iter().map(|s| s.as_str())) {
+            d = d.help(format!("did you mean `{}`?", s));
         } else if upper && self.ns.types.contains_key(name) {
             d = d.help(format!("`{}` is a type; build values with one of its constructors", name));
         }
@@ -664,7 +702,9 @@ impl<'a> Resolver<'a> {
 
         // Pass 4: bodies and top-level statements, in order.
         self.fns.push(FnCtx::new(FnKind::TopLevel, false, None));
-        for item in prog.items.iter_mut() {
+        let n_items = prog.items.len();
+        for (idx, item) in prog.items.iter_mut().enumerate() {
+            let last_item = idx + 1 == n_items;
             match item {
                 Item::Fn(def) => {
                     // Top-level functions refer to themselves through their
@@ -691,7 +731,12 @@ impl<'a> Resolver<'a> {
                     }
                     self.resolve_fn(def, FnKind::Test, false, None);
                 }
-                Item::Stmt(s) => self.stmt(s),
+                Item::Stmt(s) => {
+                    self.stmt(s);
+                    if let (false, StmtKind::Expr(e)) = (self.repl || last_item, &s.kind) {
+                        self.check_discarded(e);
+                    }
+                }
                 Item::Type(_) | Item::Import(_) => {}
             }
         }
@@ -1045,6 +1090,14 @@ impl<'a> Resolver<'a> {
                 self.resolve_type(t, &[]);
             }
         }
+        for c in def.requires.iter_mut().chain(def.ensures.iter_mut()) {
+            if let Some((span, what)) = contract_effect(c) {
+                let d = Diagnostic::error("E0118", format!("contracts must not change anything, but this {}", what))
+                    .at(span)
+                    .help("a contract only states a condition; move the change into the function body");
+                self.error(d);
+            }
+        }
         for r in def.requires.iter_mut() {
             self.expr(r);
         }
@@ -1221,6 +1274,9 @@ impl<'a> Resolver<'a> {
                     let d = Diagnostic::warning("W0002", "unreachable code").at(*span).help("the statements after this line never run");
                     self.diags.push(d);
                 }
+                if let StmtKind::Expr(e) = &s.kind {
+                    self.check_discarded(e);
+                }
             }
         }
         self.pop_scope();
@@ -1259,7 +1315,79 @@ impl<'a> Resolver<'a> {
     fn args(&mut self, args: &mut [Arg]) {
         for a in args.iter_mut() {
             self.expr(&mut a.value);
+            if let ExprKind::Lambda(def) = &mut a.value.kind {
+                if def.ret.is_none() {
+                    if let Some(def) = Rc::get_mut(def) {
+                        if let Some((span, is_try)) = lambda_escape(&mut def.body) {
+                            let what = if is_try { "`?`" } else { "`return`" };
+                            let d = Diagnostic::warning("W0004", format!("{} inside an anonymous function returns from that function only", what))
+                                .at(span)
+                                .label("leaves the `fn(...) => ...`, not the enclosing function")
+                                .help(if is_try {
+                                    "to stop at the first error, use a `for` loop; to turn a list of Results into a Result of a list, use `.collect_ok()` (or `.collect_some()` for Options);\nif this is intended, give the anonymous function a return type: `fn(x) -> Result[Int, Str] => ...`"
+                                } else {
+                                    "to leave the enclosing function early, use a `for` loop instead of a function such as `each`;\nif this is intended, give the anonymous function a return type: `fn(x) -> Int { ... }`"
+                                });
+                            self.diags.push(d);
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// Warn when an expression statement throws away the result of a
+    /// built-in that has no side effects (`xs.sort()` instead of `xs.sort!()`).
+    fn check_discarded(&mut self, e: &Expr) {
+        let (name, res) = match &e.kind {
+            ExprKind::MethodCall { method, mutating: false, .. } => (&method.name, method.res),
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Var(v) => (&v.name, v.res),
+                _ => return,
+            },
+            _ => return,
+        };
+        let VarRes::Global(slot) = res else { return };
+        let GlobalKind::Builtin(idx) = self.ctx.globals[slot as usize].kind else { return };
+        let b = &crate::builtins::BUILTINS[idx as usize];
+        const EFFECTS: &[&str] = &[
+            "print",
+            "write",
+            "eprint",
+            "input",
+            "read_line",
+            "read_stdin",
+            "read_file",
+            "write_file",
+            "append_file",
+            "list_dir",
+            "exit",
+            "sleep",
+            "panic",
+            "todo",
+            "dbg",
+            "catch",
+            "seed",
+            "random",
+            "random_int",
+            "shuffle",
+            "choice",
+            "each",
+            "flush",
+        ];
+        if b.name.ends_with('!') || EFFECTS.contains(&b.name) {
+            return;
+        }
+        let twin = format!("{}!", name);
+        let help = if self.ctx.builtins.values.contains_key(twin.as_str()) {
+            format!("`{}` returns a new value and leaves its argument unchanged; to change a `var` in place, call `{}`", name, twin)
+        } else if &**name == "map" {
+            "`map` builds a new list; to run a function for its side effects, use `each` or a `for` loop".to_string()
+        } else {
+            format!("`{}` returns a new value and does not change its arguments; store the result, e.g. `let y = ...`", name)
+        };
+        let d = Diagnostic::warning("W0003", format!("the result of `{}` is unused", name)).at(e.span).help(help);
+        self.diags.push(d);
     }
 
     fn check_call(&mut self, slot: u32, extra: usize, args: &[Arg], span: Span) {
@@ -2068,6 +2196,62 @@ impl<'a> Resolver<'a> {
 
 /// Replace each `old(x)` in an expression with a reference to `old#i`,
 /// collecting the `x`s.
+/// The first `?` or `return` in a lambda body that belongs to the lambda
+/// itself (not to a lambda nested inside it). `true` means `?`.
+fn lambda_escape(e: &mut Expr) -> Option<(Span, bool)> {
+    fn go(e: &mut Expr, found: &mut Option<(Span, bool)>) {
+        if found.is_some() {
+            return;
+        }
+        match &e.kind {
+            ExprKind::Lambda(_) => return,
+            ExprKind::Try(_) => {
+                *found = Some((e.span, true));
+                return;
+            }
+            ExprKind::Return(_) => {
+                *found = Some((e.span, false));
+                return;
+            }
+            _ => {}
+        }
+        for_each_child_mut(e, &mut |c| go(c, found));
+    }
+    let mut found = None;
+    go(e, &mut found);
+    found
+}
+
+/// The first assignment or mutating call in a contract, if any.
+fn contract_effect(e: &mut Expr) -> Option<(Span, &'static str)> {
+    fn go(e: &mut Expr, found: &mut Option<(Span, &'static str)>) {
+        if found.is_some() {
+            return;
+        }
+        match &e.kind {
+            ExprKind::MethodCall { mutating: true, .. } => {
+                *found = Some((e.span, "calls a mutating function"));
+                return;
+            }
+            ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Var(v) if v.name.ends_with('!')) => {
+                *found = Some((e.span, "calls a mutating function"));
+                return;
+            }
+            ExprKind::Block(stmts) => {
+                if let Some(s) = stmts.iter().find(|s| matches!(s.kind, StmtKind::Assign { .. })) {
+                    *found = Some((s.span, "assigns to a variable"));
+                    return;
+                }
+            }
+            _ => {}
+        }
+        for_each_child_mut(e, &mut |c| go(c, found));
+    }
+    let mut found = None;
+    go(e, &mut found);
+    found
+}
+
 fn extract_olds(e: &mut Expr, out: &mut Vec<Expr>) {
     if let ExprKind::Call { callee, args } = &mut e.kind {
         if matches!(&callee.kind, ExprKind::Var(v) if &*v.name == "old") && args.len() == 1 && args[0].name.is_none() {

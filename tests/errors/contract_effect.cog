@@ -1,0 +1,8 @@
+# expect: E0118
+fn take!(xs: List[Int]) -> Int
+  requires xs.pop!() != None
+{
+  xs.len()
+}
+var v = [1, 2]
+print(v.take!())

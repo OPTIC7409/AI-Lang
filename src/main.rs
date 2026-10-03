@@ -57,7 +57,11 @@ fn load(it: &mut Interp, path: &Path, color: bool, show_warnings: bool) -> Optio
     match cogito::load_file(it, path, &mut ns) {
         Ok((prog, warnings)) => {
             if show_warnings {
-                print_diags(it, &warnings, color);
+                // Unused variables are noise while running; the other warnings
+                // (an ignored result, `?` in a lambda, unreachable code) usually
+                // explain a wrong answer.
+                let likely_bugs: Vec<Diagnostic> = warnings.into_iter().filter(|w| w.code != "W0001").collect();
+                print_diags(it, &likely_bugs, color);
             }
             Some((prog, ns))
         }
@@ -82,7 +86,7 @@ fn load(it: &mut Interp, path: &Path, color: bool, show_warnings: bool) -> Optio
 fn cmd_run(path: &Path, prog_args: Vec<String>, color: bool) -> ExitCode {
     let mut it = Interp::new();
     it.args = prog_args;
-    let Some((prog, ns)) = load(&mut it, path, color, false) else { return ExitCode::from(2) };
+    let Some((prog, ns)) = load(&mut it, path, color, true) else { return ExitCode::from(2) };
     match cogito::run(&mut it, &prog, &ns) {
         Ok(()) => ExitCode::SUCCESS,
         Err(d) => {
@@ -173,7 +177,7 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
         ran += 1;
         let mut it = Interp::new();
         it.test_mode = true;
-        let Some((prog, _ns)) = load(&mut it, f, opts.color, false) else {
+        let Some((prog, _ns)) = load(&mut it, f, opts.color, true) else {
             load_errors += 1;
             continue;
         };

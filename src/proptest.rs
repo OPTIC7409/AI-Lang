@@ -69,18 +69,7 @@ impl<'a> Gen<'a> {
             }
             Ty::Str => {
                 let n = self.rng.below(size as usize + 1);
-                let mut s = String::new();
-                for _ in 0..n {
-                    let r = self.rng.below(100);
-                    if r < 70 {
-                        s.push((b'a' + self.rng.below(26) as u8) as char);
-                    } else if r < 88 {
-                        s.push((b' ' + self.rng.below(95) as u8) as char);
-                    } else {
-                        s.push_str(UNICODE[self.rng.below(UNICODE.len())]);
-                    }
-                }
-                Value::str(s)
+                self.string(n)
             }
             Ty::Range => {
                 let start = self.rng.range(-size, size);
@@ -89,37 +78,11 @@ impl<'a> Gen<'a> {
             }
             Ty::List(t) => {
                 let n = self.rng.below(size as usize + 1);
-                let inner = (size as u32 / 2).max(2);
-                let mut xs = Vec::with_capacity(n);
-                // Bugs cluster around duplicates, so sometimes draw the
-                // elements from a small pool of values.
-                let mode = self.rng.below(100);
-                if mode < 25 && n > 1 {
-                    let pool_size = if mode < 10 { 1 } else { 2 + self.rng.below(2) };
-                    let mut pool = Vec::with_capacity(pool_size);
-                    for _ in 0..pool_size {
-                        pool.push(self.value(t, inner, depth + 1)?);
-                    }
-                    for _ in 0..n {
-                        xs.push(pool[self.rng.below(pool.len())].clone());
-                    }
-                } else {
-                    for _ in 0..n {
-                        xs.push(self.value(t, inner, depth + 1)?);
-                    }
-                }
-                Value::list(xs)
+                self.list(t, n, size as u32, depth)?
             }
             Ty::Map(k, v) => {
                 let n = self.rng.below(size as usize + 1);
-                let inner = (size as u32 / 2).max(2);
-                let mut m = MapVal::new();
-                for _ in 0..n {
-                    let key = self.value(k, inner, depth + 1)?;
-                    let val = self.value(v, inner, depth + 1)?;
-                    m.insert(key, val);
-                }
-                Value::Map(Rc::new(m))
+                self.map(k, v, n, size as u32, depth)?
             }
             Ty::Tuple(ts) => {
                 let mut xs = Vec::new();
@@ -146,6 +109,113 @@ impl<'a> Gen<'a> {
             Ty::Generic(_) | Ty::Param(..) => return self.value(&Ty::Int, size as u32, depth),
             Ty::Any => return Err(format!("cannot generate values of type `{}`; give the input a concrete type such as Int or List[Str]", ty)),
         })
+    }
+
+    fn string(&mut self, n: usize) -> Value {
+        let mut s = String::new();
+        for _ in 0..n {
+            let r = self.rng.below(100);
+            if r < 70 {
+                s.push((b'a' + self.rng.below(26) as u8) as char);
+            } else if r < 88 {
+                s.push((b' ' + self.rng.below(95) as u8) as char);
+            } else {
+                s.push_str(UNICODE[self.rng.below(UNICODE.len())]);
+            }
+        }
+        Value::str(s)
+    }
+
+    fn list(&mut self, t: &Ty, n: usize, size: u32, depth: u32) -> Result<Value, String> {
+        let inner = (size / 2).max(2);
+        let mut xs = Vec::with_capacity(n);
+        // Bugs cluster around duplicates, so sometimes draw the elements
+        // from a small pool of values.
+        let mode = self.rng.below(100);
+        if mode < 25 && n > 1 {
+            let pool_size = if mode < 10 { 1 } else { 2 + self.rng.below(2) };
+            let mut pool = Vec::with_capacity(pool_size);
+            for _ in 0..pool_size {
+                pool.push(self.value(t, inner, depth + 1)?);
+            }
+            for _ in 0..n {
+                xs.push(pool[self.rng.below(pool.len())].clone());
+            }
+        } else {
+            for _ in 0..n {
+                xs.push(self.value(t, inner, depth + 1)?);
+            }
+        }
+        Ok(Value::list(xs))
+    }
+
+    fn map(&mut self, k: &Ty, v: &Ty, n: usize, size: u32, depth: u32) -> Result<Value, String> {
+        let inner = (size / 2).max(2);
+        let mut m = MapVal::new();
+        // Keys may collide; keep drawing (a bounded number of times) to reach `n`.
+        let mut tries = 0;
+        while m.len() < n && tries < n * 4 + 8 {
+            tries += 1;
+            let key = self.value(k, inner, depth + 1)?;
+            let val = self.value(v, inner, depth + 1)?;
+            m.insert(key, val);
+        }
+        Ok(Value::Map(Rc::new(m)))
+    }
+
+    /// A Str, List or Map whose length lies within inclusive bounds read off
+    /// a `where`/`requires` clause such as `xs.len() >= 3`.
+    pub fn sized(&mut self, ty: &Ty, size: u32, lo: Option<i64>, hi: Option<i64>) -> Result<Value, String> {
+        let lo = lo.unwrap_or(0).clamp(0, 10_000) as usize;
+        let hi = hi.map_or(lo + size as usize, |h| h.clamp(0, 10_000) as usize);
+        if hi < lo {
+            return self.value(ty, size, 0);
+        }
+        let n = lo + self.rng.below((hi - lo).min(size as usize) + 1);
+        match ty {
+            Ty::Str => Ok(self.string(n)),
+            Ty::List(t) => self.list(t, n, size.max(2), 0),
+            Ty::Map(k, v) => self.map(k, v, n, size.max(2), 0),
+            _ => self.value(ty, size, 0),
+        }
+    }
+
+    /// A Float within optional bounds.
+    pub fn float_in(&mut self, lo: Option<f64>, hi: Option<f64>, size: u32) -> Value {
+        let natural = match self.value(&Ty::Float, size, 1) {
+            Ok(Value::Float(f)) => f,
+            _ => 0.0,
+        };
+        let r = self.rng.below(100);
+        let f = match (lo, hi) {
+            (Some(l), Some(h)) if l <= h => {
+                if r < 10 {
+                    if r < 5 {
+                        l
+                    } else {
+                        h
+                    }
+                } else {
+                    l + self.rng.float() * (h - l)
+                }
+            }
+            (Some(l), None) => {
+                if r < 10 {
+                    l
+                } else {
+                    l + natural.abs()
+                }
+            }
+            (None, Some(h)) => {
+                if r < 10 {
+                    h
+                } else {
+                    h - natural.abs()
+                }
+            }
+            _ => natural,
+        };
+        Value::Float(f)
     }
 
     /// An Int within optional inclusive bounds, favouring the boundaries.
@@ -241,12 +311,13 @@ pub fn shrink(v: &Value) -> Vec<Value> {
                 if n < 0 && n != i64::MIN {
                     out.push(Value::Int(-n));
                 }
-                if n / 2 != 0 {
-                    out.push(Value::Int(n / 2));
-                }
-                let toward = n - n.signum();
-                if toward != 0 && toward != n / 2 {
-                    out.push(Value::Int(toward));
+                // Move toward zero by half the distance, then a quarter, and
+                // so on down to a single step: shrinking takes logarithmic
+                // rather than linear time to find the boundary.
+                let mut d = n / 2;
+                while d != 0 {
+                    out.push(Value::Int(n - d));
+                    d /= 2;
                 }
             }
         }
