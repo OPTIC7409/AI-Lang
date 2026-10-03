@@ -112,6 +112,23 @@ amortized O(1).
 mainstream languages). It is familiar, but it makes local reasoning
 impossible without knowing who else holds a reference.
 
+### Module globals versus local variables
+
+Variables declared at the top level of a file are module globals: every
+function and closure sees their current value, and functions may assign to
+top-level `var`s. Variables declared inside functions and blocks are local,
+and closures capture their values.
+
+*Why:* this was the most-reported surprise during dogfooding, because a
+top-level closure that reads a changing global behaves differently from the
+same closure inside a function. The alternatives were both worse. Making
+globals immutable from functions rules out caches and counters in small
+scripts, which is exactly where top-level state is useful. Making top-level
+closures snapshot globals would make named functions and anonymous functions
+see different values of the same variable. The rule chosen is the one most
+programmers already know from Python and JavaScript modules, and it is
+stated in one sentence in the spec.
+
 ### Immutable by default; mutation is marked
 
 `let` bindings never change. `var` bindings can be reassigned and mutated.
@@ -187,12 +204,23 @@ including the elements of containers, and Int values are converted where a
 Float is expected. Generic parameters (`fn first[T](xs: List[T])`) are
 accepted but not checked.
 
+Annotations also stick: a `var` declared with a type, the first parameter
+of a `!` function, and every field of a declared record type are re-checked
+on each write (assignment, index or field assignment, mutating call), with
+Int values converted to Float where needed.
+
 *Why:* a full static type system (with inference, generics and variance)
 would multiply the size of the language and its specification. Runtime
 checking at boundaries catches most of what matters in practice, gives
 precise messages ("element 3 of the list is Str"), and the annotations also
 drive test generation. A static checker can be added later without changing
 the meaning of correct programs.
+
+*Cost, and how it is paid:* checking `xs: List[Int]` naively costs O(n) per
+call, which turns a recursive function over a list into O(n²). Each list and
+map therefore remembers the last annotation it was verified against; any
+mutation clears that memo. `push!` and `+=` only check the new elements. In
+practice annotation checks are close to free.
 
 ### Static checks that need no types
 
@@ -286,10 +314,37 @@ The implementation is a single dependency-free Rust crate:
 - a property-testing engine (generation from types, shrinking) shared by
   `property` blocks and `cogito verify`.
 
-The language was then tested by writing its own test suite in Cogito, and by
-giving fresh AI agents nothing but the compact specification and asking them
-to write programs and try to break the interpreter. Their bug reports were
-used to fix the implementation and sharpen the specification.
+## How it was tested: dogfooding by AI agents
+
+The language was tested in three ways:
+
+1. **Its own test suite, written in Cogito** (`tests/lang`), plus one program
+   per diagnostic code (`tests/errors`) and example programs with exact
+   expected output (`examples`).
+2. **Fresh AI agents that knew nothing but the compact specification.** Each
+   was asked to write about ten realistic programs in an area (algorithms,
+   text processing, types and contracts) and to report every bug, gap in the
+   spec, and confusing message, with a minimal reproduction.
+3. **Adversarial AI agents** asked to make the interpreter crash, hang or
+   give wrong answers.
+
+The first round produced about a hundred findings. Some were bugs only real
+programs would hit: type ids clashed when two modules declared types, and
+recursive functions over annotated lists were quadratic. Others were gaps in
+the design: no way to destructure a tuple parameter, no `old()` in
+postconditions, `?` silently mixing Option and Result, assignments not
+allowed as match-arm bodies. The adversarial agents found a dozen ways to
+crash the process, mostly integer edge cases (`gcd(min_int, -1)`,
+`0..=max_int`) and unbounded sizes (`"{x:.65536}"`, a million nested
+parentheses). All of these were fixed, and the specification was rewritten
+to answer every question the agents had to guess at.
+
+Some findings changed the language's direction rather than its bugs. When a
+test of `verify` produced no counterexample for an "obviously correct"
+`average` function, the input generator was changed to favour duplicates and
+values like `0.1`, after which `verify` found the floating-point bug
+(`[0.1, 0.1, 0.1]`) on its own. That bug is now the demonstration in the
+README.
 
 ## Future directions
 
@@ -297,6 +352,7 @@ used to fix the implementation and sharpen the specification.
 - A bytecode compiler for speed.
 - A formatter (`cogito fmt`) to make the "one obvious way" principle
   extend to layout.
-- Contract-guided generation: using `requires` clauses to generate valid
-  inputs directly instead of filtering random ones.
+- Richer contract-guided generation: today simple numeric bounds in `requires`
+  steer the generator; more general constraints could be solved instead of
+  filtered.
 - A package format and a larger standard library.

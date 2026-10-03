@@ -1,0 +1,42 @@
+# A small command-line tool: count lines, words and characters in files.
+#   cogito examples/linecount.cog FILE...
+# `main` returns a Result: an `Err` is printed and the exit status is 1.
+
+type Counts = { lines: Int, words: Int, chars: Int }
+
+fn count(text: Str) -> Counts =>
+  Counts(lines: text.lines().len(), words: text.words().len(), chars: text.len())
+
+fn add(a: Counts, b: Counts) -> Counts =>
+  Counts(a.lines + b.lines, a.words + b.words, a.chars + b.chars)
+
+fn report(c: Counts, name: Str) -> Str =>
+  "{c.lines:>8,} {c.words:>8,} {c.chars:>10,}  {name}"
+
+fn main() -> Result[Unit, Str] {
+  let files = args()
+  if files.is_empty() {
+    return Err("usage: cogito examples/linecount.cog FILE...")
+  }
+  var total = Counts(0, 0, 0)
+  for f in files {
+    let text = read_file(f)?
+    let c = count(text)
+    print(report(c, f))
+    total = add(total, c)
+  }
+  if files.len() > 1 {
+    print(report(total, "total"))
+  }
+  Ok(())
+}
+
+test "counting" {
+  assert count("one two\nthree\n") == Counts(lines: 2, words: 3, chars: 14)
+  assert count("") == Counts(0, 0, 0)
+}
+
+property "counts add up when texts are joined by a newline" (a: Str, b: Str) where not ("\n" in a) and not ("\n" in b) {
+  let joined = count("{a}\n{b}")
+  assert joined.words == count(a).words + count(b).words
+}

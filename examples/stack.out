@@ -1,0 +1,8 @@
+push 10: ok -> [10]
+push 20: ok -> [10, 20]
+push 30: ok -> [10, 20, 30]
+push 40: full -> [10, 20, 30]
+pop: 30 -> [10, 20]
+pop: 20 -> [10]
+pop: 10 -> []
+pop on empty: None

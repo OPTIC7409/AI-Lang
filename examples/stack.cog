@@ -1,0 +1,53 @@
+# A bounded stack whose operations state their contracts, including how
+# they change the stack (with `old`). `cogito verify examples/stack.cog`
+# checks every contract against random stacks and values.
+
+type Stack = { items: List[Int], capacity: Int }
+
+fn new_stack(capacity: Int) -> Stack
+  requires capacity > 0
+  ensures result.items.is_empty()
+=> Stack(items: [], capacity: capacity)
+
+fn is_full(s: Stack) -> Bool => s.items.len() >= s.capacity
+
+fn push!(s: Stack, x: Int) -> Bool
+  ensures result == not old(is_full(s))
+  ensures if result { s.items.last() == Some(x) } else { s == old(s) }
+  ensures s.items.len() <= max(s.capacity, old(s.items.len()))
+{
+  if is_full(s) {
+    return false
+  }
+  s.items.push!(x)
+  true
+}
+
+fn pop!(s: Stack) -> Option[Int]
+  ensures match result {
+    Some(x) => old(s.items.last()) == Some(x) and s.items.len() == old(s.items.len()) - 1
+    None => old(s.items.is_empty())
+  }
+=> s.items.pop!()
+
+fn main() {
+  var s = new_stack(3)
+  for x in [10, 20, 30, 40] {
+    let ok = s.push!(x)
+    print("push {x}: {if ok { "ok" } else { "full" }} -> {s.items}")
+  }
+  while not s.items.is_empty() {
+    print("pop: {s.pop!().unwrap()} -> {s.items}")
+  }
+  print("pop on empty: {s.pop!()}")
+}
+
+property "push then pop returns the value" (cap: Int, xs: List[Int], x: Int) where cap > 0 and cap <= 50 {
+  var s = new_stack(cap)
+  for v in xs { s.push!(v) }
+  let before = s
+  if s.push!(x) {
+    assert s.pop!() == Some(x)
+    assert s == before
+  }
+}
