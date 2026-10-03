@@ -348,10 +348,11 @@ measured how often a fresh agent's program worked on the first run:
 | Text processing, formatting, JSON, I/O | 2 of 10 | 7 of 10 |
 | Types, contracts and tests | 6 of 10 | 6 of 10 |
 
-In round 2, every program that did not work on the first run failed because
-of the agent's own mistake (a wrong expected value in a test, syntax from
-another language such as `if let`), not because of a bug or a gap in the
-specification, and in each case the error message pointed at the problem.
+In round 2, eleven of the twelve programs that did not work on the first
+run failed because of the agent's own mistake (a wrong expected value in a
+test, syntax from another language such as `if let`), and the error message
+pointed at the problem; one also hit a real bug (a `where` clause on a
+destructured parameter).
 `verify` found real contract violations in the agents' code, including
 integer overflows and missing preconditions.
 
