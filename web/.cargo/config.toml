@@ -1,0 +1,6 @@
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+# The tree-walking interpreter recurses deeply; give it a 32 MiB stack.
+rustflags = ["-C", "link-arg=-zstack-size=33554432"]

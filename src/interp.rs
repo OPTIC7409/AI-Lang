@@ -16,6 +16,9 @@ pub enum Ctrl {
     Return(Value),
     Break(Value),
     Continue,
+    /// `exit(code)` in an embedded interpreter, which must not end the host
+    /// process: unwinds to the top level.
+    Exit(i32),
 }
 
 pub type R<T = Value> = Result<T, Ctrl>;
@@ -112,6 +115,15 @@ pub struct Interp {
     busy_globals: Vec<(u32, Name)>,
     /// Set by `cogito test`: `exit()` becomes an error.
     pub test_mode: bool,
+    /// Running inside a host (such as a web page) rather than as a process:
+    /// `exit()` unwinds with [`Ctrl::Exit`] instead of ending the process.
+    pub embedded: bool,
+    /// When set, standard input is read from here instead of the process.
+    pub input: Option<std::io::Cursor<Vec<u8>>>,
+    /// What `clock()` measures from.
+    pub clock_start: f64,
+    /// The status passed to `exit()` in embedded mode.
+    pub exit_code: Option<i32>,
     stdout: std::io::BufWriter<std::io::Stdout>,
     stdout_tty: bool,
     pub none: Value,
@@ -158,7 +170,7 @@ impl Interp {
             globals.push(Some(Value::Int(v)));
         }
         let none = Value::Variant(Rc::new(VariantVal { ty: ctx.types[OPTION_ID as usize].clone(), tag: 1, values: vec![] }));
-        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(42);
+        let seed = crate::platform::seed();
         Interp {
             ctx,
             globals,
@@ -176,6 +188,10 @@ impl Interp {
             salvaged: None,
             busy_globals: Vec::new(),
             test_mode: false,
+            embedded: false,
+            input: None,
+            clock_start: crate::platform::monotonic_seconds(),
+            exit_code: None,
             stdout: std::io::BufWriter::with_capacity(1 << 16, std::io::stdout()),
             stdout_tty: std::io::stdout().is_terminal(),
             none,
@@ -201,8 +217,41 @@ impl Interp {
         }
     }
 
+    /// Write to standard error (or into the capture buffer, when capturing).
+    pub fn write_err(&mut self, s: &str) {
+        if self.silent {
+            return;
+        }
+        if let Some(buf) = &mut self.capture {
+            buf.push_str(s);
+            return;
+        }
+        self.flush();
+        crate::err_out!("{}", s);
+    }
+
     pub fn flush(&mut self) {
         let _ = self.stdout.flush();
+    }
+
+    /// Read one line (including its newline) from standard input.
+    pub fn read_input_line(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+        use std::io::BufRead;
+        self.flush();
+        match &mut self.input {
+            Some(c) => c.read_until(b'\n', buf),
+            None => std::io::stdin().lock().read_until(b'\n', buf),
+        }
+    }
+
+    /// Read the rest of standard input.
+    pub fn read_input_all(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+        use std::io::Read;
+        self.flush();
+        match &mut self.input {
+            Some(c) => c.read_to_end(buf),
+            None => std::io::stdin().read_to_end(buf),
+        }
     }
 
     /// Count `n` steps at once (for bulk operations such as building a large list).
@@ -219,10 +268,12 @@ impl Interp {
         self.ticks += 1;
         if let Some(b) = self.budget {
             if self.ticks > b {
-                return Err(self.fail(
-                    self.diag(span, "E0219", format!("step budget exceeded: more than {} calls and loop iterations", b))
-                        .help("this usually means an infinite loop, or an input too large for the algorithm;\nlimit the inputs with `where`/`requires`, or raise the limit with `--budget N`"),
-                ));
+                let help = if self.embedded && !self.test_mode {
+                    "this usually means an infinite loop; the playground stops programs after this many steps\nto keep the page responsive (the `cogito` command-line tool has no limit)"
+                } else {
+                    "this usually means an infinite loop, or an input too large for the algorithm;\nlimit the inputs with `where`/`requires`, or raise the limit with `--budget N`"
+                };
+                return Err(self.fail(self.diag(span, "E0219", format!("step budget exceeded: more than {} calls and loop iterations", b)).help(help)));
             }
         }
         Ok(())
@@ -2099,7 +2150,11 @@ impl Interp {
         if self.stack.len() >= self.max_depth {
             return Err(self.fail(
                 self.diag(span, "E0213", format!("stack overflow: more than {} nested calls (in `{}`)", self.max_depth, def.display_name()))
-                    .help("check that the recursion has a base case that is always reached;\nfor legitimately deep recursion, raise the limit with `cogito --max-depth N ...`"),
+                    .help(if self.embedded {
+                        "check that the recursion has a base case that is always reached;\nthe browser's stack is small, so the playground allows fewer nested calls than the `cogito` tool"
+                    } else {
+                        "check that the recursion has a base case that is always reached;\nfor legitimately deep recursion, raise the limit with `cogito --max-depth N ...`"
+                    }),
             ));
         }
         let nparams = def.params.len();

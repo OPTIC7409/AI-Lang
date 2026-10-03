@@ -13,7 +13,7 @@ use crate::span::Span;
 use crate::types::{OPTION_ID, ORDERING_ID, RESULT_ID};
 use crate::value::*;
 use std::cmp::Ordering;
-use std::io::{BufRead, Read, Write};
+use std::io::Write;
 use std::rc::Rc;
 
 pub type PureFn = fn(&mut Interp, Vec<Value>, Span) -> R;
@@ -556,8 +556,9 @@ fn b_eprint(it: &mut Interp, a: Vec<Value>, _: Span) -> R {
     if it.silent {
         return Ok(Value::Unit);
     }
-    it.flush();
-    crate::err_outln!("{}", join_display(&a));
+    let mut s = join_display(&a);
+    s.push('\n');
+    it.write_err(&s);
     Ok(Value::Unit)
 }
 
@@ -571,7 +572,7 @@ fn b_input(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     }
     it.flush();
     let mut bytes = Vec::new();
-    let _ = std::io::stdin().lock().read_until(b'\n', &mut bytes);
+    let _ = it.read_input_line(&mut bytes);
     let line = String::from_utf8_lossy(&bytes).to_string();
     let line = line.strip_suffix('\n').unwrap_or(&line);
     let line = line.strip_suffix('\r').unwrap_or(line);
@@ -581,7 +582,7 @@ fn b_input(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 fn b_read_line(it: &mut Interp, _: Vec<Value>, _: Span) -> R {
     it.flush();
     let mut bytes = Vec::new();
-    match std::io::stdin().lock().read_until(b'\n', &mut bytes) {
+    match it.read_input_line(&mut bytes) {
         Ok(0) | Err(_) => Ok(it.none()),
         Ok(_) => {
             let line = String::from_utf8_lossy(&bytes).to_string();
@@ -595,7 +596,7 @@ fn b_read_line(it: &mut Interp, _: Vec<Value>, _: Span) -> R {
 fn b_read_stdin(it: &mut Interp, _: Vec<Value>, _: Span) -> R {
     it.flush();
     let mut bytes = Vec::new();
-    let _ = std::io::stdin().read_to_end(&mut bytes);
+    let _ = it.read_input_all(&mut bytes);
     Ok(Value::str(String::from_utf8_lossy(&bytes).to_string()))
 }
 
@@ -664,23 +665,24 @@ fn b_exit(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         ));
     }
     it.flush();
+    if it.embedded {
+        it.exit_code = Some(code as i32);
+        return Err(Ctrl::Exit(code as i32));
+    }
     std::process::exit(code as i32);
 }
 
 fn b_time(_: &mut Interp, _: Vec<Value>, _: Span) -> R {
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-    Ok(Value::Float(t))
+    Ok(Value::Float(crate::platform::now_seconds()))
 }
 
-static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-
+/// Start the clock that `clock()` measures from.
 pub fn start_clock() {
-    START.get_or_init(std::time::Instant::now);
+    crate::platform::monotonic_seconds();
 }
 
-fn b_clock(_: &mut Interp, _: Vec<Value>, _: Span) -> R {
-    let s = START.get_or_init(std::time::Instant::now);
-    Ok(Value::Float(s.elapsed().as_secs_f64()))
+fn b_clock(it: &mut Interp, _: Vec<Value>, _: Span) -> R {
+    Ok(Value::Float(crate::platform::monotonic_seconds() - it.clock_start))
 }
 
 fn b_sleep(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -689,7 +691,7 @@ fn b_sleep(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         return Err(it.err(sp, "E0216", format!("`sleep` needs a non-negative, finite number of seconds, got {}", format_float(s))));
     };
     it.flush();
-    std::thread::sleep(d);
+    crate::platform::sleep(d);
     Ok(Value::Unit)
 }
 
@@ -710,8 +712,7 @@ fn b_dbg(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     if !it.silent {
         let loc = if (sp.file as usize) < it.ctx.sm.files.len() { it.ctx.sm.location(sp) } else { "?".into() };
         let src = if (sp.file as usize) < it.ctx.sm.files.len() { it.ctx.sm.snippet(sp).to_string() } else { String::new() };
-        it.flush();
-        crate::err_outln!("[{}] {} = {}", loc, src, repr(&v));
+        it.write_err(&format!("[{}] {} = {}\n", loc, src, repr(&v)));
     }
     Ok(v)
 }

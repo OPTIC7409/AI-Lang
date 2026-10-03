@@ -54,6 +54,7 @@ pub mod diagnostic;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
+pub mod platform;
 pub mod proptest;
 pub mod repl;
 pub mod resolver;

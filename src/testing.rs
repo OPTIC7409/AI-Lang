@@ -9,7 +9,6 @@ use crate::span::Span;
 use crate::types::Ty;
 use crate::value::{repr, Closure, Value};
 use std::rc::Rc;
-use std::time::Instant;
 
 pub struct Options {
     pub seed: Option<u64>,
@@ -343,7 +342,7 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                     }
                 }
                 any = true;
-                let start = Instant::now();
+                let start = crate::platform::monotonic_seconds();
                 let cl = Rc::new(Closure { def: t.func.clone(), captures: vec![] });
                 let depth = it.stack.len();
                 let saved_budget = it.budget;
@@ -353,7 +352,7 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                 it.budget = saved_budget;
                 it.stack.truncate(depth);
                 let r = check_test_result(it, r);
-                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                let ms = (crate::platform::monotonic_seconds() - start) * 1000.0;
                 let timing = if ms > 100.0 { format!(" {}({:.0} ms){}", c.dim, ms, c.reset) } else { String::new() };
                 match r {
                     Ok(_) | Err(Ctrl::Return(_)) => {
@@ -417,8 +416,7 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
     if !any {
         out.push_str(&format!("  {}(no tests){}\n", c.dim, c.reset));
     }
-    it.flush();
-    crate::out!("{}", out);
+    flush_out(it, &mut out);
     sum
 }
 
@@ -502,15 +500,20 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
     if !any {
         out.push_str(&format!("  {}(no functions with contracts; use --all to check every annotated function){}\n", c.dim, c.reset));
     }
-    it.flush();
-    crate::out!("{}", out);
+    flush_out(it, &mut out);
     sum
 }
 
+/// Print the report so far. Reports bypass `silent` (which only mutes the
+/// program under test) but honour `capture`.
 fn flush_out(it: &mut Interp, out: &mut String) {
     use std::io::Write;
-    it.flush();
-    crate::out!("{}", out);
-    let _ = std::io::stdout().flush();
+    if let Some(buf) = &mut it.capture {
+        buf.push_str(out);
+    } else {
+        it.flush();
+        crate::out!("{}", out);
+        let _ = std::io::stdout().flush();
+    }
     out.clear();
 }
