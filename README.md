@@ -189,6 +189,19 @@ Hello, world!
 Editor support: a VS Code syntax-highlighting extension lives in
 [editors/vscode](editors/vscode).
 
+### In the browser
+
+The interpreter also compiles to WebAssembly. [web/](web) holds a playground
+page with an editor, example programs, and Run / Test / Verify / Check
+buttons; the interpreter runs in a Web Worker, so long programs can be
+stopped. Build it with:
+
+```console
+$ rustup target add wasm32-unknown-unknown
+$ python3 web/build.py            # writes web/dist/index.html and cogito.wasm
+$ python3 web/build.py --inline   # or one self-contained page
+```
+
 ## Documentation
 
 - [docs/tutorial.md](docs/tutorial.md): a guided introduction.
@@ -210,6 +223,8 @@ src/
   testing.rs     `cogito test` and `cogito verify`
   diagnostic.rs  error rendering and the error-code catalog
   repl.rs        the interactive loop
+  platform.rs    clock and sleep, for native builds and WebAssembly
+web/             the browser playground (a WebAssembly build of the interpreter)
 tests/
   lang/          the language test suite, written in Cogito
   errors/        one program per diagnostic code

@@ -339,6 +339,48 @@ crash the process, mostly integer edge cases (`gcd(min_int, -1)`,
 parentheses). All of these were fixed, and the specification was rewritten
 to answer every question the agents had to guess at.
 
+A second round, against the improved implementation and specification,
+measured how often a fresh agent's program worked on the first run:
+
+| Area | Round 1 | Round 2 |
+|---|---|---|
+| Algorithms and data structures | 7 of 11 | 7 of 12 |
+| Text processing, formatting, JSON, I/O | 2 of 10 | 7 of 10 |
+| Types, contracts and tests | 6 of 10 | 6 of 10 |
+
+In round 2, every program that did not work on the first run failed because
+of the agent's own mistake (a wrong expected value in a test, syntax from
+another language such as `if let`), not because of a bug or a gap in the
+specification, and in each case the error message pointed at the problem.
+`verify` found real contract violations in the agents' code, including
+integer overflows and missing preconditions.
+
+Round 2 still found problems, which were fixed:
+
+- **Performance cliffs** that only realistic programs reach: mutating a
+  collection with a declared type re-checked the whole collection on every
+  change (a typed binary heap took 15 s instead of 0.4 s), and indexing a
+  string containing one non-ASCII character took linear time per access.
+  Both are now constant time.
+- **Silent wrong answers** at the edges of the value-semantics model: a write
+  to a global variable during a `!` call on that same variable was lost; a
+  failed `push!` on a typed list left the wrong element behind; map keys and
+  destructured `var`s escaped their declared types. All are now errors, or
+  are undone.
+- **Mistakes the checker could catch**: `xs.sort()` whose result is thrown
+  away, `?` inside an anonymous function (which returns from that function
+  only), side effects in contracts, and patterns of the wrong type. `check`
+  now reports each, and `cogito FILE` shows the likely-bug warnings too.
+- **Generator blind spots**: properties filtered on `xs.len() >= 3` always
+  gave up, `where` clauses could not see names bound by parameter patterns,
+  generated strings rarely contained newlines, and shrinking large integers
+  took a thousand steps. Generation now reads length and Float bounds from
+  `where`/`requires`, and integer shrinking is logarithmic.
+- **Resource exhaustion** found by adversarial fuzzing (about 50,000
+  generated programs, with no crashes): comparing or hashing values built by
+  repeated doubling took exponential time, and top-level code under
+  `cogito test` had no step budget.
+
 Some findings changed the language's direction rather than its bugs. When a
 test of `verify` produced no counterexample for an "obviously correct"
 `average` function, the input generator was changed to favour duplicates and
@@ -347,6 +389,9 @@ values like `0.1`, after which `verify` found the floating-point bug
 README.
 
 ## Future directions
+
+- A third round of dogfooding, to see whether the first-try success rate
+  keeps rising now that the remaining failures are the agents' own mistakes.
 
 - A static type checker that uses the existing annotations.
 - A bytecode compiler for speed.
