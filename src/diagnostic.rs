@@ -291,6 +291,8 @@ pub const CATALOG: &[(&str, &str, &str)] = &[
     ("E0217", "panic", "The program called `panic(message)`."),
     ("E0218", "not yet implemented", "The program reached a `todo()`."),
     ("E0219", "step budget exceeded", "While running a property test or `cogito verify`, a single test case ran\nfor more steps (function calls plus loop iterations) than its budget.\nThis usually means an infinite loop, or a generated input that is too\nlarge for the algorithm. Restrict the inputs with `where` (properties) or\n`requires` (contracts), or raise the limit with `--budget N`."),
+    ("E0220", "exit called in a test", "`exit()` stops the whole process, which would also stop the test runner.\nInside `test` and `property` blocks (and in the top-level code of a file\nbeing tested), return or assert instead."),
+    ("E0221", "main returned an error", "When `fn main()` returns `Err(e)`, the program prints the error and exits\nwith status 1. This lets `main` use `?` to propagate failures:\n\n    fn main() -> Result[Unit, Str] {\n      let text = read_file(\"input.txt\")?\n      print(text.lines().len())\n      Ok(())\n    }"),
     ("E0300", "assertion failed", "An `assert` statement's condition was false. For comparisons, Cogito shows\nthe value of each side."),
     ("E0301", "precondition violated", "A function was called with arguments that violate its `requires`\ncontract. This is a bug in the *caller*: the function documented an\nassumption, and the call broke it."),
     ("E0302", "postcondition violated", "A function returned a value that violates its own `ensures` contract.\nThis is a bug in the *function*: it promised something it did not deliver.\nInside `ensures`, the name `result` refers to the returned value."),

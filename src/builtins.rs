@@ -237,6 +237,109 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("option", "collect_some", 1, 1, b_collect_some, "collect_some(xs: List[Option[T]]) -> Option[List[T]]\nSome with all the values, or None if any element is None."),
 ];
 
+/// Parameter names of a built-in, read from its documented signature (the
+/// longest non-variadic alternative). Empty for variadic and mutating built-ins.
+pub fn param_names(idx: u16) -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<Vec<String>>> = std::sync::OnceLock::new();
+    let all = NAMES.get_or_init(|| BUILTINS.iter().map(|b| parse_param_names(b.doc)).collect());
+    &all[idx as usize]
+}
+
+fn parse_param_names(doc: &str) -> Vec<String> {
+    let first = doc.lines().next().unwrap_or("");
+    let mut best: Vec<String> = Vec::new();
+    for alt in first.split("   |   ").flat_map(|a| a.split(" | ")) {
+        let alt = alt.trim();
+        if alt.contains('!') || alt.contains("...") {
+            continue;
+        }
+        let Some(open) = alt.find('(') else { continue };
+        let mut depth = 0;
+        let mut close = None;
+        let mut in_str = false;
+        for (i, c) in alt[open..].char_indices() {
+            match c {
+                '"' => in_str = !in_str,
+                '(' | '[' if !in_str => depth += 1,
+                ')' | ']' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { continue };
+        let inner = &alt[open + 1..close];
+        let mut names = Vec::new();
+        let mut depth = 0;
+        let mut in_str = false;
+        let mut cur = String::new();
+        for c in inner.chars().chain(std::iter::once(',')) {
+            match c {
+                '"' => {
+                    in_str = !in_str;
+                    cur.push(c)
+                }
+                '[' | '(' if !in_str => {
+                    depth += 1;
+                    cur.push(c)
+                }
+                ']' | ')' if !in_str => {
+                    depth -= 1;
+                    cur.push(c)
+                }
+                ',' if depth == 0 && !in_str => {
+                    let name: String = cur.trim().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                    if !name.is_empty() {
+                        names.push(name);
+                    }
+                    cur.clear();
+                }
+                _ => cur.push(c),
+            }
+        }
+        if names.len() > best.len() {
+            best = names;
+        }
+    }
+    best
+}
+
+/// Combine positional and named arguments for a built-in into one positional list.
+pub fn arrange_named(idx: u16, mut pos: Vec<Value>, named: Vec<(crate::types::Name, Value)>) -> Result<Vec<Value>, String> {
+    let names = param_names(idx);
+    let b = &BUILTINS[idx as usize];
+    if names.is_empty() {
+        return Err(format!("built-in function `{}` does not take named arguments", b.name));
+    }
+    let mut slots: Vec<Option<Value>> = pos.drain(..).map(Some).collect();
+    for (n, v) in named {
+        let Some(i) = names.iter().position(|x| **x == *n) else {
+            let hint =
+                crate::diagnostic::suggest(&n, names.iter().map(|s| s.as_str())).map(|s| format!("; did you mean `{}`?", s)).unwrap_or_default();
+            return Err(format!("`{}` has no parameter named `{}` (its parameters are: {}){}", b.name, n, names.join(", "), hint));
+        };
+        if slots.len() <= i {
+            slots.resize(i + 1, None);
+        }
+        if slots[i].is_some() {
+            return Err(format!("argument `{}` is given twice", n));
+        }
+        slots[i] = Some(v);
+    }
+    let mut out = Vec::with_capacity(slots.len());
+    for (i, s) in slots.into_iter().enumerate() {
+        match s {
+            Some(v) => out.push(v),
+            None => return Err(format!("argument `{}` of `{}` is missing (built-ins cannot skip arguments)", names[i], b.name)),
+        }
+    }
+    Ok(out)
+}
+
 pub fn builtin_index(name: &str) -> Option<usize> {
     BUILTINS.iter().position(|b| b.name == name)
 }
@@ -454,7 +557,7 @@ fn b_eprint(it: &mut Interp, a: Vec<Value>, _: Span) -> R {
         return Ok(Value::Unit);
     }
     it.flush();
-    eprintln!("{}", join_display(&a));
+    crate::err_outln!("{}", join_display(&a));
     Ok(Value::Unit)
 }
 
@@ -467,8 +570,9 @@ fn b_input(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         it.write_out(&p);
     }
     it.flush();
-    let mut line = String::new();
-    let _ = std::io::stdin().lock().read_line(&mut line);
+    let mut bytes = Vec::new();
+    let _ = std::io::stdin().lock().read_until(b'\n', &mut bytes);
+    let line = String::from_utf8_lossy(&bytes).to_string();
     let line = line.strip_suffix('\n').unwrap_or(&line);
     let line = line.strip_suffix('\r').unwrap_or(line);
     Ok(Value::str(line))
@@ -476,10 +580,11 @@ fn b_input(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 
 fn b_read_line(it: &mut Interp, _: Vec<Value>, _: Span) -> R {
     it.flush();
-    let mut line = String::new();
-    match std::io::stdin().lock().read_line(&mut line) {
+    let mut bytes = Vec::new();
+    match std::io::stdin().lock().read_until(b'\n', &mut bytes) {
         Ok(0) | Err(_) => Ok(it.none()),
         Ok(_) => {
+            let line = String::from_utf8_lossy(&bytes).to_string();
             let l = line.strip_suffix('\n').unwrap_or(&line);
             let l = l.strip_suffix('\r').unwrap_or(l);
             Ok(it.some(Value::str(l)))
@@ -489,9 +594,9 @@ fn b_read_line(it: &mut Interp, _: Vec<Value>, _: Span) -> R {
 
 fn b_read_stdin(it: &mut Interp, _: Vec<Value>, _: Span) -> R {
     it.flush();
-    let mut s = String::new();
-    let _ = std::io::stdin().read_to_string(&mut s);
-    Ok(Value::str(s))
+    let mut bytes = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut bytes);
+    Ok(Value::str(String::from_utf8_lossy(&bytes).to_string()))
 }
 
 fn b_read_file(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -549,6 +654,15 @@ fn b_env(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 
 fn b_exit(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let code = if a.is_empty() { 0 } else { int_arg(it, &a, 0, "exit", sp)? };
+    if !(0..=255).contains(&code) {
+        return Err(it.err(sp, "E0216", format!("exit codes must be between 0 and 255, got {}", code)));
+    }
+    if it.test_mode {
+        return Err(it.fail(
+            it.diag(sp, "E0220", format!("`exit({})` was called while running tests", code))
+                .help("tests run in the same process as the test runner; return or assert instead of exiting"),
+        ));
+    }
     it.flush();
     std::process::exit(code as i32);
 }
@@ -571,10 +685,11 @@ fn b_clock(_: &mut Interp, _: Vec<Value>, _: Span) -> R {
 
 fn b_sleep(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = num_arg(it, &a, 0, "sleep", sp)?;
+    let Ok(d) = std::time::Duration::try_from_secs_f64(s) else {
+        return Err(it.err(sp, "E0216", format!("`sleep` needs a non-negative, finite number of seconds, got {}", format_float(s))));
+    };
     it.flush();
-    if s > 0.0 && s.is_finite() {
-        std::thread::sleep(std::time::Duration::from_secs_f64(s));
-    }
+    std::thread::sleep(d);
     Ok(Value::Unit)
 }
 
@@ -596,7 +711,7 @@ fn b_dbg(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
         let loc = if (sp.file as usize) < it.ctx.sm.files.len() { it.ctx.sm.location(sp) } else { "?".into() };
         let src = if (sp.file as usize) < it.ctx.sm.files.len() { it.ctx.sm.snippet(sp).to_string() } else { String::new() };
         it.flush();
-        eprintln!("[{}] {} = {}", loc, src, repr(&v));
+        crate::err_outln!("[{}] {} = {}", loc, src, repr(&v));
     }
     Ok(v)
 }
@@ -674,9 +789,8 @@ fn b_parse_int(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 
 fn b_parse_float(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = str_arg(it, &a, 0, "parse_float", sp)?;
-    let t = s.trim();
-    let ok = !t.is_empty() && !t.eq_ignore_ascii_case("nan") && !t.to_ascii_lowercase().contains("inf");
-    Ok(it.option(if ok { t.parse::<f64>().ok().map(Value::Float) } else { None }))
+    let t = s.trim().replace('_', "");
+    Ok(it.option(t.parse::<f64>().ok().map(Value::Float)))
 }
 
 fn b_ord(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -849,19 +963,20 @@ fn b_clamp(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     Ok(a[0].clone())
 }
 
-fn gcd(mut a: i64, mut b: i64) -> i64 {
+fn gcd(a: i64, b: i64) -> u64 {
+    let (mut a, mut b) = (a.unsigned_abs(), b.unsigned_abs());
     while b != 0 {
         let t = a % b;
         a = b;
         b = t;
     }
-    a.abs()
+    a
 }
 
 fn b_gcd(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let x = int_arg(it, &a, 0, "gcd", sp)?;
     let y = int_arg(it, &a, 1, "gcd", sp)?;
-    Ok(Value::Int(gcd(x, y)))
+    i64::try_from(gcd(x, y)).map(Value::Int).map_err(|_| it.err(sp, "E0207", format!("integer overflow in gcd({}, {})", x, y)))
 }
 
 fn b_lcm(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -870,7 +985,8 @@ fn b_lcm(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     if x == 0 || y == 0 {
         return Ok(Value::Int(0));
     }
-    (x / gcd(x, y)).checked_mul(y).map(|v| Value::Int(v.abs())).ok_or_else(|| it.err(sp, "E0207", "integer overflow in lcm"))
+    let l = (x.unsigned_abs() as u128 / gcd(x, y) as u128) * y.unsigned_abs() as u128;
+    i64::try_from(l).map(Value::Int).map_err(|_| it.err(sp, "E0207", format!("integer overflow in lcm({}, {})", x, y)))
 }
 
 fn b_is_nan(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -878,9 +994,15 @@ fn b_is_nan(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 }
 
 fn b_fixed(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let d = usize_arg(it, &a, 1, "fixed", sp)?.min(100);
+    if let Value::Int(n) = a[0] {
+        return Ok(Value::str(if d == 0 { n.to_string() } else { format!("{}.{}", n, "0".repeat(d)) }));
+    }
     let x = num_arg(it, &a, 0, "fixed", sp)?;
-    let d = usize_arg(it, &a, 1, "fixed", sp)?;
-    Ok(Value::str(format!("{:.*}", d.min(50), x)))
+    if !x.is_finite() {
+        return Ok(Value::str(format_float(x)));
+    }
+    Ok(Value::str(format!("{:.*}", d, x)))
 }
 
 fn b_bit_and(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -901,7 +1023,11 @@ fn b_shl(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     if !(0..64).contains(&n) {
         return Err(it.err(sp, "E0216", format!("shift amount must be in 0..64, got {}", n)));
     }
-    Ok(Value::Int(x.wrapping_shl(n as u32)))
+    let r = x.wrapping_shl(n as u32);
+    if r >> n != x {
+        return Err(it.err(sp, "E0207", format!("integer overflow: shl({}, {})", x, n)));
+    }
+    Ok(Value::Int(r))
 }
 fn b_shr(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let x = int_arg(it, &a, 0, "shr", sp)?;
@@ -1000,8 +1126,11 @@ fn b_len(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         Value::Str(s) => s.char_len() as i64,
         Value::List(xs) | Value::Tuple(xs) => xs.len() as i64,
         Value::Map(m) => m.len() as i64,
-        Value::Range(r) => match r.len() {
-            Some(n) => n as i64,
+        Value::Range(r) => match r.len_u128() {
+            Some(n) => match i64::try_from(n) {
+                Ok(n) => n,
+                Err(_) => return Err(it.err(sp, "E0207", "integer overflow: the range has more than max_int elements")),
+            },
             None => return Err(it.err(sp, "E0216", "an unbounded range has no length")),
         },
         Value::Record(r) => r.values.len() as i64,
@@ -1041,7 +1170,7 @@ fn b_range(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         }
         return Ok(Value::list(out));
     }
-    Ok(Value::Range(Rc::new(RangeVal { start, end: Some(end) })))
+    Ok(Value::Range(Rc::new(RangeVal { start, end: Some(end as i128) })))
 }
 
 fn owned_list(it: &Interp, v: Value, f: &str, i: usize, sp: Span) -> R<Vec<Value>> {
@@ -1258,7 +1387,7 @@ fn b_last(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         Value::List(xs) | Value::Tuple(xs) => xs.last().cloned(),
         Value::Str(s) => s.chars().last().map(|c| Value::str(c.to_string())),
         Value::Range(r) => match r.end {
-            Some(e) if e > r.start => Some(Value::Int(e - 1)),
+            Some(e) if e > r.start as i128 => Some(Value::Int((e - 1) as i64)),
             Some(_) => None,
             None => return Err(it.err(sp, "E0216", "an unbounded range has no last element")),
         },
@@ -1360,7 +1489,7 @@ fn b_sum(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let v = take_arg(&mut a, 0);
     if let Value::Range(r) = &v {
         if let Some(e) = r.end {
-            let (s, e) = (r.start as i128, e as i128);
+            let (s, e) = (r.start as i128, e);
             if e <= s {
                 return Ok(Value::Int(0));
             }
@@ -1428,22 +1557,14 @@ fn b_sort(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 }
 
 fn m_sort(it: &mut Interp, t: &mut Value, _: Vec<Value>, sp: Span) -> R {
-    let v = std::mem::take(t);
-    let xs = match owned_list(it, v.clone(), "sort!", 0, sp) {
-        Ok(xs) => xs,
-        Err(e) => {
-            *t = v;
-            return Err(e);
-        }
+    // Sort a copy, so that on error the variable keeps its old value.
+    let xs = match &*t {
+        Value::List(xs) => xs.to_vec(),
+        other => return Err(type_err(it, "sort!", 0, "a List", other, sp)),
     };
-    drop(v);
-    match sort_values(it, xs, sp) {
-        Ok(sorted) => {
-            *t = Value::list(sorted);
-            Ok(Value::Unit)
-        }
-        Err(e) => Err(e),
-    }
+    let sorted = sort_values(it, xs, sp)?;
+    *t = Value::list(sorted);
+    Ok(Value::Unit)
 }
 
 fn b_sort_by(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
@@ -1612,9 +1733,12 @@ fn b_take(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     match v {
         Value::Str(s) => Ok(Value::str(s.chars().take(n).collect::<String>())),
         Value::Range(r) => {
-            let end = r.start.saturating_add(n as i64);
-            let end = r.end.map_or(end, |e| e.min(end));
-            Ok(Value::list((r.start..end.max(r.start)).map(Value::Int).collect()))
+            let count = r.len_u128().map_or(n as u128, |l| l.min(n as u128));
+            if count > 100_000_000 {
+                return Err(it.err(sp, "E0216", format!("`take` of {} elements would be too large", count)));
+            }
+            it.tick_n(count as u64, sp)?;
+            Ok(Value::list((0..count as i128).map(|i| Value::Int((r.start as i128 + i) as i64)).collect()))
         }
         v => {
             let mut xs = items(it, v, "take", 0, sp)?;
@@ -1667,7 +1791,7 @@ fn b_drop_while(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 fn b_slice(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = int_arg(it, &a, 1, "slice", sp)?;
     let e = int_arg(it, &a, 2, "slice", sp)?;
-    let r = Value::Range(Rc::new(RangeVal { start: s, end: Some(e) }));
+    let r = Value::Range(Rc::new(RangeVal { start: s, end: Some(e as i128) }));
     match &a[0] {
         Value::List(_) | Value::Str(_) => it.index_value(a[0].clone(), r, sp),
         v => Err(type_err(it, "slice", 0, "a List or Str", v, sp)),
@@ -1718,7 +1842,10 @@ fn b_flatten(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
                     out.push(vv.values[0].clone());
                 }
             }
-            other => out.extend(items(it, other, "flatten", 0, sp)?),
+            Value::List(xs) | Value::Tuple(xs) => out.extend(xs.iter().cloned()),
+            other => {
+                return Err(it.err(sp, "E0200", format!("`flatten` needs a list of lists (or Options), but found the element {}", describe(&other))))
+            }
         }
     }
     Ok(Value::list(out))
@@ -2033,6 +2160,9 @@ fn pad(it: &mut Interp, a: &[Value], sp: Span, name: &str, left: bool) -> R {
     let n = s.chars().count();
     if n >= w {
         return Ok(Value::str(s));
+    }
+    if w > 1 << 26 {
+        return Err(it.err(sp, "E0216", format!("`{}` width {} is too large", name, w)));
     }
     let padding = fill.repeat(w - n);
     Ok(Value::str(if left { padding + &s } else { s + &padding }))

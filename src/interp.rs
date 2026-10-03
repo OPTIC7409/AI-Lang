@@ -103,6 +103,15 @@ pub struct Interp {
     pub ticks: u64,
     /// Where the most recent `?` returned early (for error messages).
     try_span: Option<Span>,
+    /// For the most recently finished call: the `?` that made it return early.
+    pub last_try_return: Option<Span>,
+    /// The first argument of a mutating function that failed (so the
+    /// caller's variable is not lost).
+    salvaged: Option<Value>,
+    /// Global variables currently being changed by a mutating call.
+    busy_globals: Vec<(u32, Name)>,
+    /// Set by `cogito test`: `exit()` becomes an error.
+    pub test_mode: bool,
     stdout: std::io::BufWriter<std::io::Stdout>,
     stdout_tty: bool,
     pub none: Value,
@@ -163,6 +172,10 @@ impl Interp {
             budget: None,
             ticks: 0,
             try_span: None,
+            last_try_return: None,
+            salvaged: None,
+            busy_globals: Vec::new(),
+            test_mode: false,
             stdout: std::io::BufWriter::with_capacity(1 << 16, std::io::stdout()),
             stdout_tty: std::io::stdout().is_terminal(),
             none,
@@ -179,9 +192,12 @@ impl Interp {
             buf.push_str(s);
             return;
         }
-        let _ = self.stdout.write_all(s.as_bytes());
-        if self.stdout_tty {
-            let _ = self.stdout.flush();
+        let r = self.stdout.write_all(s.as_bytes()).and_then(|_| if self.stdout_tty { self.stdout.flush() } else { Ok(()) });
+        if let Err(e) = r {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                // The reader went away (e.g. `cogito prog | head`): stop quietly.
+                std::process::exit(0);
+            }
         }
     }
 
@@ -732,7 +748,12 @@ impl Interp {
             VarRes::Capture(i) => Ok(env.closure.as_ref().expect("closure").captures[i as usize].clone()),
             VarRes::Global(s) => match &self.globals[s as usize] {
                 Some(v) => Ok(v.clone()),
-                None => Err(self.err(span, "E0214", format!("`{}` is used before it is initialized", v.name))),
+                None => {
+                    if let Some((_, f)) = self.busy_globals.iter().find(|(b, _)| *b == s) {
+                        return Err(self.err(span, "E0214", format!("`{}` cannot be read while `{}` is changing it", v.name, f)));
+                    }
+                    Err(self.err(span, "E0214", format!("`{}` is used before it is initialized", v.name)))
+                }
             },
             VarRes::SelfFn => Ok(Value::Func(env.closure.clone().expect("self fn"))),
             VarRes::Unresolved => Err(self.err(span, "E0100", format!("undefined name `{}`", v.name))),
@@ -990,9 +1011,9 @@ impl Interp {
                             return Err(self.err(x.span, "E0211", format!("range bounds must be Int, got {}", describe(&v))));
                         };
                         if *inclusive {
-                            n.checked_add(1)
+                            Some(n as i128 + 1)
                         } else {
-                            Some(n)
+                            Some(n as i128)
                         }
                     }
                 };
@@ -1148,7 +1169,7 @@ impl Interp {
                 let mut i = r.start;
                 loop {
                     if let Some(end) = r.end {
-                        if i >= end {
+                        if i as i128 >= end {
                             break;
                         }
                     }
@@ -1206,7 +1227,7 @@ impl Interp {
                         return Err(self.err(span, "E0216", format!("range {}..{} is too large to collect into a list", r.start, end)));
                     }
                     self.tick_n(n as u64, span)?;
-                    Ok((r.start..end).map(Value::Int).collect())
+                    Ok((r.start as i128..end).map(|i| Value::Int(i as i64)).collect())
                 }
                 None => Err(self.err(span, "E0216", "cannot collect an unbounded range").map_help("give the range an end: `0..n`")),
             },
@@ -1315,10 +1336,10 @@ impl Interp {
                 )),
             },
             (Value::Range(r), Value::Int(i)) => {
-                let len = r.len();
-                let ok = *i >= 0 && len.is_none_or(|n| (*i as usize) < n);
+                let len = r.len_u128();
+                let ok = *i >= 0 && len.is_none_or(|n| (*i as u128) < n);
                 if ok {
-                    Ok(Value::Int(r.start + i))
+                    Ok(Value::Int((r.start as i128 + *i as i128) as i64))
                 } else {
                     Err(self.err(span, "E0204", format!("index {} is out of bounds for the range", i)))
                 }
@@ -1410,6 +1431,9 @@ impl Interp {
                     if n < 0 {
                         return Err(self.err(span, "E0216", format!("cannot repeat a list {} times", n)));
                     }
+                    if xs.is_empty() {
+                        return Ok(Value::list(vec![]));
+                    }
                     if (xs.len() as u128) * (n as u128) > 1 << 28 {
                         return Err(self.err(span, "E0216", "repeated list would be too large"));
                     }
@@ -1446,7 +1470,7 @@ impl Interp {
                     if y == 0.0 {
                         return Err(self.div_zero(span));
                     }
-                    Ok(Float((x / y).floor()))
+                    Ok(Float(float_divmod(x, y).0))
                 }
             },
             BinOp::Mod => match (a, b) {
@@ -1464,7 +1488,7 @@ impl Interp {
                     if y == 0.0 {
                         return Err(self.div_zero(span));
                     }
-                    Ok(Float(x - y * (x / y).floor()))
+                    Ok(Float(float_divmod(x, y).1))
                 }
             },
             BinOp::Pow => match (a, b) {
@@ -1566,8 +1590,17 @@ impl Interp {
             (Some(k), _) => {
                 return Err(self.err(span, "E0216", format!("format type `{}` cannot be used with {}", k, describe(v))));
             }
+            (None, Value::Float(f)) if spec.precision.is_some() && !f.is_finite() => format_float(*f),
             (None, Value::Float(f)) if spec.precision.is_some() => format!("{:.*}", spec.precision.unwrap(), f),
-            (None, Value::Int(n)) if spec.precision.is_some() => format!("{:.*}", spec.precision.unwrap(), *n as f64),
+            // Ints are formatted exactly (not through a Float).
+            (None, Value::Int(n)) if spec.precision.is_some() => {
+                let p = spec.precision.unwrap();
+                if p == 0 {
+                    n.to_string()
+                } else {
+                    format!("{}.{}", n, "0".repeat(p))
+                }
+            }
             (None, Value::Str(s)) if spec.precision.is_some() => s.chars().take(spec.precision.unwrap()).collect(),
             _ => display(v),
         };
@@ -1867,9 +1900,11 @@ impl Interp {
             Value::Func(c) => self.call_closure(c, args, named, span),
             Value::Builtin(idx) => {
                 let b = &BUILTINS[*idx as usize];
-                if !named.is_empty() {
-                    return Err(self.err(span, "E0108", format!("built-in function `{}` does not take named arguments", b.name)));
-                }
+                let args = if named.is_empty() {
+                    args
+                } else {
+                    crate::builtins::arrange_named(*idx, args, named).map_err(|m| self.err(span, "E0108", m))?
+                };
                 self.check_builtin_arity(*idx, args.len(), span)?;
                 match b.f {
                     BFn::Pure(fp) => fp(self, args, span),
@@ -1887,7 +1922,7 @@ impl Interp {
                         return self.call_value(c, args, named, span);
                     }
                 }
-                Err(self.fail(self.no_overload(&cands, &args, span)))
+                Err(self.fail(self.no_overload(&cands, &args, &named, span)))
             }
             Value::Ctor(td, tag) => self.construct(td, *tag, args, named, span),
             Value::Variant(vv) => Err(self.fail(
@@ -1898,8 +1933,10 @@ impl Interp {
         }
     }
 
-    fn no_overload(&self, cands: &[Value], args: &[Value], span: Span) -> Diagnostic {
-        let got = args.iter().map(type_name).collect::<Vec<_>>().join(", ");
+    fn no_overload(&self, cands: &[Value], args: &[Value], named: &[(Name, Value)], span: Span) -> Diagnostic {
+        let mut parts: Vec<String> = args.iter().map(type_name).collect();
+        parts.extend(named.iter().map(|(n, v)| format!("{}: {}", n, type_name(v))));
+        let got = parts.join(", ");
         let name = match cands.first() {
             Some(Value::Func(c)) => c.def.display_name().to_string(),
             Some(Value::Builtin(i)) => BUILTINS[*i as usize].name.to_string(),
@@ -1982,7 +2019,8 @@ impl Interp {
             }
             Value::Builtin(i) => {
                 let b = &BUILTINS[*i as usize];
-                named.is_empty() && args.len() >= b.min as usize && args.len() <= b.max as usize
+                let n = args.len() + named.len();
+                (named.is_empty() || !crate::builtins::param_names(*i).is_empty()) && n >= b.min as usize && n <= b.max as usize
             }
             _ => true,
         }
@@ -2111,6 +2149,9 @@ impl Interp {
         self.stack.push(Frame { name: def.display_name(), call_span: span });
         let r = self.call_body(&def, &mut env, filled, span);
         self.stack.pop();
+        if r.is_err() && want_first && nparams > 0 {
+            self.salvaged = Some(std::mem::take(&mut env.locals[def.params[0].slot as usize]));
+        }
         let result = r?;
         let first = if want_first && nparams > 0 { std::mem::take(&mut env.locals[def.params[0].slot as usize]) } else { Value::Unit };
         Ok((result, first))
@@ -2216,6 +2257,7 @@ impl Interp {
             }
         }
         let mut from_try = None;
+        self.last_try_return = None;
         let mut result = match self.eval(&def.body, env) {
             Ok(v) => v,
             Err(Ctrl::Return(v)) => {
@@ -2225,6 +2267,7 @@ impl Interp {
             Err(Ctrl::Break(_)) | Err(Ctrl::Continue) => Value::Unit,
             Err(e) => return Err(e),
         };
+        self.last_try_return = from_try;
         if let Some(t) = &def.ret {
             if let (Some(tsp), false) = (from_try, self.has_type(&result, &t.ty, false)) {
                 let (what, help) = if result.is_option() {
@@ -2300,6 +2343,15 @@ impl Interp {
         };
         let expected = self.expected_type(&root, &steps, decl, env);
         let mut target = self.with_place(&root, &steps, false, env, receiver.span, std::mem::take)?;
+        // While the call runs, the global is unavailable (it has been moved
+        // into the call), so reading it gives a clear error instead of `()`.
+        let busy = if let PlaceRoot::Global(s) = root {
+            let saved = self.globals[s as usize].take();
+            self.busy_globals.push((s, method.name.clone()));
+            Some((s, saved))
+        } else {
+            None
+        };
         let pre = match (&expected, &target) {
             (Some(t @ Ty::List(_)), Value::List(xs)) => Some((xs.checked() == t.fingerprint(), xs.len())),
             _ => None,
@@ -2339,6 +2391,10 @@ impl Interp {
                 }
             }
         }
+        if let Some((s, saved)) = busy {
+            self.globals[s as usize] = saved;
+            self.busy_globals.pop();
+        }
         self.with_place(&root, &steps, false, env, receiver.span, |p| *p = target)?;
         if let Some(e) = type_error {
             return Err(e);
@@ -2365,9 +2421,19 @@ impl Interp {
                 let mut full = Vec::with_capacity(args.len() + 1);
                 full.push(std::mem::take(target));
                 full.extend(args);
-                let (r, first) = self.call_closure_full(c, full, named, span, true)?;
-                *target = first;
-                Ok(r)
+                match self.call_closure_full(c, full, named, span, true) {
+                    Ok((r, first)) => {
+                        *target = first;
+                        Ok(r)
+                    }
+                    Err(e) => {
+                        // Keep whatever the function had done so far, rather than losing the value.
+                        if let Some(v) = self.salvaged.take() {
+                            *target = v;
+                        }
+                        Err(e)
+                    }
+                }
             }
             Value::Overload(cands) => {
                 let cands = cands.clone();
@@ -2385,7 +2451,7 @@ impl Interp {
                         return self.call_mutating(c, target, args, named, span);
                     }
                 }
-                Err(self.fail(self.no_overload(&cands, &probe, span)))
+                Err(self.fail(self.no_overload(&cands, &probe, &named, span)))
             }
             other => Err(self.err(span, "E0111", format!("{} is not a mutating function", describe(other)))),
         }
@@ -2529,6 +2595,16 @@ fn step_mut<'v>(v: &'v mut Value, step: &Step, insert: bool) -> Result<&'v mut V
                     None => Err(("E0205", format!("key {} not found in map", short_repr(idx)))),
                 }
             }
+            Value::Tuple(t) => {
+                let len = t.len();
+                let Value::Int(i) = idx else {
+                    return Err(("E0211", format!("tuple indexes must be Int, got {}", describe(idx))));
+                };
+                match norm_index(*i, len) {
+                    Some(j) => Ok(&mut Rc::make_mut(t)[j]),
+                    None => Err(("E0204", format!("index {} is out of bounds for a tuple of {} elements", i, len))),
+                }
+            }
             Value::Str(_) => Err(("E0211", "strings cannot be changed in place; build a new string instead".to_string())),
             other => Err(("E0211", format!("cannot index into {}", describe(other)))),
         },
@@ -2553,12 +2629,37 @@ pub fn slice_bounds(r: &RangeVal, len: usize) -> (usize, usize) {
         x.clamp(0, n) as usize
     };
     let a = fix(r.start);
-    let b = r.end.map(fix).unwrap_or(len);
+    let b = r.end.map(|e| fix(e.clamp(i64::MIN as i128, i64::MAX as i128) as i64)).unwrap_or(len);
     if b < a {
         (a, a)
     } else {
         (a, b)
     }
+}
+
+/// Floor division and modulo for floats, as Python defines them (the
+/// remainder has the sign of the divisor, and infinities behave sensibly).
+fn float_divmod(x: f64, y: f64) -> (f64, f64) {
+    let mut m = x % y;
+    let mut d = (x - m) / y;
+    if m != 0.0 && ((y < 0.0) != (m < 0.0)) {
+        m += y;
+        d -= 1.0;
+    }
+    if m == 0.0 {
+        m = 0.0f64.copysign(y);
+    }
+    let fd = if d != 0.0 {
+        let f = d.floor();
+        if d - f > 0.5 {
+            f + 1.0
+        } else {
+            f
+        }
+    } else {
+        0.0f64.copysign(x / y)
+    };
+    (fd, m)
 }
 
 /// "1234567.5" -> "1,234,567.5"

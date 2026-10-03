@@ -1,0 +1,5 @@
+# expect: E0117
+fn g(s: Str) -> Result[Int, Str] {
+  let n = parse_int(s)?
+  Ok(n)
+}

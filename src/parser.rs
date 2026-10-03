@@ -31,18 +31,23 @@ pub struct Parser<'s> {
     file: u32,
     toks: Vec<Token>,
     pos: usize,
+    /// Current nesting depth of expressions, blocks, patterns and types.
+    depth: u32,
 }
+
+/// Deeper nesting than this is rejected, rather than risking a native stack overflow.
+const MAX_NESTING: u32 = 256;
 
 pub fn parse_program(src: &str, file: u32) -> PResult<Program> {
     let toks = lex(src, file, 0, src.len())?;
-    let mut p = Parser { src, file, toks, pos: 0 };
+    let mut p = Parser { src, file, toks, pos: 0, depth: 0 };
     p.program()
 }
 
 /// Parse an expression from a sub-range of the source (used for string interpolation).
 pub fn parse_expr_range(src: &str, file: u32, start: usize, end: usize) -> PResult<Expr> {
     let toks = lex(src, file, start, end)?;
-    let mut p = Parser { src, file, toks, pos: 0 };
+    let mut p = Parser { src, file, toks, pos: 0, depth: 0 };
     p.skip_newlines();
     let e = p.expr()?;
     p.skip_newlines();
@@ -622,6 +627,13 @@ impl<'s> Parser<'s> {
     }
 
     fn block(&mut self) -> PResult<Expr> {
+        self.enter()?;
+        let r = self.block_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn block_inner(&mut self) -> PResult<Expr> {
         let open = self.expect(&Tok::LBrace, "`{`")?;
         let mut stmts = Vec::new();
         loop {
@@ -641,8 +653,21 @@ impl<'s> Parser<'s> {
 
     // ------------------------------------------------------------ expressions
 
+    fn enter(&mut self) -> PResult<()> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(Diagnostic::error("E0010", format!("code is nested too deeply (more than {} levels)", MAX_NESTING))
+                .at(self.span())
+                .help("split deeply nested expressions into smaller pieces with `let`"));
+        }
+        Ok(())
+    }
+
     pub fn expr(&mut self) -> PResult<Expr> {
-        self.or_expr()
+        self.enter()?;
+        let r = self.or_expr();
+        self.depth -= 1;
+        r
     }
 
     fn or_expr(&mut self) -> PResult<Expr> {
@@ -672,7 +697,10 @@ impl<'s> Parser<'s> {
     fn not_expr(&mut self) -> PResult<Expr> {
         if self.at(&Tok::Not) {
             let start = self.bump().span;
-            let e = self.not_expr()?;
+            self.enter()?;
+            let e = self.not_expr();
+            self.depth -= 1;
+            let e = e?;
             let span = start.to(e.span);
             return Ok(mk(ExprKind::Unary { op: UnOp::Not, expr: Box::new(e) }, span));
         }
@@ -784,7 +812,7 @@ impl<'s> Parser<'s> {
             _ => return Ok(lhs),
         };
         self.bump();
-        let end = if self.can_start_expr() && !self.at(&Tok::LBrace) {
+        let end = if self.can_start_expr() && !matches!(self.peek(), Tok::LBrace | Tok::If | Tok::For) {
             Some(Box::new(self.add_expr()?))
         } else if inclusive {
             return Err(self.unexpected("the end of the inclusive range"));
@@ -837,7 +865,10 @@ impl<'s> Parser<'s> {
     fn unary_expr(&mut self) -> PResult<Expr> {
         if self.at(&Tok::Minus) {
             let start = self.bump().span;
-            let e = self.unary_expr()?;
+            self.enter()?;
+            let e = self.unary_expr();
+            self.depth -= 1;
+            let e = e?;
             let span = start.to(e.span);
             return Ok(mk(ExprKind::Unary { op: UnOp::Neg, expr: Box::new(e) }, span));
         }
@@ -1180,7 +1211,8 @@ impl<'s> Parser<'s> {
         if i + 1 >= self.toks.len() {
             return false;
         }
-        matches!((&self.toks[i].tok, &self.toks[i + 1].tok), (Tok::Ident(_), Tok::Colon) | (Tok::DotDot, _))
+        let keyword_field = crate::lexer::KEYWORDS.contains(&self.toks[i].tok.text()) && self.toks[i + 1].tok == Tok::Colon;
+        keyword_field || matches!((&self.toks[i].tok, &self.toks[i + 1].tok), (Tok::Ident(_), Tok::Colon) | (Tok::DotDot, _))
     }
 
     fn record_literal(&mut self) -> PResult<Expr> {
@@ -1381,6 +1413,13 @@ impl<'s> Parser<'s> {
     // ------------------------------------------------------------ types
 
     pub fn type_expr(&mut self) -> PResult<TypeExpr> {
+        self.enter()?;
+        let r = self.type_expr_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn type_expr_inner(&mut self) -> PResult<TypeExpr> {
         let start = self.span();
         match self.peek().clone() {
             Tok::Upper(name) => {
@@ -1501,6 +1540,13 @@ impl<'s> Parser<'s> {
     // ------------------------------------------------------------ patterns
 
     pub fn pattern(&mut self) -> PResult<Pattern> {
+        self.enter()?;
+        let r = self.pattern_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn pattern_inner(&mut self) -> PResult<Pattern> {
         let first = self.pattern_primary()?;
         if !self.at(&Tok::Bar) {
             return Ok(first);
@@ -1746,6 +1792,9 @@ pub fn parse_fmt_spec(s: &str) -> Result<FmtSpec, String> {
     }
     if i > ws {
         spec.width = chars[ws..i].iter().collect::<String>().parse().map_err(|_| "width is too large")?;
+        if spec.width > 1000 {
+            return Err("width is too large (the maximum is 1000)".into());
+        }
     }
     if i < chars.len() && chars[i] == ',' {
         spec.group = true;
@@ -1761,6 +1810,9 @@ pub fn parse_fmt_spec(s: &str) -> Result<FmtSpec, String> {
             return Err("expected digits after `.`".into());
         }
         spec.precision = Some(chars[ps..i].iter().collect::<String>().parse().map_err(|_| "precision is too large")?);
+        if spec.precision > Some(100) {
+            return Err("precision is too large (the maximum is 100)".into());
+        }
     }
     if i < chars.len() {
         match chars[i] {

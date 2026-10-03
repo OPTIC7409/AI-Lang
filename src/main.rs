@@ -48,7 +48,7 @@ fn color_enabled(args: &[String]) -> bool {
 
 fn print_diags(it: &Interp, diags: &[Diagnostic], color: bool) {
     for d in diags {
-        eprint!("{}", d.render(&it.ctx.sm, color));
+        cogito::err_out!("{}", d.render(&it.ctx.sm, color));
     }
 }
 
@@ -65,7 +65,15 @@ fn load(it: &mut Interp, path: &Path, color: bool, show_warnings: bool) -> Optio
             print_diags(it, &diags, color);
             let n = diags.iter().filter(|d| d.is_error()).count();
             let c = Colors::new(color);
-            eprintln!("{}{}error{}: could not run `{}` due to {} error{}", c.bold, c.red, c.reset, path.display(), n, if n == 1 { "" } else { "s" });
+            cogito::err_outln!(
+                "{}{}error{}: could not run `{}` due to {} error{}",
+                c.bold,
+                c.red,
+                c.reset,
+                path.display(),
+                n,
+                if n == 1 { "" } else { "s" }
+            );
             None
         }
     }
@@ -78,7 +86,7 @@ fn cmd_run(path: &Path, prog_args: Vec<String>, color: bool) -> ExitCode {
     match cogito::run(&mut it, &prog, &ns) {
         Ok(()) => ExitCode::SUCCESS,
         Err(d) => {
-            eprint!("{}", d.render(&it.ctx.sm, color));
+            cogito::err_out!("{}", d.render(&it.ctx.sm, color));
             ExitCode::from(1)
         }
     }
@@ -99,13 +107,13 @@ fn cmd_eval(code: &str, prog_args: Vec<String>, color: bool) -> ExitCode {
         Ok(v) => {
             if let Some(v) = v {
                 if !matches!(v, cogito::value::Value::Unit) {
-                    println!("{}", cogito::value::repr(&v));
+                    cogito::outln!("{}", cogito::value::repr(&v));
                 }
             }
             ExitCode::SUCCESS
         }
         Err(d) => {
-            eprint!("{}", d.render(&it.ctx.sm, color));
+            cogito::err_out!("{}", d.render(&it.ctx.sm, color));
             ExitCode::from(1)
         }
     }
@@ -164,6 +172,7 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
         }
         ran += 1;
         let mut it = Interp::new();
+        it.test_mode = true;
         let Some((prog, _ns)) = load(&mut it, f, opts.color, false) else {
             load_errors += 1;
             continue;
@@ -173,8 +182,8 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
         let r = it.run_program(&prog);
         it.silent = false;
         if let Err(cogito::interp::Ctrl::Error(d)) = r {
-            eprint!("{}", d.render(&it.ctx.sm, opts.color));
-            eprintln!("{}error{}: the top-level code of `{}` failed, so its tests were not run", c.red, c.reset, f.display());
+            cogito::err_out!("{}", d.render(&it.ctx.sm, opts.color));
+            cogito::err_outln!("{}error{}: the top-level code of `{}` failed, so its tests were not run", c.red, c.reset, f.display());
             load_errors += 1;
             continue;
         }
@@ -199,10 +208,10 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
         parts.push(format!("{} generated cases", total.cases));
     }
     if ran == 0 {
-        println!("no test files found");
+        cogito::outln!("no test files found");
         return ExitCode::SUCCESS;
     }
-    println!("\n{}: {} {}({:.2}s){}", status, parts.join(", "), c.dim, secs, c.reset);
+    cogito::outln!("\n{}: {} {}({:.2}s){}", status, parts.join(", "), c.dim, secs, c.reset);
     if ok {
         ExitCode::SUCCESS
     } else {
@@ -231,7 +240,7 @@ fn cmd_check(paths: &[String], color: bool) -> ExitCode {
     }
     let c = Colors::new(color);
     if errors == 0 {
-        eprintln!(
+        cogito::err_outln!(
             "{}ok{}: {} file{} checked, {} warning{}",
             c.green,
             c.reset,
@@ -242,7 +251,7 @@ fn cmd_check(paths: &[String], color: bool) -> ExitCode {
         );
         ExitCode::SUCCESS
     } else {
-        eprintln!(
+        cogito::err_outln!(
             "{}error{}: {} error{}, {} warning{}",
             c.red,
             c.reset,
@@ -262,14 +271,14 @@ fn cmd_doc(name: Option<&str>) -> ExitCode {
             let n = n.trim_end_matches("()");
             match BUILTINS.iter().find(|b| b.name == n) {
                 Some(b) => {
-                    println!("{}", b.doc);
+                    cogito::outln!("{}", b.doc);
                     ExitCode::SUCCESS
                 }
                 None => {
                     let names: Vec<&str> = BUILTINS.iter().map(|b| b.name).collect();
                     match cogito::diagnostic::suggest(n, names) {
-                        Some(s) => eprintln!("no built-in function `{}`; did you mean `{}`?", n, s),
-                        None => eprintln!("no built-in function `{}`", n),
+                        Some(s) => cogito::err_outln!("no built-in function `{}`; did you mean `{}`?", n, s),
+                        None => cogito::err_outln!("no built-in function `{}`", n),
                     }
                     ExitCode::from(1)
                 }
@@ -280,12 +289,12 @@ fn cmd_doc(name: Option<&str>) -> ExitCode {
             for b in BUILTINS {
                 if b.category != cat {
                     cat = b.category;
-                    println!("\n## {}\n", cat);
+                    cogito::outln!("\n## {}\n", cat);
                 }
                 let mut lines = b.doc.lines();
                 let sig = lines.next().unwrap_or("");
                 let desc = lines.next().unwrap_or("");
-                println!("  {:<58} {}", sig, desc);
+                cogito::outln!("  {:<58} {}", sig, desc);
             }
             ExitCode::SUCCESS
         }
@@ -328,7 +337,7 @@ fn real_main() -> ExitCode {
                 args.drain(i..i + 2);
             }
             None => {
-                eprintln!("error: --max-depth needs a number");
+                cogito::err_outln!("error: --max-depth needs a number");
                 return ExitCode::from(2);
             }
         }
@@ -341,11 +350,11 @@ fn real_main() -> ExitCode {
     };
     match cmd.as_str() {
         "help" | "--help" | "-h" => {
-            print!("{}", usage());
+            cogito::out!("{}", usage());
             ExitCode::SUCCESS
         }
         "version" | "--version" | "-V" => {
-            println!("cogito {}", cogito::VERSION);
+            cogito::outln!("cogito {}", cogito::VERSION);
             ExitCode::SUCCESS
         }
         "repl" => {
@@ -356,14 +365,14 @@ fn real_main() -> ExitCode {
         "run" => match args.get(1) {
             Some(f) => cmd_run(Path::new(f), args[2..].to_vec(), color),
             None => {
-                eprintln!("usage: cogito run FILE.cog [ARGS...]");
+                cogito::err_outln!("usage: cogito run FILE.cog [ARGS...]");
                 ExitCode::from(2)
             }
         },
         "eval" | "-e" => match args.get(1) {
             Some(code) => cmd_eval(code, args[2..].to_vec(), color),
             None => {
-                eprintln!("usage: cogito eval \"CODE\"");
+                cogito::err_outln!("usage: cogito eval \"CODE\"");
                 ExitCode::from(2)
             }
         },
@@ -372,7 +381,7 @@ fn real_main() -> ExitCode {
             match parse_opts(&args[1..], color, if verify { 200 } else { 100 }) {
                 Ok((opts, paths)) => cmd_test(&paths, &opts, verify),
                 Err(m) => {
-                    eprintln!("error: {}", m);
+                    cogito::err_outln!("error: {}", m);
                     ExitCode::from(2)
                 }
             }
@@ -384,30 +393,30 @@ fn real_main() -> ExitCode {
         "explain" => match args.get(1) {
             Some(code) => match explain(code) {
                 Some((title, text)) => {
-                    println!("{}: {}\n\n{}", code.to_uppercase(), title, text);
+                    cogito::outln!("{}: {}\n\n{}", code.to_uppercase(), title, text);
                     ExitCode::SUCCESS
                 }
                 None => {
-                    eprintln!("unknown error code `{}`", code);
+                    cogito::err_outln!("unknown error code `{}`", code);
                     ExitCode::from(1)
                 }
             },
             None => {
                 for (code, title, _) in CATALOG {
-                    println!("{}  {}", code, title);
+                    cogito::outln!("{}  {}", code, title);
                 }
                 ExitCode::SUCCESS
             }
         },
         "doc" => cmd_doc(args.get(1).map(|s| s.as_str())),
         "spec" => {
-            print!("{}", SPEC);
+            cogito::out!("{}", SPEC);
             ExitCode::SUCCESS
         }
         f if f.ends_with(".cog") || Path::new(f).is_file() => cmd_run(Path::new(f), args[1..].to_vec(), color),
         other => {
-            eprintln!("unknown command `{}`\n", other);
-            eprint!("{}", usage());
+            cogito::err_outln!("unknown command `{}`\n", other);
+            cogito::err_out!("{}", usage());
             ExitCode::from(2)
         }
     }

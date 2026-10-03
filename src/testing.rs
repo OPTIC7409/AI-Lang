@@ -87,6 +87,22 @@ fn requires_hold(it: &mut Interp, c: &Rc<Closure>, args: &[Value]) -> Result<boo
     Ok(true)
 }
 
+/// A test (or property) also fails if it returns `Err(..)`, or if a `?`
+/// returned early from it.
+fn check_test_result(it: &Interp, r: Result<Value, Ctrl>) -> Result<Value, Ctrl> {
+    let v = r?;
+    let via_try = it.last_try_return;
+    if via_try.is_some() || v.is_result() && matches!(&v, Value::Variant(vv) if vv.tag == 1) {
+        let how = if via_try.is_some() { "`?` returned early" } else { "the test returned an error" };
+        let mut d = Diagnostic::error("E0300", format!("{}: {}", how, crate::value::short_repr(&v)));
+        if let Some(sp) = via_try {
+            d = d.at(sp).label("returned early here");
+        }
+        return Err(Ctrl::Error(Box::new(d)));
+    }
+    Ok(v)
+}
+
 fn run_case(it: &mut Interp, c: &Rc<Closure>, args: Vec<Value>) -> Outcome {
     let depth = it.stack.len();
     it.ticks = 0;
@@ -94,11 +110,16 @@ fn run_case(it: &mut Interp, c: &Rc<Closure>, args: Vec<Value>) -> Outcome {
         Ok(false) => Outcome::Discard,
         Err(Ctrl::Error(d)) => Outcome::Fail(d),
         Err(_) => Outcome::Discard,
-        Ok(true) => match it.call_closure(c, args, vec![], Span::default()) {
-            Ok(_) => Outcome::Pass,
-            Err(Ctrl::Error(d)) => Outcome::Fail(d),
-            Err(_) => Outcome::Pass,
-        },
+        Ok(true) => {
+            let r = it.call_closure(c, args, vec![], Span::default());
+            // For properties, an early `?` or an Err result is a failure.
+            let r = if c.def.ensures.is_empty() && c.def.global_slot.is_none() { check_test_result(it, r) } else { r };
+            match r {
+                Ok(_) => Outcome::Pass,
+                Err(Ctrl::Error(d)) => Outcome::Fail(d),
+                Err(_) => Outcome::Pass,
+            }
+        }
     };
     it.stack.truncate(depth);
     out
@@ -325,8 +346,13 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                 let start = Instant::now();
                 let cl = Rc::new(Closure { def: t.func.clone(), captures: vec![] });
                 let depth = it.stack.len();
+                let saved_budget = it.budget;
+                it.budget = Some(opts.budget);
+                it.ticks = 0;
                 let r = it.call_closure(&cl, vec![], vec![], Span::default());
+                it.budget = saved_budget;
                 it.stack.truncate(depth);
+                let r = check_test_result(it, r);
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
                 let timing = if ms > 100.0 { format!(" {}({:.0} ms){}", c.dim, ms, c.reset) } else { String::new() };
                 match r {
@@ -392,7 +418,7 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
         out.push_str(&format!("  {}(no tests){}\n", c.dim, c.reset));
     }
     it.flush();
-    print!("{}", out);
+    crate::out!("{}", out);
     sum
 }
 
@@ -477,14 +503,14 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
         out.push_str(&format!("  {}(no functions with contracts; use --all to check every annotated function){}\n", c.dim, c.reset));
     }
     it.flush();
-    print!("{}", out);
+    crate::out!("{}", out);
     sum
 }
 
 fn flush_out(it: &mut Interp, out: &mut String) {
     use std::io::Write;
     it.flush();
-    print!("{}", out);
+    crate::out!("{}", out);
     let _ = std::io::stdout().flush();
     out.clear();
 }

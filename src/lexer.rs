@@ -238,11 +238,14 @@ pub struct Lexer<'a> {
     file: u32,
     toks: Vec<Token>,
     delims: Vec<u8>,
+    nesting: u32,
 }
 
 /// Lex `src[start..end]`. Spans are absolute offsets into `src`.
 pub fn lex(src: &str, file: u32, start: usize, end: usize) -> Result<Vec<Token>, Diagnostic> {
-    let mut lx = Lexer { src, b: src.as_bytes(), pos: start, end, file, toks: Vec::new(), delims: Vec::new() };
+    // A UTF-8 byte-order mark at the start of a file is ignored.
+    let start = if start == 0 && src.starts_with('\u{feff}') { 3 } else { start };
+    let mut lx = Lexer { src, b: src.as_bytes(), pos: start, end, file, toks: Vec::new(), delims: Vec::new(), nesting: 0 };
     lx.run()?;
     Ok(lx.toks)
 }
@@ -392,6 +395,9 @@ impl<'a> Lexer<'a> {
                     self.push(Tok::Int(n), start);
                     Ok(())
                 }
+                Err(e) if matches!(e.kind(), std::num::IntErrorKind::PosOverflow) => Err(self
+                    .err("E0003", format!("integer literal `{}` is too large", &self.src[start..self.pos]), start, self.pos)
+                    .help("Int is a signed 64-bit integer (max 0x7fffffffffffffff)")),
                 Err(_) => Err(self.err("E0003", format!("invalid base-{} literal `{}`", radix, &self.src[start..self.pos]), start, self.pos)),
             };
         }
@@ -556,7 +562,12 @@ impl<'a> Lexer<'a> {
             }
             _ => {
                 let ch = self.src[start..].chars().next().unwrap_or('?');
-                let mut d = self.err("E0001", format!("unexpected character `{}`", ch), start, start + ch.len_utf8());
+                let shown = if ch.is_control() || matches!(ch, '\u{200b}'..='\u{200f}' | '\u{feff}' | '\u{2028}' | '\u{2029}') {
+                    format!("{} (U+{:04X})", ch.escape_unicode(), ch as u32)
+                } else {
+                    format!("`{}`", ch)
+                };
+                let mut d = self.err("E0001", format!("unexpected character {}", shown), start, start + ch.len_utf8());
                 if matches!(ch, '“' | '”' | '‘' | '’') {
                     d = d.help("this is a typographic quote; use a plain `\"`");
                 } else if ch == ';' {
@@ -608,9 +619,7 @@ impl<'a> Lexer<'a> {
                     }
                     parts.push(self.interpolation()?);
                 }
-                b'}' => {
-                    return Err(self.err("E0005", "unmatched `}` in string", self.pos, self.pos + 1).help("write `\\}` for a literal closing brace"));
-                }
+                // A lone `}` is just a character (only `{` starts an interpolation).
                 _ => {
                     let ch = self.src[self.pos..].chars().next().unwrap();
                     lit.push(ch);
@@ -671,7 +680,17 @@ impl<'a> Lexer<'a> {
 
     /// Called with `pos` at `{`. Scans to the matching `}`.
     fn interpolation(&mut self) -> Result<StrPart, Diagnostic> {
+        self.nesting += 1;
+        let r = self.interpolation_inner();
+        self.nesting -= 1;
+        r
+    }
+
+    fn interpolation_inner(&mut self) -> Result<StrPart, Diagnostic> {
         let open = self.pos;
+        if self.nesting > 64 {
+            return Err(self.err("E0005", "string interpolations are nested too deeply", open, open + 1));
+        }
         self.pos += 1;
         if self.peek() == b'{' {
             return Err(self
@@ -810,6 +829,7 @@ impl<'a> Lexer<'a> {
             p += 1;
         }
         let raw = &self.src[body_start..close];
+        let single_line = !raw.contains('\n');
         let mut lines: Vec<&str> = raw.split('\n').collect();
         let skip_first = lines.len() > 1 && lines[0].trim().is_empty();
         let drop_last = lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty());
@@ -819,7 +839,11 @@ impl<'a> Lexer<'a> {
         if drop_last {
             lines.pop();
         }
-        let indent = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start_matches([' ', '\t']).len()).min().unwrap_or(0);
+        let indent = if single_line {
+            0
+        } else {
+            lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start_matches([' ', '\t']).len()).min().unwrap_or(0)
+        };
         // Now scan for real.
         self.pos = body_start;
         if skip_first {
@@ -883,6 +907,9 @@ pub fn dedent(raw: &str) -> String {
     }
     if lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
+    }
+    if !raw.contains('\n') {
+        return raw.to_string();
     }
     let indent = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start_matches([' ', '\t']).len()).min().unwrap_or(0);
     lines.iter().map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() }).collect::<Vec<_>>().join("\n")

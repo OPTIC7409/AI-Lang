@@ -67,7 +67,8 @@ struct FnCtx {
     captures: Vec<Capture>,
     self_name: Option<Name>,
     parent_visible: bool,
-    loop_depth: u32,
+    /// Enclosing loops, innermost last: true for `loop`, false for `while`/`for`.
+    loops: Vec<bool>,
     /// The declared return type, if any (used to check `?`).
     ret: Option<Ty>,
 }
@@ -82,7 +83,7 @@ impl FnCtx {
             captures: vec![],
             self_name,
             parent_visible,
-            loop_depth: 0,
+            loops: Vec::new(),
             ret: None,
         }
     }
@@ -113,6 +114,8 @@ pub struct Resolver<'a> {
     dir: PathBuf,
     generics: Vec<Name>,
     pending_methods: Vec<(Name, Span)>,
+    /// An import failed: later "undefined name" errors are probably caused by it.
+    import_failed: bool,
     /// Bindings of the current or-pattern's first alternative.
     or_bindings: Option<Vec<(Name, VarRes)>>,
     pat_names: Vec<Name>,
@@ -130,6 +133,7 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
         dir: dir.to_path_buf(),
         generics: vec![],
         pending_methods: vec![],
+        import_failed: false,
         or_bindings: None,
         pat_names: vec![],
     };
@@ -378,6 +382,9 @@ impl<'a> Resolver<'a> {
     }
 
     fn undefined(&mut self, name: &str, span: Span, what: &str) {
+        if self.import_failed {
+            return;
+        }
         let upper = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
         let names = self.visible_names(upper);
         let mut d = Diagnostic::error("E0100", format!("undefined {} `{}`", what, name)).at(span).label("not found in this scope");
@@ -705,6 +712,14 @@ impl<'a> Resolver<'a> {
     }
 
     fn import(&mut self, imp: &mut ImportDecl) {
+        let errors_before = self.diags.iter().filter(|d| d.is_error()).count();
+        self.import_inner(imp);
+        if self.diags.iter().filter(|d| d.is_error()).count() > errors_before {
+            self.import_failed = true;
+        }
+    }
+
+    fn import_inner(&mut self, imp: &mut ImportDecl) {
         let path = self.dir.join(&imp.path);
         let path = if path.extension().is_none() { path.with_extension("cog") } else { path };
         let canon = match path.canonicalize() {
@@ -979,6 +994,12 @@ impl<'a> Resolver<'a> {
         self.cur().ret = def.ret.as_ref().map(|t| t.ty.clone());
         let mut seen: Vec<Name> = Vec::new();
         let mutating = def.mutating;
+        if def.params.len() > 64 {
+            let d = Diagnostic::error("E0116", format!("`{}` has {} parameters; the maximum is 64", def.display_name(), def.params.len()))
+                .at(def.name_span)
+                .help("group related parameters into a record");
+            self.error(d);
+        }
         if mutating && def.params.is_empty() {
             let d = Diagnostic::error(
                 "E0111",
@@ -1058,7 +1079,16 @@ impl<'a> Resolver<'a> {
     fn stmt(&mut self, s: &mut Stmt) {
         match &mut s.kind {
             StmtKind::Let { pat, ty, value, mutable } => {
-                self.expr(value);
+                // `let fact = fn(n) => ... fact(n - 1) ...` may refer to itself.
+                match (&pat.kind, &mut value.kind) {
+                    (PatKind::Bind { name, sub: None, .. }, ExprKind::Lambda(def)) if !self.at_global_scope() => {
+                        let name = name.clone();
+                        let def = Rc::get_mut(def).unwrap();
+                        def.name = Some(name.clone());
+                        self.resolve_fn(def, FnKind::Lambda, true, Some(name));
+                    }
+                    _ => self.expr(value),
+                }
                 if let Some(t) = ty {
                     self.resolve_type(t, &[]);
                 }
@@ -1132,9 +1162,9 @@ impl<'a> Resolver<'a> {
                 } else if found.res == VarRes::SelfFn || found.is_fn {
                     d = Diagnostic::error(code, format!("cannot change function `{}`", name)).at(span);
                 } else {
-                    d = Diagnostic::error(code, format!("cannot change `{}`, because it was declared with `let`", name))
+                    d = Diagnostic::error(code, format!("cannot change `{}`, because it is not a `var`", name))
                         .at(span)
-                        .label("immutable binding");
+                        .label("immutable binding (a `let`, a parameter, a loop variable or a pattern binding)");
                     if found.span != Span::default() {
                         d = d.note(format!("`{}` is declared at {}", name, self.line_of(found.span)));
                     }
@@ -1240,10 +1270,26 @@ impl<'a> Resolver<'a> {
             GlobalKind::Builtin(idx) => {
                 let b = &crate::builtins::BUILTINS[*idx as usize];
                 if !named.is_empty() {
-                    let d = Diagnostic::error("E0108", format!("built-in function `{}` does not take named arguments", b.name)).at(span);
-                    self.error(d);
-                    return;
+                    let names = crate::builtins::param_names(*idx);
+                    if names.is_empty() {
+                        let d = Diagnostic::error("E0108", format!("built-in function `{}` does not take named arguments", b.name)).at(span);
+                        self.error(d);
+                        return;
+                    }
+                    for n in &named {
+                        if !names.iter().any(|x| **x == ***n) {
+                            let mut d = Diagnostic::error("E0108", format!("`{}` has no parameter named `{}`", b.name, n))
+                                .at(span)
+                                .note(format!("its parameters are: {}", names.join(", ")));
+                            if let Some(s) = suggest(n, names.iter().map(|s| s.as_str())) {
+                                d = d.help(format!("did you mean `{}`?", s));
+                            }
+                            self.error(d);
+                            return;
+                        }
+                    }
                 }
+                let positional = positional + named.len();
                 if positional < b.min as usize || positional > b.max as usize {
                     let expect = if b.min == b.max {
                         format!("{}", b.min)
@@ -1593,35 +1639,45 @@ impl<'a> Resolver<'a> {
             }
             ExprKind::While { cond, body } => {
                 self.expr(cond);
-                self.cur().loop_depth += 1;
+                self.cur().loops.push(false);
                 self.expr(body);
-                self.cur().loop_depth -= 1;
+                self.cur().loops.pop();
             }
             ExprKind::For { pat, iter, body } => {
                 self.expr(iter);
                 self.push_scope();
                 self.pattern(pat, BindMode::Local);
-                self.cur().loop_depth += 1;
+                self.cur().loops.push(false);
                 self.expr(body);
-                self.cur().loop_depth -= 1;
+                self.cur().loops.pop();
                 self.pop_scope();
             }
             ExprKind::Loop { body } => {
-                self.cur().loop_depth += 1;
+                self.cur().loops.push(true);
                 self.expr(body);
-                self.cur().loop_depth -= 1;
+                self.cur().loops.pop();
             }
             ExprKind::Break(v) => {
+                let has_value = v.is_some();
                 if let Some(v) = v {
                     self.expr(v);
                 }
-                if self.cur().loop_depth == 0 {
-                    let d = Diagnostic::error("E0104", "`break` outside of a loop").at(span);
-                    self.error(d);
+                match self.cur().loops.last() {
+                    None => {
+                        let d = Diagnostic::error("E0104", "`break` outside of a loop").at(span);
+                        self.error(d);
+                    }
+                    Some(false) if has_value => {
+                        let d = Diagnostic::error("E0104", "`break` with a value is only allowed inside `loop`")
+                            .at(span)
+                            .help("`while` and `for` loops always produce `()`; use `loop { ... break value ... }` to compute a value");
+                        self.error(d);
+                    }
+                    _ => {}
                 }
             }
             ExprKind::Continue => {
-                if self.cur().loop_depth == 0 {
+                if self.cur().loops.is_empty() {
                     let d = Diagnostic::error("E0104", "`continue` outside of a loop").at(span);
                     self.error(d);
                 }

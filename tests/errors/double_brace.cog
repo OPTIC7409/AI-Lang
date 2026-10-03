@@ -1,0 +1,2 @@
+# expect: E0005
+print("a{{x}}b")

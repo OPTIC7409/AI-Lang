@@ -7,6 +7,46 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::type_complexity)]
 
+/// Like `print!`, but never panics (for example when stdout is a closed pipe).
+#[macro_export]
+macro_rules! out {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($t)*);
+    }};
+}
+
+/// Like `println!`, but never panics.
+#[macro_export]
+macro_rules! outln {
+    () => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout());
+    }};
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($t)*);
+    }};
+}
+
+/// Like `eprint!`, but never panics (for example when stderr is a closed pipe).
+#[macro_export]
+macro_rules! err_out {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stderr(), $($t)*);
+    }};
+}
+
+/// Like `eprintln!`, but never panics.
+#[macro_export]
+macro_rules! err_outln {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($t)*);
+    }};
+}
+
 pub mod ast;
 pub mod builtins;
 pub mod ctx;
@@ -80,7 +120,17 @@ pub fn run_with_value(it: &mut Interp, prog: &Program, ns: &Namespace) -> Result
         }
         if let Some(f) = it.global_by_name(ns, "main") {
             if f.is_callable() {
-                it.call(&f, vec![], span::Span::default())?;
+                let r = it.call(&f, vec![], span::Span::default())?;
+                // `main` may return a Result: an error means the program failed.
+                if let value::Value::Variant(v) = &r {
+                    if v.ty.id == types::RESULT_ID && v.tag == 1 {
+                        let msg = value::display(&v.values[0]);
+                        return Err(interp::Ctrl::Error(Box::new(
+                            Diagnostic::error("E0221", format!("`main` returned an error: {}", msg))
+                                .help("the program exits with status 1; handle the error inside `main` to choose another outcome"),
+                        )));
+                    }
+                }
             }
         }
         Ok(last)

@@ -229,13 +229,18 @@ impl VariantVal {
 #[derive(Clone, Debug)]
 pub struct RangeVal {
     pub start: i64,
-    /// Exclusive end; `None` for an unbounded range like `0..`.
-    pub end: Option<i64>,
+    /// Exclusive end (an i128, so that `..=max_int` is representable);
+    /// `None` for an unbounded range like `0..`.
+    pub end: Option<i128>,
 }
 
 impl RangeVal {
     pub fn len(&self) -> Option<usize> {
-        self.end.map(|e| if e > self.start { (e as i128 - self.start as i128) as usize } else { 0 })
+        self.len_u128().map(|n| n.min(usize::MAX as u128) as usize)
+    }
+
+    pub fn len_u128(&self) -> Option<u128> {
+        self.end.map(|e| if e > self.start as i128 { (e - self.start as i128) as u128 } else { 0 })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -243,7 +248,7 @@ impl RangeVal {
     }
 
     pub fn contains(&self, n: i64) -> bool {
-        n >= self.start && self.end.is_none_or(|e| n < e)
+        n >= self.start && self.end.is_none_or(|e| (n as i128) < e)
     }
 }
 
@@ -253,7 +258,35 @@ pub struct HKey(pub Value);
 
 impl PartialEq for HKey {
     fn eq(&self, other: &Self) -> bool {
-        values_equal(&self.0, &other.0)
+        // As map keys, NaN equals NaN (otherwise a NaN key could never be found).
+        match (&self.0, &other.0) {
+            (Value::Float(a), Value::Float(b)) if a.is_nan() && b.is_nan() => true,
+            (a, b) => values_equal(a, b),
+        }
+    }
+}
+
+/// Exact comparison of an Int with a Float (no rounding through f64).
+pub fn cmp_int_float(x: i64, y: f64) -> Option<Ordering> {
+    if y.is_nan() {
+        return None;
+    }
+    if y >= i64::MAX as f64 {
+        return Some(Ordering::Less);
+    }
+    if y < i64::MIN as f64 {
+        return Some(Ordering::Greater);
+    }
+    let t = y.trunc();
+    match x.cmp(&(t as i64)) {
+        Ordering::Equal => Some(if y > t {
+            Ordering::Less
+        } else if y < t {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }),
+        o => Some(o),
     }
 }
 
@@ -487,7 +520,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y,
-        (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => (*x as f64) == *y && (*y as i64) == *x,
+        (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => cmp_int_float(*x, *y) == Some(Ordering::Equal),
         (Value::Str(x), Value::Str(y)) => Rc::ptr_eq(x, y) || x == y,
         (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
             Rc::ptr_eq(x, y) || (x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b)))
@@ -520,8 +553,8 @@ pub fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)),
+        (Value::Int(x), Value::Float(y)) => cmp_int_float(*x, *y),
+        (Value::Float(x), Value::Int(y)) => cmp_int_float(*y, *x).map(Ordering::reverse),
         (Value::Str(x), Value::Str(y)) => Some(x.as_str().cmp(y.as_str())),
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
         (Value::Unit, Value::Unit) => Some(Ordering::Equal),
@@ -693,12 +726,17 @@ pub fn write_value(out: &mut String, v: &Value, quote: bool) {
                 out.push(')');
             }
         }
-        Value::Range(r) => {
-            let _ = write!(out, "{}..", r.start);
-            if let Some(e) = r.end {
-                let _ = write!(out, "{}", e);
+        Value::Range(r) => match r.end {
+            Some(e) if e > i64::MAX as i128 => {
+                let _ = write!(out, "{}..={}", r.start, e - 1);
             }
-        }
+            Some(e) => {
+                let _ = write!(out, "{}..{}", r.start, e);
+            }
+            None => {
+                let _ = write!(out, "{}..", r.start);
+            }
+        },
         Value::Func(c) => {
             let _ = write!(out, "<fn {}>", c.def.display_name());
         }

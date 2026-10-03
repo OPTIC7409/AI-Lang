@@ -31,7 +31,12 @@ fn mentions(ty: &Ty, id: u32) -> bool {
 
 impl<'a> Gen<'a> {
     pub fn value(&mut self, ty: &Ty, size: u32, depth: u32) -> Result<Value, String> {
-        let size = size.max(1) as i64;
+        if depth > 48 {
+            return Err(format!("cannot generate a finite value of type `{}`: it contains itself with no non-recursive alternative", ty));
+        }
+        // Collections deep inside a value are kept empty, so that recursive
+        // types such as `{ kids: List[Tree] }` stay finite.
+        let size = if depth >= 6 { 0 } else { size.max(1) as i64 };
         Ok(match ty {
             Ty::Unit => Value::Unit,
             Ty::Bool => Value::Bool(self.rng.next_u64() & 1 == 1),
@@ -80,7 +85,7 @@ impl<'a> Gen<'a> {
             Ty::Range => {
                 let start = self.rng.range(-size, size);
                 let len = self.rng.range(0, size);
-                Value::Range(Rc::new(RangeVal { start, end: Some(start + len) }))
+                Value::Range(Rc::new(RangeVal { start, end: Some((start + len) as i128) }))
             }
             Ty::List(t) => {
                 let n = self.rng.below(size as usize + 1);
@@ -370,13 +375,13 @@ pub fn shrink(v: &Value) -> Vec<Value> {
         }
         Value::Range(r) => {
             if let Some(e) = r.end {
-                if e > r.start {
-                    out.push(Value::Range(Rc::new(RangeVal { start: r.start, end: Some(r.start) })));
+                if e > r.start as i128 {
+                    out.push(Value::Range(Rc::new(RangeVal { start: r.start, end: Some(r.start as i128) })));
                     out.push(Value::Range(Rc::new(RangeVal { start: r.start, end: Some(e - 1) })));
                 }
             }
             if r.start != 0 {
-                let len = r.end.map(|e| e - r.start);
+                let len = r.end.map(|e| e - r.start as i128);
                 out.push(Value::Range(Rc::new(RangeVal { start: 0, end: len })));
             }
         }

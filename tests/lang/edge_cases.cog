@@ -1,0 +1,171 @@
+# Regression tests for edge cases found by adversarial testing.
+
+test "integer edge cases are errors, not wraparound" {
+  assert catch(fn() => gcd(min_int, 0)).is_err()
+  assert catch(fn() => lcm(min_int, 2)).is_err()
+  assert catch(fn() => shl(max_int, 1)).is_err()
+  assert catch(fn() => (min_int..max_int).len()).is_err()
+  assert gcd(-12, 18) == 6
+  assert shl(3, 2) == 12
+}
+
+test "inclusive ranges up to max_int" {
+  assert ((max_int - 1)..=max_int).to_list() == [max_int - 1, max_int]
+  assert (5..=max_int) != (5..)
+  assert max_int in 0..=max_int
+  var n = 0
+  for _ in (max_int - 2)..=max_int { n += 1 }
+  assert n == 3
+}
+
+test "Int and Float compare exactly" {
+  assert 9007199254740993 != 9007199254740992.0
+  assert 9007199254740993 > 9007199254740992.0
+  assert max_int != float(max_int)
+  assert 3 == 3.0
+}
+
+test "float floor division and modulo follow Python" {
+  assert -7.5 % 2 == 0.5
+  assert 7.5 // 2 == 3.0
+  assert 5.0 % inf == 5.0
+  assert -5.0 // inf == -1.0
+}
+
+test "NaN can be a map key" {
+  var m = [:]
+  m[inf - inf] = 1
+  assert m.len() == 1
+}
+
+test "formatting large Ints is exact" {
+  assert "{max_int:.2}" == "9223372036854775807.00"
+  assert fixed(max_int, 1) == "9223372036854775807.0"
+  assert "{1234567:,}" == "1,234,567"
+  assert "{1234.5:e}" == "1.234500e+03"
+}
+
+test "huge sizes are errors, not crashes" {
+  assert catch(fn() => "ab".pad_left(max_int)).is_err()
+  assert catch(fn() => take(0.., max_int)).is_err()
+  assert ([] * max_int) == []
+  assert catch(fn() => sleep(-1)).is_err()
+}
+
+test "a failed mutation keeps the old value" {
+  var w = [3, 1, "a"]
+  assert catch(fn() {
+    var local = [3, 1, "a"]
+    local.sort!()
+  }).is_err()
+  assert w.len() == 3
+}
+
+fn bad_push!(xs: List[Int]) {
+  xs.push!(9)
+  panic("halfway")
+}
+
+test "a failing mutating function keeps the changes made so far" {
+  let r = catch(fn() {
+    var v = [1]
+    v.bad_push!()
+  })
+  assert r.is_err()
+}
+
+test "tuples support index assignment" {
+  var t = (1, 2)
+  t[0] = 5
+  t.1 = 6
+  assert t == (5, 6)
+}
+
+test "let-bound lambdas can recurse" {
+  let fact = fn(n) => if n <= 1 { 1 } else { n * fact(n - 1) }
+  assert fact(10) == 3628800
+}
+
+test "or-pattern guards try every alternative" {
+  let f = fn(xs) => match xs {
+    [x, ..] | [.., x] if x > 5 => x
+    _ => 0
+  }
+  assert f([1, 9]) == 9
+  assert f([7, 1]) == 7
+  assert f([1, 2]) == 0
+}
+
+test "strings: lone closing braces, one-line triple quotes" {
+  assert "a}b".len() == 3
+  assert """  x""" == "  x"
+  assert parse_float("inf") == Some(inf)
+}
+
+test "built-ins take named arguments" {
+  assert "7".pad_left(3, fill: "0") == "007"
+  assert split("a,b,c", sep: ",", limit: 2) == ["a", "b,c"]
+}
+
+test "new helpers" {
+  assert Err("x").unwrap_err() == "x"
+  assert Ok(1).err() == None
+  assert collect_ok([Ok(1), Ok(2)]) == Ok([1, 2])
+  assert collect_ok([Ok(1), Err("a"), Err("b")]) == Err("a")
+  assert collect_some([Some(1), None]) == None
+  assert "k=v".split_once("=") == Some(("k", "v"))
+  assert "v1".strip_prefix("v") == Some("1")
+  assert "x.txt".strip_suffix(".md") == None
+}
+
+type P = { x: Int, y: Float }
+
+fn make_p() -> P => { y: 2, x: 1 }
+
+test "anonymous records convert to declared record types" {
+  let p = make_p()
+  assert type_of(p) == "P"
+  assert p == P(1, 2.0)
+  assert { x: 1, y: 2.0 } != P(1, 2.0)
+}
+
+test "declared types are enforced on every write" {
+  assert catch(fn() {
+    var n: Int = 1
+    n = "s"
+  }).is_err()
+  assert catch(fn() {
+    var xs: List[Int] = []
+    xs.push!("s")
+  }).is_err()
+  assert catch(fn() {
+    var p = P(1, 2.0)
+    p.x = "s"
+  }).is_err()
+  var q = P(1, 2.0)
+  q.y = 3
+  assert q.y == 3.0
+}
+
+test "nested exhaustiveness is understood" {
+  let f = fn(o: Option[Option[Int]]) => match o {
+    None => 0
+    Some(None) => 1
+    Some(Some(n)) => n
+  }
+  assert f(Some(Some(5))) == 5
+}
+
+fn insert_sorted!(xs: List[Int], x: Int)
+  ensures xs.len() == old(xs.len()) + 1
+{
+  var i = 0
+  while i < xs.len() and xs[i] < x { i += 1 }
+  xs.insert!(i, x)
+}
+
+test "old() in postconditions" {
+  var v = [1, 5]
+  v.insert_sorted!(3)
+  assert v == [1, 3, 5]
+}

@@ -1,0 +1,4 @@
+# expect: E0104
+for i in 0..3 {
+  break 7
+}

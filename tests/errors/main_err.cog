@@ -1,0 +1,4 @@
+# expect: E0221
+fn main() -> Result[Int, Str] {
+  Err("failed")
+}

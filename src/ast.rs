@@ -517,9 +517,9 @@ pub fn for_each_child_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
             f(k);
             f(v);
         }),
-        ExprKind::Tuple(items) => items.iter_mut().for_each(|x| f(x)),
+        ExprKind::Tuple(items) => items.iter_mut().for_each(&mut *f),
         ExprKind::Record { values, spread, .. } => {
-            values.iter_mut().for_each(|x| f(x));
+            values.iter_mut().for_each(&mut *f);
             if let Some(s) = spread {
                 f(s);
             }

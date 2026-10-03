@@ -54,8 +54,8 @@ pub fn run(it: &mut Interp, color: bool) {
     let stdin = std::io::stdin();
     let interactive = stdin.is_terminal();
     if interactive {
-        println!("{}Cogito {}{} — a programming language designed by an AI", c.bold, crate::VERSION, c.reset);
-        println!("{}Type an expression or statement. :help for help, :quit to exit.{}", c.dim, c.reset);
+        crate::outln!("{}Cogito {}{} — a programming language designed by an AI", c.bold, crate::VERSION, c.reset);
+        crate::outln!("{}Type an expression or statement. :help for help, :quit to exit.{}", c.dim, c.reset);
     }
     let mut ns = Namespace::default();
     let mut input_no = 0;
@@ -64,7 +64,7 @@ pub fn run(it: &mut Interp, color: bool) {
         let mut first = true;
         loop {
             if interactive {
-                print!("{}", if first { ">>> " } else { "... " });
+                crate::out!("{}", if first { ">>> " } else { "... " });
                 let _ = std::io::stdout().flush();
             }
             let mut line = String::new();
@@ -72,7 +72,7 @@ pub fn run(it: &mut Interp, color: bool) {
                 Ok(0) | Err(_) => {
                     if src.trim().is_empty() {
                         if interactive {
-                            println!();
+                            crate::outln!();
                         }
                         return;
                     }
@@ -95,44 +95,47 @@ pub fn run(it: &mut Interp, color: bool) {
             match (parts.next().unwrap_or(""), parts.next().map(str::trim)) {
                 ("q" | "quit" | "exit", _) => return,
                 ("help" | "h", _) => {
-                    println!("  :help           show this help");
-                    println!("  :quit           leave the REPL");
-                    println!("  :doc NAME       documentation for a built-in function");
-                    println!("  :builtins       list all built-in functions");
-                    println!("  :explain CODE   explain an error code, e.g. :explain E0101");
-                    println!("Statements and declarations (let, var, fn, type) persist between inputs.");
-                    println!("Multi-line input continues while brackets are open.");
+                    crate::outln!("  :help           show this help");
+                    crate::outln!("  :quit           leave the REPL");
+                    crate::outln!("  :doc NAME       documentation for a built-in function");
+                    crate::outln!("  :builtins       list all built-in functions");
+                    crate::outln!("  :explain CODE   explain an error code, e.g. :explain E0101");
+                    crate::outln!("Statements and declarations (let, var, fn, type) persist between inputs.");
+                    crate::outln!("Multi-line input continues while brackets are open.");
                 }
                 ("doc", Some(name)) => match BUILTINS.iter().find(|b| b.name == name) {
-                    Some(b) => println!("{}", b.doc),
-                    None => println!("no built-in named `{}`", name),
+                    Some(b) => crate::outln!("{}", b.doc),
+                    None => crate::outln!("no built-in named `{}`", name),
                 },
                 ("builtins", _) => {
                     let names: Vec<&str> = BUILTINS.iter().map(|b| b.name).collect();
-                    println!("{}", names.join(" "));
+                    crate::outln!("{}", names.join(" "));
                 }
                 ("explain", Some(code)) => match crate::diagnostic::explain(code) {
-                    Some((t, e)) => println!("{}: {}\n\n{}", code.to_uppercase(), t, e),
-                    None => println!("unknown error code `{}`", code),
+                    Some((t, e)) => crate::outln!("{}: {}\n\n{}", code.to_uppercase(), t, e),
+                    None => crate::outln!("unknown error code `{}`", code),
                 },
-                _ => println!("unknown command `:{}` (try :help)", cmd),
+                _ => crate::outln!("unknown command `:{}` (try :help)", cmd),
             }
             continue;
         }
         input_no += 1;
         let name = format!("<repl:{}>", input_no);
+        // If the input has errors, forget any names it introduced.
+        let saved_ns = ns.clone();
         let (prog, warnings) = match crate::load_source(it, &name, &src, Path::new("."), &mut ns, true) {
             Ok(p) => p,
             Err(diags) => {
+                ns = saved_ns;
                 for d in diags {
-                    eprint!("{}", d.render(&it.ctx.sm, color));
+                    crate::err_out!("{}", d.render(&it.ctx.sm, color));
                 }
                 continue;
             }
         };
         for w in warnings {
             if w.code != "W0001" {
-                eprint!("{}", w.render(&it.ctx.sm, color));
+                crate::err_out!("{}", w.render(&it.ctx.sm, color));
             }
         }
         let result = (|| -> Result<Option<Value>, Ctrl> {
@@ -158,11 +161,11 @@ pub fn run(it: &mut Interp, color: bool) {
         match result {
             Ok(Some(v)) => {
                 if !matches!(v, Value::Unit) {
-                    println!("{}", repr(&v));
+                    crate::outln!("{}", repr(&v));
                 }
             }
             Ok(None) => {}
-            Err(Ctrl::Error(d)) => eprint!("{}", d.render(&it.ctx.sm, color)),
+            Err(Ctrl::Error(d)) => crate::err_out!("{}", d.render(&it.ctx.sm, color)),
             Err(_) => {}
         }
     }
