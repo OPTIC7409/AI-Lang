@@ -92,3 +92,63 @@ property "where clauses can use names from parameter patterns" ((a, b): (Int, In
 property "float bounds are steered" (r: Float) where r > 0.0 and r < 1000.0 {
   assert r > 0.0 and r < 1000.0
 }
+
+type Pt = { x: Int, y: Int }
+
+fn sum_pt(Pt(x, y): Pt) -> Int => x + y
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int => f(x)
+
+test "string functions that pick characters return a Str" {
+  assert "123abc".take_while(fn(c) => c.is_digit()) == "123"
+  assert "  x".drop_while(fn(c) => c == " ") == "x"
+  assert "hello".filter(fn(c) => c != "l") == "heo"
+  assert "cba".sort() == "abc"
+  assert "banana".unique() == "ban"
+  assert "abcdef".chunks(2) == ["ab", "cd", "ef"]
+  assert "abcd".windows(3) == ["abc", "bcd"]
+}
+
+test "map predicates may take the key and value separately" {
+  let m = ["a": 1, "b": 2, "c": 3]
+  assert m.count(fn(k, v) => v > 1) == 2
+  assert m.any(fn(k, v) => k == "c")
+  assert m.all(fn(k, v) => v > 0)
+  assert m.find(fn(k, v) => v == 2) == Some(("b", 2))
+}
+
+test "formatting rounds halves the same way as round" {
+  assert "{2.5:.0}" == "3" and round(2.5) == 3
+  assert fixed(0.125, 2) == "0.13" and round(0.125, 2) == 0.13
+  assert "{0.125:.2}" == "0.13"
+  assert "{1500.0:.1e}" == "1.5e+03"
+}
+
+test "hashed raw strings may contain quotes" {
+  let j = r#"{"name": "Ada"}"#
+  assert j.len() == 15
+  assert parse_json(j).is_ok()
+  assert r##"a "# b"## == "a \"# b"
+}
+
+test "indexing non-ASCII text" {
+  let s = "é" + "ab" * 100 + "中"
+  assert s[0] == "é" and s[1] == "a" and s[201] == "中" and s[-1] == "中"
+  assert s[199..202] == "ab中"
+  assert [s[i] for i in 0..s.len()].join("") == s
+}
+
+test "constructor patterns in parameters" {
+  assert sum_pt(Pt(2, 3)) == 5
+}
+
+test "function-typed parameters check the number of arguments" {
+  assert apply(fn(a) => a + 1, 1) == 2
+  assert catch(fn() => apply(fn(a, b) => a, 1)).is_err()
+}
+
+test "JSON object keys must stay distinct strings" {
+  assert to_json([1: "a"]) == r#"{"1":"a"}"#
+  assert catch(fn() => to_json([1: "a", "1": "b"])).is_err()
+  assert catch(fn() => to_json([(1, 2): "a"])).is_err()
+}

@@ -42,8 +42,8 @@ GLOBAL OPTIONS:
     )
 }
 
-fn color_enabled(args: &[String]) -> bool {
-    !args.iter().any(|a| a == "--no-color") && std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+fn color_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
 }
 
 fn print_diags(it: &Interp, diags: &[Diagnostic], color: bool) {
@@ -332,21 +332,54 @@ fn parse_opts(args: &[String], color: bool, default_cases: u32) -> Result<(Optio
 
 fn real_main() -> ExitCode {
     cogito::builtins::start_clock();
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    // Global option: --max-depth N (maximum number of nested calls).
-    if let Some(i) = args.iter().position(|a| a == "--max-depth") {
-        match args.get(i + 1).and_then(|n| n.parse::<usize>().ok()) {
-            Some(n) => {
-                std::env::set_var("COGITO_MAX_DEPTH", n.to_string());
-                args.drain(i..i + 2);
-            }
-            None => {
-                cogito::err_outln!("error: --max-depth needs a number");
-                return ExitCode::from(2);
-            }
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    // Global options (--max-depth N, --no-color) are read up to the program
+    // being run: everything after `cogito FILE.cog` or `cogito run FILE.cog`
+    // (or the code of `cogito eval`) belongs to the program's `args()`.
+    let mut args = Vec::with_capacity(raw.len());
+    let mut no_color = false;
+    let mut positionals = 0;
+    let mut want = usize::MAX;
+    let mut i = 0;
+    while i < raw.len() {
+        let a = &raw[i];
+        if positionals >= want {
+            args.extend(raw[i..].iter().cloned());
+            break;
         }
+        if a == "--max-depth" || a.starts_with("--max-depth=") {
+            let v = match a.strip_prefix("--max-depth=") {
+                Some(v) => Some(v.to_string()),
+                None => {
+                    i += 1;
+                    raw.get(i).cloned()
+                }
+            };
+            match v.and_then(|n| n.parse::<usize>().ok()) {
+                Some(n) => std::env::set_var("COGITO_MAX_DEPTH", n.to_string()),
+                None => {
+                    cogito::err_outln!("error: --max-depth needs a number");
+                    return ExitCode::from(2);
+                }
+            }
+        } else if a == "--no-color" {
+            no_color = true;
+        } else {
+            if !a.starts_with('-') || a == "-e" {
+                positionals += 1;
+                if positionals == 1 {
+                    want = match a.as_str() {
+                        "run" | "eval" | "-e" => 2,
+                        f if f.ends_with(".cog") || Path::new(f).is_file() => 1,
+                        _ => usize::MAX,
+                    };
+                }
+            }
+            args.push(a.clone());
+        }
+        i += 1;
     }
-    let color = color_enabled(&args);
+    let color = !no_color && color_enabled();
     let Some(cmd) = args.first() else {
         let mut it = Interp::new();
         cogito::repl::run(&mut it, std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none());

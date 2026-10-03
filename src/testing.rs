@@ -530,10 +530,20 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
             _ => None,
         })
         .collect();
-    let width = fns.iter().map(|d| d.display_name().len()).max().unwrap_or(0);
+    // Overloads share a name, so they are labelled with their parameter types.
+    let label = |d: &FnDef| -> String {
+        let name = d.display_name();
+        if fns.iter().filter(|o| o.display_name() == name).count() > 1 {
+            let tys: Vec<String> = d.params.iter().map(|p| p.ty.as_ref().map_or("Any".to_string(), |t| t.ty.to_string())).collect();
+            format!("{}({})", name, tys.join(", "))
+        } else {
+            name.to_string()
+        }
+    };
+    let labels: Vec<String> = fns.iter().map(|d| label(d)).collect();
+    let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let mut any = false;
-    for def in fns {
-        let name = def.display_name();
+    for (def, name) in fns.iter().cloned().zip(labels) {
         if let Some(f) = &opts.filter {
             if !name.contains(f.as_str()) {
                 continue;
@@ -549,7 +559,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
             flush_out(it, &mut out);
             continue;
         }
-        let seed = opts.seed.unwrap_or_else(|| name_seed(&name));
+        let seed = opts.seed.unwrap_or_else(|| name_seed(&def.display_name()));
         match quickcheck(it, &def, opts.cases, seed, opts.budget, true) {
             PropOutcome::Passed { cases, discarded } => {
                 sum.passed += 1;
@@ -559,10 +569,12 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
                 out.push_str(&format!("  {}✓{} {:w$}  {}{} cases, {}{}{}\n", c.green, c.reset, name, c.dim, cases, what, disc, c.reset, w = width));
             }
             PropOutcome::GaveUp { cases, discarded } => {
-                sum.gave_up += 1;
+                // Not a failure: the function may need inputs (a well-formed
+                // tree, a consistent table) that random values rarely are.
+                sum.skipped += 1;
                 sum.cases += cases as u64;
                 out.push_str(&format!(
-                    "  {}?{} {:w$}  {}gave up: only {} of {} random inputs satisfied `requires`{}\n",
+                    "  {}?{} {:w$}  {}not checked: only {} of {} random inputs satisfied `requires`;\n      test it with `test` blocks, or a `property` that builds valid inputs{}\n",
                     c.yellow,
                     c.reset,
                     name,

@@ -363,6 +363,13 @@ impl<'a> Lexer<'a> {
                 self.raw_string()?;
                 continue;
             }
+            if c == b'r' && self.peek_at(1) == b'#' {
+                let hashes = self.b[self.pos + 1..self.end].iter().take_while(|&&h| h == b'#').count();
+                if self.peek_at(1 + hashes) == b'"' {
+                    self.hashed_raw_string(hashes)?;
+                    continue;
+                }
+            }
             if is_ident_start(c) {
                 self.ident();
                 continue;
@@ -799,6 +806,25 @@ impl<'a> Lexer<'a> {
         }
         let text = self.src[body_start..p].to_string();
         self.pos = p + 1;
+        self.push(Tok::Str(vec![StrPart::Lit(text)]), start);
+        Ok(())
+    }
+
+    /// `r#"..."#` (any number of `#`): taken exactly as written, quotes and
+    /// newlines included, up to a `"` followed by as many `#`.
+    fn hashed_raw_string(&mut self, hashes: usize) -> Result<(), Diagnostic> {
+        let start = self.pos;
+        let body_start = self.pos + 2 + hashes;
+        let mut close = String::from("\"");
+        close.push_str(&"#".repeat(hashes));
+        let Some(rel) = self.src[body_start..self.end].find(&close) else {
+            return Err(self
+                .err("E0002", "unterminated raw string", start, body_start)
+                .label("raw string starts here")
+                .help(format!("close it with `{}`", close)));
+        };
+        let text = self.src[body_start..body_start + rel].to_string();
+        self.pos = body_start + rel + close.len();
         self.push(Tok::Str(vec![StrPart::Lit(text)]), start);
         Ok(())
     }

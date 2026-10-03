@@ -29,7 +29,7 @@ Run: `cogito FILE.cog` · Test: `cogito test FILE.cog` · Check contracts:
   (`{{` is an error, not an escape); a lone `}` is literal. A format spec may
   follow `:` — `{x:.2}` (2 decimals), `{s:>8}` `{s:<8}` `{s:^8}` (align in
   width 8), `{n:05}` (zero pad), `{n:+}`, `{n:,}` (thousands separators),
-  `{n:x}` `{n:b}` `{n:o}` (hex/binary/octal), `{f:e}` (`1.5e+03`), `{f:.1%}`,
+  `{n:x}` `{n:b}` `{n:o}` (hex/binary/octal), `{f:e}` (`1.500000e+03`; `{f:.1e}` gives `1.5e+03`), `{f:.1%}`,
   `{s:*>6}` (fill char). Width ≤ 1000, precision ≤ 100; for a computed width
   use `pad_left`/`pad_right`.
 - `"""..."""` strings span lines: a newline right after the opening quotes is

@@ -372,8 +372,10 @@ impl<'s> Parser<'s> {
             if self.at(&Tok::RParen) {
                 break;
             }
-            // A parameter may be a destructuring pattern: `fn((k, v)) => ...`.
-            let (name, span, pat) = if matches!(self.peek(), Tok::LParen | Tok::LBracket | Tok::LBrace) {
+            // A parameter may be a destructuring pattern: `fn((k, v)) => ...`,
+            // `fn norm(Point(x, y): Point)`.
+            let ctor = matches!(self.peek(), Tok::Upper(_)) && self.peek_at(1) == &Tok::LParen;
+            let (name, span, pat) = if ctor || matches!(self.peek(), Tok::LParen | Tok::LBracket | Tok::LBrace) {
                 let pat = self.pattern_primary()?;
                 (Rc::from(format!("__arg{}", params.len()).as_str()), pat.span, Some(pat))
             } else {
@@ -582,6 +584,11 @@ impl<'s> Parser<'s> {
                 self.bump();
                 self.skip_newlines();
                 let value = self.expr()?;
+                if self.at(&Tok::Else) {
+                    return Err(Diagnostic::error("E0001", format!("Cogito has no `{} ... else`", kw))
+                        .at(self.span())
+                        .help("use `match`: `let x = match value { Some(v) => v, _ => return ... }`"));
+                }
                 let span = start.to(value.span);
                 Ok(Stmt { kind: StmtKind::Let { pat, ty, value, mutable }, span })
             }
@@ -1338,6 +1345,11 @@ impl<'s> Parser<'s> {
 
     fn if_expr(&mut self) -> PResult<Expr> {
         let start = self.expect(&Tok::If, "`if`")?;
+        if matches!(self.peek(), Tok::Let | Tok::Var) {
+            return Err(Diagnostic::error("E0001", "Cogito has no `if let`")
+                .at(start.to(self.span()))
+                .help("use `match`: `match value { Some(x) => ..., _ => ... }`"));
+        }
         let cond = self.expr()?;
         if !self.at(&Tok::LBrace) {
             let mut d = self.unexpected("`{` after the `if` condition");

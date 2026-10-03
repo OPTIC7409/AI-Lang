@@ -41,17 +41,35 @@ pub enum Value {
 }
 
 /// The storage of a string. It derefs to `String`, and caches its length in
-/// characters so that `len` and indexing are O(1) for ASCII text. Any
-/// mutable access clears the cache.
+/// characters so that `len` and indexing are O(1) for ASCII text. For other
+/// text, it builds (on first use) the byte offset of every 32nd character,
+/// so that indexing takes constant time too. Any mutable access clears the
+/// caches.
 pub struct Text {
     s: String,
     /// Character count plus one; 0 means "not yet computed".
     chars: Cell<usize>,
+    marks: std::cell::OnceCell<Vec<usize>>,
 }
+
+const MARK_EVERY: usize = 32;
 
 impl Text {
     pub fn new(s: String) -> Text {
-        Text { s, chars: Cell::new(0) }
+        Text { s, chars: Cell::new(0), marks: std::cell::OnceCell::new() }
+    }
+
+    /// The byte offset of character `i` (`i` may equal the length).
+    fn byte_offset(&self, i: usize) -> usize {
+        if self.is_ascii_text() {
+            return i.min(self.s.len());
+        }
+        let marks = self.marks.get_or_init(|| self.s.char_indices().step_by(MARK_EVERY).map(|(b, _)| b).collect());
+        let Some(&start) = marks.get(i / MARK_EVERY) else { return self.s.len() };
+        match self.s[start..].char_indices().nth(i % MARK_EVERY) {
+            Some((b, _)) => start + b,
+            None => self.s.len(),
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -77,7 +95,8 @@ impl Text {
         if self.is_ascii_text() {
             return self.s.get(i..i + 1);
         }
-        let (b, c) = self.s.char_indices().nth(i)?;
+        let b = self.byte_offset(i);
+        let c = self.s[b..].chars().next()?;
         Some(&self.s[b..b + c.len_utf8()])
     }
 
@@ -86,9 +105,8 @@ impl Text {
         if self.is_ascii_text() {
             return &self.s[a..b];
         }
-        let mut it = self.s.char_indices().map(|(i, _)| i).chain(std::iter::once(self.s.len()));
-        let start = it.nth(a).unwrap_or(self.s.len());
-        let end = if b > a { it.nth(b - a - 1).unwrap_or(self.s.len()) } else { start };
+        let start = self.byte_offset(a);
+        let end = if b > a { self.byte_offset(b) } else { start };
         &self.s[start..end]
     }
 }
@@ -103,13 +121,14 @@ impl Deref for Text {
 impl DerefMut for Text {
     fn deref_mut(&mut self) -> &mut String {
         self.chars.set(0);
+        self.marks.take();
         &mut self.s
     }
 }
 
 impl Clone for Text {
     fn clone(&self) -> Text {
-        Text { s: self.s.clone(), chars: Cell::new(self.chars.get()) }
+        Text { s: self.s.clone(), chars: Cell::new(self.chars.get()), marks: self.marks.clone() }
     }
 }
 
@@ -592,6 +611,23 @@ pub fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     }
 }
 
+/// Format with exactly `p` digits after the decimal point, rounding halves
+/// away from zero, the same way as `round(x, p)` (so `fixed(0.125, 2)` and
+/// `"{0.125:.2}"` give `0.13`, like `round(0.125, 2)`).
+pub fn format_fixed(x: f64, p: usize) -> String {
+    if !x.is_finite() {
+        return format_float(x);
+    }
+    if p <= 15 {
+        let m = 10f64.powi(p as i32);
+        let y = x * m;
+        if y.abs() < 4.0e15 {
+            return format!("{:.*}", p, y.round() / m);
+        }
+    }
+    format!("{:.*}", p, x)
+}
+
 pub fn format_float(f: f64) -> String {
     if f.is_nan() {
         return "nan".into();
@@ -785,7 +821,11 @@ pub fn short_repr(v: &Value) -> String {
 pub fn describe(v: &Value) -> String {
     match v {
         Value::Unit => "()".into(),
-        Value::Func(_) | Value::Builtin(_) | Value::Overload(_) | Value::Ctor(..) | Value::Module(_) => short_repr(v),
+        Value::Func(c) => {
+            let n = c.def.params.len();
+            format!("{} (which takes {} argument{})", short_repr(v), n, if n == 1 { "" } else { "s" })
+        }
+        Value::Builtin(_) | Value::Overload(_) | Value::Ctor(..) | Value::Module(_) => short_repr(v),
         Value::Variant(_) | Value::Record(_) => short_repr(v),
         _ => format!("{} {}", type_name(v), short_repr(v)),
     }

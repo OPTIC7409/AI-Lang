@@ -67,6 +67,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("io", "time", 0, 0, b_time, "time() -> Float\nSeconds since the Unix epoch."),
     b!("io", "clock", 0, 0, b_clock, "clock() -> Float\nSeconds since the program started (for measuring durations)."),
     b!("io", "sleep", 1, 1, b_sleep, "sleep(seconds: Float)\nPause the program."),
+    b!("io", "flush", 0, 0, b_flush, "flush()\nWrite out buffered output now. Output to a terminal appears at once; output to a pipe or file is\nbuffered until the buffer fills or the program ends."),
     // ---- debugging and errors
     b!("core", "panic", 0, 1, b_panic, "panic(message: Str)\nStop with an error. Use for bugs, not for expected failures (return Err for those)."),
     b!("core", "todo", 0, 1, b_todo, "todo(message: Str = \"\")\nMark unfinished code; stops with an error if reached."),
@@ -146,14 +147,14 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("collections", "first", 1, 1, b_first, "first(xs) -> Option[T]\nThe first element, or None."),
     b!("collections", "last", 1, 1, b_last, "last(xs) -> Option[T]\nThe last element, or None."),
     b!("collections", "map", 2, 2, b_map, "map(xs, f) -> List   |   map(opt, f) -> Option   |   map(res, f) -> Result\nApply f to each element (or to the value inside Some/Ok)."),
-    b!("collections", "filter", 2, 2, b_filter, "filter(xs, pred) -> List   |   filter(m, pred(k, v)) -> Map\nKeep the elements for which pred returns true."),
+    b!("collections", "filter", 2, 2, b_filter, "filter(xs, pred) -> List   |   filter(m, pred(k, v)) -> Map   |   filter(s, pred) -> Str\nKeep the elements for which pred returns true."),
     b!("collections", "reduce", 2, 2, b_reduce, "reduce(xs, f: fn(acc, x) -> acc)\nCombine the elements from left to right. Error on an empty collection; see fold."),
     b!("collections", "fold", 3, 3, b_fold, "fold(xs, init, f: fn(acc, x) -> acc)\nCombine the elements from left to right, starting from init."),
     b!("collections", "sum", 1, 1, b_sum, "sum(xs) -> Int | Float\nThe sum of the numbers (0 for an empty collection)."),
     b!("collections", "product", 1, 1, b_product, "product(xs) -> Int | Float\nThe product of the numbers (1 for an empty collection)."),
     b!("collections", "min_by", 2, 2, b_min_by, "min_by(xs, key: fn(x) -> K) -> Option[T]\nThe element with the smallest key."),
     b!("collections", "max_by", 2, 2, b_max_by, "max_by(xs, key: fn(x) -> K) -> Option[T]\nThe element with the largest key."),
-    b!("collections", "sort", 1, 1, b_sort, "sort(xs) -> List\nA sorted copy (stable, ascending)."),
+    b!("collections", "sort", 1, 1, b_sort, "sort(xs) -> List\nA sorted copy (stable, ascending); sorting a Str sorts its characters."),
     m!("collections", "sort!", 1, 1, m_sort, "xs.sort!()\nSort the list variable in place."),
     b!("collections", "sort_by", 2, 2, b_sort_by, "sort_by(xs, key: fn(x) -> K) -> List\nA copy sorted by a key (stable, ascending)."),
     m!("collections", "sort_by!", 2, 2, m_sort_by, "xs.sort_by!(key)\nSort the list variable in place by a key."),
@@ -169,20 +170,20 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("collections", "count", 2, 2, b_count, "count(xs, pred_or_value) -> Int\nHow many elements match the predicate (or equal the value; substrings, for strings)."),
     b!("collections", "take", 2, 2, b_take, "take(xs, n) -> List\nThe first n elements (characters, for strings)."),
     b!("collections", "drop", 2, 2, b_drop, "drop(xs, n) -> List\nAll but the first n elements (characters, for strings)."),
-    b!("collections", "take_while", 2, 2, b_take_while, "take_while(xs, pred) -> List\nThe longest prefix whose elements satisfy pred."),
-    b!("collections", "drop_while", 2, 2, b_drop_while, "drop_while(xs, pred) -> List\nThe rest after the longest prefix satisfying pred."),
+    b!("collections", "take_while", 2, 2, b_take_while, "take_while(xs, pred) -> List\nThe longest prefix whose elements satisfy pred (a Str for a Str)."),
+    b!("collections", "drop_while", 2, 2, b_drop_while, "drop_while(xs, pred) -> List\nThe rest after the longest prefix satisfying pred (a Str for a Str)."),
     b!("collections", "slice", 3, 3, b_slice, "slice(xs, start, end) -> List | Str\nElements from start (inclusive) to end (exclusive); same as xs[start..end]."),
     b!("collections", "zip", 2, 2, b_zip, "zip(xs, ys) -> List[(A, B)]\nPair up elements; stops at the shorter input."),
     b!("collections", "enumerate", 1, 1, b_enumerate, "enumerate(xs) -> List[(Int, T)]\nPair each element with its index."),
     b!("collections", "flat_map", 2, 2, b_flat_map, "flat_map(xs, f: fn(x) -> List) -> List\nMap, then flatten one level."),
     b!("collections", "flatten", 1, 1, b_flatten, "flatten(xss: List[List[T]]) -> List[T]\nConcatenate a list of lists."),
     b!("collections", "join", 1, 2, b_join, "join(xs, sep: Str = \"\") -> Str\nConcatenate the printed forms of the elements, separated by sep."),
-    b!("collections", "unique", 1, 1, b_unique, "unique(xs) -> List\nRemove duplicates, keeping the first occurrence."),
+    b!("collections", "unique", 1, 1, b_unique, "unique(xs) -> List\nRemove duplicates, keeping the first occurrence (a Str for a Str)."),
     b!("collections", "group_by", 2, 2, b_group_by, "group_by(xs, key: fn(x) -> K) -> Map[K, List[T]]\nGroup elements by a key."),
     b!("collections", "tally", 1, 1, b_tally, "tally(xs) -> Map[T, Int]\nCount how many times each element occurs."),
     b!("collections", "partition", 2, 2, b_partition, "partition(xs, pred) -> (List, List)\nSplit into (elements where pred is true, the rest)."),
-    b!("collections", "chunks", 2, 2, b_chunks, "chunks(xs, n) -> List[List]\nSplit into consecutive pieces of length n (the last may be shorter)."),
-    b!("collections", "windows", 2, 2, b_windows, "windows(xs, n) -> List[List]\nAll consecutive runs of length n."),
+    b!("collections", "chunks", 2, 2, b_chunks, "chunks(xs, n) -> List[List]\nSplit into consecutive pieces of length n (the last may be shorter); pieces of a Str are Strs."),
+    b!("collections", "windows", 2, 2, b_windows, "windows(xs, n) -> List[List]\nAll consecutive runs of length n; runs of a Str are Strs."),
     b!("collections", "repeat", 2, 2, b_repeat, "repeat(x, n) -> List   |   repeat(s: Str, n) -> Str\nn copies of x."),
     b!("collections", "each", 2, 2, b_each, "each(xs, f)\nCall f on every element (with (key, value) for maps)."),
     b!("collections", "to_list", 1, 1, b_to_list, "to_list(x) -> List\nThe elements of a range, string (characters), map (entries) or tuple."),
@@ -347,7 +348,18 @@ pub fn builtin_index(name: &str) -> Option<usize> {
 // ============================================================ helpers
 
 fn type_err(it: &Interp, f: &str, i: usize, expected: &str, got: &Value, sp: Span) -> Ctrl {
-    it.err(sp, "E0200", format!("argument {} of `{}` must be {}, got {}", i + 1, f, expected, describe(got)))
+    let mut d = it.diag(sp, "E0200", format!("argument {} of `{}` must be {}, got {}", i + 1, f, expected, describe(got)));
+    if let Value::Variant(v) = got {
+        let what = match v.ty.id {
+            OPTION_ID => "an Option",
+            RESULT_ID => "a Result",
+            _ => "",
+        };
+        if !what.is_empty() && !expected.contains("Option") && !expected.contains("Result") {
+            d = d.help(format!("this is {}; get the value out first with `?`, `match`, or `.unwrap_or(default)`", what));
+        }
+    }
+    it.fail(d)
 }
 
 fn int_arg(it: &Interp, a: &[Value], i: usize, f: &str, sp: Span) -> R<i64> {
@@ -414,6 +426,34 @@ fn call_entry(it: &mut Interp, f: &Value, x: Value, two: bool, sp: Span) -> R {
         }
     }
     it.call(f, vec![x], sp)
+}
+
+/// Call a predicate on one element; for map entries `(k, v)` the predicate
+/// may take two arguments.
+fn entry_pred(it: &mut Interp, f: &Value, x: Value, two: bool, sp: Span, name: &str) -> R<bool> {
+    if two {
+        if let Value::Tuple(t) = &x {
+            if t.len() == 2 {
+                return bool_result(it, f, vec![t[0].clone(), t[1].clone()], sp, name);
+            }
+        }
+    }
+    bool_result(it, f, vec![x], sp, name)
+}
+
+/// Functions that pick out or reorder the characters of a Str give a Str.
+fn restring(was_str: bool, xs: Vec<Value>) -> Value {
+    if was_str {
+        let mut out = String::new();
+        for x in &xs {
+            if let Value::Str(c) = x {
+                out.push_str(c);
+            }
+        }
+        Value::str(out)
+    } else {
+        Value::list(xs)
+    }
 }
 
 fn wants_two(f: &Value) -> bool {
@@ -683,6 +723,11 @@ pub fn start_clock() {
 
 fn b_clock(it: &mut Interp, _: Vec<Value>, _: Span) -> R {
     Ok(Value::Float(crate::platform::monotonic_seconds() - it.clock_start))
+}
+
+fn b_flush(it: &mut Interp, _: Vec<Value>, _: Span) -> R {
+    it.flush();
+    Ok(Value::Unit)
 }
 
 fn b_sleep(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -1000,10 +1045,7 @@ fn b_fixed(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         return Ok(Value::str(if d == 0 { n.to_string() } else { format!("{}.{}", n, "0".repeat(d)) }));
     }
     let x = num_arg(it, &a, 0, "fixed", sp)?;
-    if !x.is_finite() {
-        return Ok(Value::str(format_float(x)));
-    }
-    Ok(Value::str(format!("{:.*}", d, x)))
+    Ok(Value::str(format_fixed(x, d)))
 }
 
 fn b_bit_and(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -1451,6 +1493,7 @@ fn b_filter(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
         }
         return Ok(Value::Map(Rc::new(out)));
     }
+    let was_str = matches!(v, Value::Str(_));
     let xs = items(it, v, "filter", 0, sp)?;
     let mut out = Vec::new();
     for x in xs {
@@ -1458,7 +1501,7 @@ fn b_filter(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
             out.push(x);
         }
     }
-    Ok(Value::list(out))
+    Ok(restring(was_str, out))
 }
 
 fn b_reduce(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
@@ -1553,8 +1596,9 @@ fn b_max_by(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 
 fn b_sort(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let v = take_arg(&mut a, 0);
+    let was_str = matches!(v, Value::Str(_));
     let xs = items(it, v, "sort", 0, sp)?;
-    Ok(Value::list(sort_values(it, xs, sp)?))
+    Ok(restring(was_str, sort_values(it, xs, sp)?))
 }
 
 fn m_sort(it: &mut Interp, t: &mut Value, _: Vec<Value>, sp: Span) -> R {
@@ -1644,11 +1688,18 @@ fn b_index_of(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 }
 
 fn b_find(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
+    if let (Value::Str(_), Value::Str(_)) = (&a[0], &a[1]) {
+        return Err(it.fail(
+            it.diag(sp, "E0200", "`find` takes a predicate function, not a Str")
+                .help("to search a string, use `s.index_of(sub)` (the position, as an Option) or `s.contains(sub)`"),
+        ));
+    }
     let f = fn_arg(it, &a, 1, "find", sp)?;
     let v = take_arg(&mut a, 0);
+    let two = matches!(v, Value::Map(_)) && wants_two(&f);
     let xs = items(it, v, "find", 0, sp)?;
     for x in xs {
-        if bool_result(it, &f, vec![x.clone()], sp, "find")? {
+        if entry_pred(it, &f, x.clone(), two, sp, "find")? {
             return Ok(it.some(x));
         }
     }
@@ -1670,10 +1721,11 @@ fn b_find_index(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 fn b_any(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let f = if a.len() == 2 { Some(fn_arg(it, &a, 1, "any", sp)?) } else { None };
     let v = take_arg(&mut a, 0);
+    let two = matches!(v, Value::Map(_)) && f.as_ref().is_some_and(wants_two);
     let xs = items(it, v, "any", 0, sp)?;
     for x in xs {
         let b = match &f {
-            Some(f) => bool_result(it, f, vec![x], sp, "any")?,
+            Some(f) => entry_pred(it, f, x, two, sp, "any")?,
             None => match x {
                 Value::Bool(b) => b,
                 other => return Err(it.err(sp, "E0200", format!("`any` without a predicate needs Bools, found {}", describe(&other)))),
@@ -1689,10 +1741,11 @@ fn b_any(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 fn b_all(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let f = if a.len() == 2 { Some(fn_arg(it, &a, 1, "all", sp)?) } else { None };
     let v = take_arg(&mut a, 0);
+    let two = matches!(v, Value::Map(_)) && f.as_ref().is_some_and(wants_two);
     let xs = items(it, v, "all", 0, sp)?;
     for x in xs {
         let b = match &f {
-            Some(f) => bool_result(it, f, vec![x], sp, "all")?,
+            Some(f) => entry_pred(it, f, x, two, sp, "all")?,
             None => match x {
                 Value::Bool(b) => b,
                 other => return Err(it.err(sp, "E0200", format!("`all` without a predicate needs Bools, found {}", describe(&other)))),
@@ -1714,11 +1767,12 @@ fn b_count(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     }
     let probe = take_arg(&mut a, 1);
     let v = take_arg(&mut a, 0);
+    let two = matches!(v, Value::Map(_)) && wants_two(&probe);
     let xs = items(it, v, "count", 0, sp)?;
     let mut n = 0;
     if probe.is_callable() {
         for x in xs {
-            if bool_result(it, &probe, vec![x], sp, "count")? {
+            if entry_pred(it, &probe, x, two, sp, "count")? {
                 n += 1;
             }
         }
@@ -1767,6 +1821,7 @@ fn b_drop(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 fn b_take_while(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let f = fn_arg(it, &a, 1, "take_while", sp)?;
     let v = take_arg(&mut a, 0);
+    let was_str = matches!(v, Value::Str(_));
     let xs = items(it, v, "take_while", 0, sp)?;
     let mut out = Vec::new();
     for x in xs {
@@ -1775,18 +1830,19 @@ fn b_take_while(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
         }
         out.push(x);
     }
-    Ok(Value::list(out))
+    Ok(restring(was_str, out))
 }
 
 fn b_drop_while(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let f = fn_arg(it, &a, 1, "drop_while", sp)?;
     let v = take_arg(&mut a, 0);
+    let was_str = matches!(v, Value::Str(_));
     let xs = items(it, v, "drop_while", 0, sp)?;
     let mut i = 0;
     while i < xs.len() && bool_result(it, &f, vec![xs[i].clone()], sp, "drop_while")? {
         i += 1;
     }
-    Ok(Value::list(xs[i..].to_vec()))
+    Ok(restring(was_str, xs[i..].to_vec()))
 }
 
 fn b_slice(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -1868,6 +1924,7 @@ fn b_join(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 
 fn b_unique(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let v = take_arg(&mut a, 0);
+    let was_str = matches!(v, Value::Str(_));
     let xs = items(it, v, "unique", 0, sp)?;
     let mut seen = MapVal::new();
     let mut out = Vec::new();
@@ -1877,7 +1934,7 @@ fn b_unique(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
             out.push(x);
         }
     }
-    Ok(Value::list(out))
+    Ok(restring(was_str, out))
 }
 
 fn b_group_by(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
@@ -1915,10 +1972,11 @@ fn b_tally(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 fn b_partition(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let f = fn_arg(it, &a, 1, "partition", sp)?;
     let v = take_arg(&mut a, 0);
+    let two = matches!(v, Value::Map(_)) && wants_two(&f);
     let xs = items(it, v, "partition", 0, sp)?;
     let (mut yes, mut no) = (Vec::new(), Vec::new());
     for x in xs {
-        if bool_result(it, &f, vec![x.clone()], sp, "partition")? {
+        if entry_pred(it, &f, x.clone(), two, sp, "partition")? {
             yes.push(x);
         } else {
             no.push(x);
@@ -1933,8 +1991,9 @@ fn b_chunks(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
         return Err(it.err(sp, "E0216", "chunk size must be positive"));
     }
     let v = take_arg(&mut a, 0);
+    let was_str = matches!(v, Value::Str(_));
     let xs = items(it, v, "chunks", 0, sp)?;
-    Ok(Value::list(xs.chunks(n).map(|c| Value::list(c.to_vec())).collect()))
+    Ok(Value::list(xs.chunks(n).map(|c| restring(was_str, c.to_vec())).collect()))
 }
 
 fn b_windows(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
@@ -1943,8 +2002,9 @@ fn b_windows(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
         return Err(it.err(sp, "E0216", "window size must be positive"));
     }
     let v = take_arg(&mut a, 0);
+    let was_str = matches!(v, Value::Str(_));
     let xs = items(it, v, "windows", 0, sp)?;
-    Ok(Value::list(xs.windows(n).map(|c| Value::list(c.to_vec())).collect()))
+    Ok(Value::list(xs.windows(n).map(|c| restring(was_str, c.to_vec())).collect()))
 }
 
 fn b_repeat(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
@@ -2438,13 +2498,24 @@ fn to_json(v: &Value, indent: usize, level: usize, out: &mut String) -> Result<(
                 out.push_str("{}");
                 return Ok(());
             }
+            // JSON object keys are strings: Str and Int keys are allowed (Ints
+            // become their decimal text), as long as no two become the same.
+            let mut seen = std::collections::HashSet::new();
             out.push('{');
             for (i, (k, x)) in m.entries.iter().enumerate() {
+                let key = match k {
+                    Value::Str(s) => s.to_string(),
+                    Value::Int(n) => n.to_string(),
+                    other => return Err(format!("JSON object keys must be Str or Int, but this map has the key {}", short_repr(other))),
+                };
+                if !seen.insert(key.clone()) {
+                    return Err(format!("two keys of this map both become the JSON key \"{}\"", key));
+                }
                 if i > 0 {
                     out.push(',');
                 }
                 nl(out, level + 1);
-                json_escape(&display(k), out);
+                json_escape(&key, out);
                 out.push_str(sep);
                 to_json(x, indent, level + 1, out)?;
             }

@@ -1,4 +1,6 @@
 # expect: E0208
-let r = match 5 {
-  1 => "one"
+let xs = [1, 2]
+let r = match xs {
+  [] => "empty"
+  [x] => "one"
 }

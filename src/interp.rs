@@ -1727,13 +1727,12 @@ impl Interp {
             }
             (Some('%'), x) if numeric => {
                 let f = x.as_f64().unwrap() * 100.0;
-                format!("{:.*}%", spec.precision.unwrap_or(0), f)
+                format!("{}%", format_fixed(f, spec.precision.unwrap_or(0)))
             }
             (Some(k), _) => {
                 return Err(self.err(span, "E0216", format!("format type `{}` cannot be used with {}", k, describe(v))));
             }
-            (None, Value::Float(f)) if spec.precision.is_some() && !f.is_finite() => format_float(*f),
-            (None, Value::Float(f)) if spec.precision.is_some() => format!("{:.*}", spec.precision.unwrap(), f),
+            (None, Value::Float(f)) if spec.precision.is_some() => format_fixed(*f, spec.precision.unwrap()),
             // Ints are formatted exactly (not through a Float).
             (None, Value::Int(n)) if spec.precision.is_some() => {
                 let p = spec.precision.unwrap();
@@ -1905,7 +1904,23 @@ impl Interp {
             }
             (Ty::Tuple(ts), Value::Tuple(xs)) => ts.len() == xs.len() && ts.iter().zip(xs.iter()).all(|(t, x)| self.has_type(x, t, coerce)),
             (Ty::Record(fs), Value::Record(r)) => fs.iter().all(|(n, t)| r.get(n).is_some_and(|x| self.has_type(x, t, coerce))),
-            (Ty::Fn(..), v) => v.is_callable(),
+            // A function type checks that the value can be called with that
+            // many arguments; its parameter and result types are checked when
+            // it is called.
+            (Ty::Fn(ps, _), v) => {
+                let n = ps.len();
+                match v {
+                    Value::Func(c) => {
+                        let required = c.def.params.iter().filter(|p| p.default.is_none()).count();
+                        required <= n && n <= c.def.params.len()
+                    }
+                    Value::Builtin(i) => {
+                        let b = &BUILTINS[*i as usize];
+                        b.min as usize <= n && (b.max == crate::builtins::VARIADIC || n <= b.max as usize)
+                    }
+                    other => other.is_callable(),
+                }
+            }
             (Ty::Named { id, args, .. }, Value::Variant(vv)) => {
                 vv.ty.id == *id && {
                     let (_, tys, _) = vv.ty.fields_of(vv.tag);

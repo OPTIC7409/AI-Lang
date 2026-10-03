@@ -191,6 +191,7 @@ fn confusion_hint(name: &str) -> Option<&'static str> {
         "filter_map" | "filterMap" | "compact_map" => "use a comprehension: `[f(x) for x in xs if keep(x)]`, or `collect_some`",
         "Vec" | "vec" | "array" | "Array" | "list" => "lists are written `[1, 2, 3]`; the type is `List[Int]`",
         "HashMap" | "dict" | "Dict" | "hashmap" | "map_new" => "maps are written `[\"a\": 1]` (empty: `[:]`); the type is `Map[Str, Int]`",
+        "set!" | "put!" | "update!" | "replace!" => "assign directly: `xs[i] = v` or `m[k] = v` (the non-mutating `set(xs, i, v)` returns a copy)",
         "mod" | "rem" => "use the `%` operator (the result takes the sign of the divisor)",
         "div" | "floor_div" | "idiv" => "use the `//` operator (floor division); `/` always gives a Float",
         _ => return None,
@@ -426,6 +427,8 @@ impl<'a> Resolver<'a> {
             d = Diagnostic::error("E0100", "`old(...)` can only be used in `ensures` clauses")
                 .at(span)
                 .help("in a postcondition, `old(e)` is the value `e` had when the function was called");
+        } else if let Some(alias) = self.module_with(name) {
+            d = d.help(format!("`{}` is defined in the imported module `{}`: write `{}.{}`", name, alias, alias, name));
         } else if let Some(h) = confusion_hint(name) {
             d = d.help(h);
         } else if let Some(s) = suggest(name, names.iter().map(|s| s.as_str())) {
@@ -434,6 +437,16 @@ impl<'a> Resolver<'a> {
             d = d.help(format!("`{}` is a type; build values with one of its constructors", name));
         }
         self.error(d);
+    }
+
+    /// The alias of an imported module that defines `name` (a value or type).
+    fn module_with(&self, name: &str) -> Option<Name> {
+        let mut aliases: Vec<&Name> = self.ns.values.keys().collect();
+        aliases.sort();
+        aliases.into_iter().find_map(|alias| match &self.ctx.globals[self.ns.values[alias] as usize].kind {
+            GlobalKind::Module(m) if m.ns.values.contains_key(name) || m.ns.types.contains_key(name) => Some(alias.clone()),
+            _ => None,
+        })
     }
 
     fn resolve_var(&mut self, v: &mut Var, span: Span) -> Option<Found> {
@@ -2019,12 +2032,12 @@ impl<'a> Resolver<'a> {
     }
 
     fn check_exhaustive(&mut self, arms: &[Arm], span: Span) {
-        // Only matches over constructors (enum variants, Bools, tuples) are
-        // checked statically; other matches are checked at runtime.
+        // Matches over constructors (enum variants, Bools, tuples) and
+        // literals are checked statically; list patterns are checked at runtime.
         let analyzable = arms.iter().any(|a| {
             let mut ps = vec![];
             flatten_alts(&a.pat, &mut ps);
-            ps.iter().any(|p| matches!(p.kind, PatKind::Ctor { .. } | PatKind::Lit(Lit::Bool(_)) | PatKind::Tuple(_)))
+            ps.iter().any(|p| matches!(p.kind, PatKind::Ctor { .. } | PatKind::Lit(_) | PatKind::Range { .. } | PatKind::Tuple(_)))
         });
         if !analyzable {
             return;
@@ -2154,7 +2167,17 @@ impl<'a> Resolver<'a> {
                     }),
                 ));
             }
-            // Literals, ranges, lists, strings: not analyzed statically.
+            // Numbers and strings have too many values to list: a literal or
+            // range covers only part of the column, so only the rows with a
+            // wildcard here can cover the rest.
+            PatKind::Lit(Lit::Int(_) | Lit::Float(_) | Lit::Str(_)) | PatKind::Range { .. } => {
+                let rest: Vec<_> = rows.into_iter().filter(|r| r[0].is_none()).map(|r| r[1..].to_vec()).collect();
+                return self.missing(rest, n - 1, depth + 1).map(|mut w| {
+                    w.insert(0, "_".into());
+                    w
+                });
+            }
+            // Lists and other patterns: not analyzed statically.
             _ => return None,
         }
         for (label, arity, spec) in &ctors {

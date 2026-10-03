@@ -1,0 +1,6 @@
+# expect: E0109
+fn f(t: (Int, Bool)) -> Int => match t {
+  (0, _) => 0
+  (_, true) => 1
+}
+print(f((1, false)))
