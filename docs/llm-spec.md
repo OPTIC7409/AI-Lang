@@ -130,8 +130,8 @@ may be used before their definition; `let`/`var` may not. Functions may
 have at most 64 parameters. Functions with the same name but different
 parameter type annotations are **overloads**; the first whose annotations
 accept the arguments is called. A user function named like a built-in (e.g.
-`len`) adds an overload and falls back to the built-in. Default values are
-evaluated on each call. If a top-level
+`len`) adds an overload and falls back to the built-in. Parameters with
+default values come last; defaults are evaluated on each call. If a top-level
 `fn main()` exists, it runs after the top-level statements; if `main` returns
 `Err(e)`, the program prints the error and exits with status 1.
 
@@ -180,9 +180,11 @@ There are no bitwise operators; use `bit_and`, `bit_or`, `bit_xor`, `shl`, `shr`
 **Method syntax**: `x.f(a, b)` calls `f(x, a, b)` — any function, including
 built-ins (`xs.len()`, `"a,b".split(",")`). If `x` is a record with a field
 `f`, the field is called instead. A variable named like a function (say
-`let lines = ...`) does not hide the function from method syntax. For values
-whose type comes from an imported module, that module's functions are also
-found (including `!` functions).
+`let lines = ...`) does not hide the function from method syntax. For a
+value whose type comes from an imported module, method syntax looks in that
+module first (for `!` functions too), so `q.push!(x)` (or `push!(q, x)`,
+which means the same) calls the module's `push!`; a plain call `f(x)` only
+looks in scope.
 **Pipelines**: `x |> f(a)` is `f(x, a)`; `x |> f` is `f(x)`.
 
 ## Pattern matching
@@ -210,11 +212,14 @@ match value {
 ```
 
 Arms are separated by newlines or commas. A `match` must be exhaustive (or
-have `_`): for enums, Bools, tuples and literals (numbers, strings) this is
-checked before the program runs, including nested patterns, and the error
-names a missing case. List patterns are checked when the match runs: no
-matching arm is an error. A refutable pattern in `let` (`let [a, b] = xs`)
-is allowed and fails at runtime (E0212) if it does not match.
+have `_`). This is checked before the program runs, for enums, Bools,
+tuples, records, list lengths and literals (a literal never covers all
+numbers or strings), including nested patterns, and the error names a
+missing case. Arms with guards (`if ...`) do not count toward
+exhaustiveness. Matching a variable declared with a type against patterns
+of another type is an error (E0119). A refutable pattern in `let`
+(`let [a, b] = xs`) is allowed and fails at runtime (E0212) if it does not
+match.
 
 ## Mutation
 

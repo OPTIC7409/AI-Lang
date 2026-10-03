@@ -107,6 +107,11 @@ enum BindMode {
 
 pub struct Resolver<'a> {
     ctx: &'a mut Ctx,
+    /// The type alias whose definition is being resolved.
+    resolving_alias: Option<Name>,
+    /// Steps left for the current exhaustiveness check (which is exponential
+    /// in the worst case); when they run out, the match is checked at runtime.
+    exhaust_steps: std::cell::Cell<u32>,
     ns: Namespace,
     fns: Vec<FnCtx>,
     diags: Vec<Diagnostic>,
@@ -130,6 +135,8 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
         fns: vec![],
         diags: vec![],
         repl,
+        exhaust_steps: std::cell::Cell::new(0),
+        resolving_alias: None,
         dir: dir.to_path_buf(),
         generics: vec![],
         pending_methods: vec![],
@@ -157,7 +164,7 @@ fn confusion_hint(name: &str) -> Option<&'static str> {
         "length" | "size" => "use `len(x)` or `x.len()`",
         "append" => "use `push` (returns a new list) or `push!` (changes a `var` in place)",
         "switch" | "case" | "when" => "use `match value { pattern => result }`",
-        "nan" | "NaN" => "Float division by zero is an error in Cogito, so NaN rarely appears; use `nan()` if you really need one",
+        "nan" | "NaN" => "Cogito has no NaN constant: Float division by zero is an error, so NaN only comes from operations like `inf - inf`; test for it with `is_nan(x)`",
         "string" | "String" => "the string type is `Str`; to convert a value use `str(x)`",
         "integer" | "Integer" => "the integer type is `Int`; to convert a value use `int(x)`",
         "new" => "values are built by calling their type: `Point(x: 1, y: 2)`",
@@ -652,7 +659,9 @@ impl<'a> Resolver<'a> {
             if let Item::Type(td) = item {
                 if let TypeBody::Alias(te) = &mut td.body {
                     let params = td.params.clone();
+                    self.resolving_alias = Some(td.name.clone());
                     let ty = self.resolve_type(te, &params);
+                    self.resolving_alias = None;
                     self.ns.aliases.insert(td.name.clone(), AliasDef { params, ty });
                 }
             }
@@ -761,9 +770,12 @@ impl<'a> Resolver<'a> {
         let pending = std::mem::take(&mut self.pending_methods);
         for (name, span) in pending {
             if !self.ctx.known_fields.contains(&name) && !self.ctx.module_fns.contains(&name) && self.global_slot(&name).is_none() {
+                let before = self.diags.len();
                 self.undefined(&name, span, "function");
-                if let Some(d) = self.diags.last_mut() {
-                    d.notes.push(format!("`value.{}(...)` calls the function `{}` with `value` as its first argument", name, name));
+                if self.diags.len() > before {
+                    if let Some(d) = self.diags.last_mut() {
+                        d.notes.push(format!("`value.{}(...)` calls the function `{}` with `value` as its first argument", name, name));
+                    }
                 }
             }
         }
@@ -1024,7 +1036,11 @@ impl<'a> Resolver<'a> {
                             cands.extend(self.ctx.builtins.types.keys().map(|k| k.to_string()));
                             cands.extend(self.generics.iter().map(|k| k.to_string()));
                             let mut d = Diagnostic::error("E0106", format!("unknown type `{}`", name)).at(span);
-                            if let Some(s) = suggest(&name, cands.iter().map(|s| s.as_str())) {
+                            if self.resolving_alias.as_deref() == Some(&*name) {
+                                d = Diagnostic::error("E0106", format!("the type alias `{}` refers to itself", name))
+                                    .at(span)
+                                    .help(format!("an alias is only another name for an existing type; for a recursive type, declare an enum or record: `type {} = | Leaf | Node(List[{}])`", name, name));
+                            } else if let Some(s) = suggest(&name, cands.iter().map(|s| s.as_str())) {
                                 d = d.help(format!("did you mean `{}`?", s));
                             } else if name.len() == 1 {
                                 d = d.help(format!("to use `{}` as a type parameter, declare it: `fn name[{}](...)`", name, name));
@@ -1089,12 +1105,10 @@ impl<'a> Resolver<'a> {
                 }
                 self.pattern(pat, BindMode::Local);
             }
-            if mutating && i == 0 {
-                if let Some(t) = &p.ty {
-                    if !t.ty.is_any() {
-                        let ty = t.ty.clone();
-                        self.set_declared_type(VarRes::Local(p.slot), ty);
-                    }
+            if let Some(t) = &p.ty {
+                if !t.ty.is_any() {
+                    let ty = t.ty.clone();
+                    self.set_declared_type(VarRes::Local(p.slot), ty);
                 }
             }
         }
@@ -1167,10 +1181,9 @@ impl<'a> Resolver<'a> {
                 };
                 self.pattern(pat, mode);
                 // Remember the annotation, so that later writes are checked too.
-                if let (Some(t), PatKind::Bind { res, sub: None, .. }) = (ty.as_ref(), &pat.kind) {
-                    if !t.ty.is_any() {
-                        self.set_declared_type(*res, t.ty.clone());
-                    }
+                if let Some(t) = ty.as_ref() {
+                    let t = t.ty.clone();
+                    self.declare_pattern_types(pat, &t);
                 }
             }
             StmtKind::Assign { target, op: _, value, ty } => {
@@ -1237,7 +1250,11 @@ impl<'a> Resolver<'a> {
                     d = d.help(format!("declare it with `var {}` to allow changes", name));
                 }
                 if code == "E0111" {
-                    d.message = format!("cannot call a mutating function on `{}`, because it is not a `var`", name);
+                    d.message = if found.captured {
+                        format!("cannot call a mutating function on `{}`, because closures cannot change the variables they capture", name)
+                    } else {
+                        format!("cannot call a mutating function on `{}`, because it is not a `var`", name)
+                    };
                 }
                 self.error(d);
                 None
@@ -1256,6 +1273,62 @@ impl<'a> Resolver<'a> {
                 self.error(d);
                 None
             }
+        }
+    }
+
+    /// The declared type of a variable, if the expression is one.
+    fn declared_type_of(&self, e: &Expr) -> Option<Ty> {
+        let ExprKind::Var(v) = &e.kind else { return None };
+        let t = match v.res {
+            VarRes::Local(slot) => {
+                let f = self.fns.last()?;
+                f.scopes.iter().rev().find_map(|s| s.locals.iter().rev().find(|l| l.slot == slot)).and_then(|l| l.ty.clone())
+            }
+            VarRes::Global(slot) => self.ctx.globals.get(slot as usize).and_then(|g| g.ty.clone()),
+            _ => None,
+        }?;
+        if t.is_any() {
+            None
+        } else {
+            Some(t)
+        }
+    }
+
+    fn snippet_text(&self, span: Span) -> String {
+        if (span.file as usize) < self.ctx.sm.files.len() {
+            self.ctx.sm.snippet(span).to_string()
+        } else {
+            "the value".into()
+        }
+    }
+
+    /// Give each name bound by a pattern the part of the annotation that
+    /// describes it: `var (a, b): (Int, Str)` declares `a: Int`, `b: Str`.
+    fn declare_pattern_types(&mut self, pat: &Pattern, ty: &Ty) {
+        if ty.is_any() {
+            return;
+        }
+        match (&pat.kind, ty) {
+            (PatKind::Bind { res, sub, .. }, _) => {
+                self.set_declared_type(*res, ty.clone());
+                if let Some(p) = sub {
+                    self.declare_pattern_types(p, ty);
+                }
+            }
+            (PatKind::Tuple(ps), Ty::Tuple(ts)) if ps.len() == ts.len() => {
+                for (p, t) in ps.iter().zip(ts) {
+                    self.declare_pattern_types(p, t);
+                }
+            }
+            (PatKind::List { before, rest, after }, Ty::List(et)) => {
+                for p in before.iter().chain(after.iter()) {
+                    self.declare_pattern_types(p, et);
+                }
+                if let Some(Some(p)) = rest {
+                    self.declare_pattern_types(p, ty);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1417,8 +1490,16 @@ impl<'a> Resolver<'a> {
                         self.error(d);
                         return;
                     }
+                    for (k, n) in named.iter().enumerate() {
+                        if named[..k].contains(n) {
+                            let d = Diagnostic::error("E0108", format!("argument `{}` is given twice", n)).at(span);
+                            self.error(d);
+                            return;
+                        }
+                    }
+                    let forms = crate::builtins::param_forms(*idx);
                     for n in &named {
-                        if !names.iter().any(|x| **x == ***n) {
+                        if !forms.iter().any(|f| f.iter().any(|x| **x == ***n)) {
                             let mut d = Diagnostic::error("E0108", format!("`{}` has no parameter named `{}`", b.name, n))
                                 .at(span)
                                 .note(format!("its parameters are: {}", names.join(", ")));
@@ -1769,6 +1850,17 @@ impl<'a> Resolver<'a> {
                     self.pop_scope();
                 }
                 let head = Span { end: scrutinee.span.end, ..span };
+                if let Some(t) = self.declared_type_of(scrutinee) {
+                    let what = self.snippet_text(scrutinee.span);
+                    for arm in arms.iter() {
+                        if let Some(bad) = pattern_mismatch(&arm.pat, &t) {
+                            let d = Diagnostic::error("E0119", format!("this pattern can never match: `{}` is declared as `{}`", what, t))
+                                .at(bad.span)
+                                .label("a pattern for a different type");
+                            self.error(d);
+                        }
+                    }
+                }
                 if self.diags.iter().filter(|d| d.is_error()).count() == errors_before {
                     self.check_exhaustive(arms, head);
                 }
@@ -2032,17 +2124,18 @@ impl<'a> Resolver<'a> {
     }
 
     fn check_exhaustive(&mut self, arms: &[Arm], span: Span) {
-        // Matches over constructors (enum variants, Bools, tuples) and
-        // literals are checked statically; list patterns are checked at runtime.
+        // Matches are checked statically: enum variants, Bools, tuples,
+        // records, list lengths, and literals (which never cover a whole type).
         let analyzable = arms.iter().any(|a| {
             let mut ps = vec![];
             flatten_alts(&a.pat, &mut ps);
-            ps.iter().any(|p| matches!(p.kind, PatKind::Ctor { .. } | PatKind::Lit(_) | PatKind::Range { .. } | PatKind::Tuple(_)))
+            ps.iter().any(|p| !matches!(p.kind, PatKind::Wild | PatKind::Bind { sub: None, .. }))
         });
         if !analyzable {
             return;
         }
         let rows: Vec<Vec<Option<&Pattern>>> = arms.iter().filter(|a| a.guard.is_none()).map(|a| vec![Some(&a.pat)]).collect();
+        self.exhaust_steps.set(20_000);
         if let Some(w) = self.missing(rows, 1, 0) {
             let witness = w.into_iter().next().unwrap_or_else(|| "_".into());
             let d = Diagnostic::error("E0109", format!("non-exhaustive match: `{}` is not handled", witness))
@@ -2055,9 +2148,11 @@ impl<'a> Resolver<'a> {
     /// Returns a value (as pattern text, one per column) that no row matches,
     /// or None if the rows are exhaustive (or cannot be analyzed).
     fn missing<'p>(&self, rows: Vec<Vec<Option<&'p Pattern>>>, n: usize, depth: usize) -> Option<Vec<String>> {
-        if depth > 64 {
+        let steps = self.exhaust_steps.get();
+        if depth > 64 || steps == 0 {
             return None;
         }
+        self.exhaust_steps.set(steps - 1);
         if n == 0 {
             return if rows.is_empty() { Some(vec![]) } else { None };
         }
@@ -2177,7 +2272,63 @@ impl<'a> Resolver<'a> {
                     w
                 });
             }
-            // Lists and other patterns: not analyzed statically.
+            // Lists: a pattern without `..` matches one length, one with `..`
+            // every length from its minimum up. All lengths beyond the longest
+            // pattern behave alike, so lengths 0..=max+1 cover every case.
+            PatKind::List { .. } => {
+                let lens: Vec<(usize, bool)> = rows
+                    .iter()
+                    .filter_map(|r| match r[0].map(|p| &p.kind) {
+                        Some(PatKind::List { before, rest, after }) => Some((before.len() + after.len(), rest.is_some())),
+                        _ => None,
+                    })
+                    .collect();
+                let longest = lens.iter().map(|(n, _)| *n).max().unwrap_or(0);
+                for len in 0..=longest + 1 {
+                    let open = len == longest + 1;
+                    ctors.push((
+                        if open { "[..]".to_string() } else { "[]".to_string() },
+                        len,
+                        Box::new(move |p: &'p Pattern, len: usize| match &p.kind {
+                            PatKind::List { before, rest: None, after } if before.len() + after.len() == len => {
+                                Some(before.iter().chain(after.iter()).map(Some).collect())
+                            }
+                            PatKind::List { before, rest: Some(_), after } if before.len() + after.len() <= len => {
+                                let mut v: Vec<Option<&'p Pattern>> = before.iter().map(Some).collect();
+                                v.extend(std::iter::repeat_n(None, len - before.len() - after.len()));
+                                v.extend(after.iter().map(Some));
+                                Some(v)
+                            }
+                            _ => None,
+                        }),
+                    ));
+                }
+            }
+            // Anonymous records: one constructor whose fields are all the
+            // names mentioned in this column.
+            PatKind::Record { .. } => {
+                let mut names: Vec<Name> = Vec::new();
+                for r in &rows {
+                    if let Some(PatKind::Record { fields, .. }) = r[0].map(|p| &p.kind) {
+                        for (n, _) in fields {
+                            if !names.contains(n) {
+                                names.push(n.clone());
+                            }
+                        }
+                    }
+                }
+                names.sort();
+                let label = format!("{{{}", names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("\u{0}"));
+                let names2 = names.clone();
+                ctors.push((
+                    label,
+                    names.len(),
+                    Box::new(move |p: &'p Pattern, _| match &p.kind {
+                        PatKind::Record { fields, .. } => Some(names2.iter().map(|n| fields.iter().find(|(f, _)| f == n).map(|(_, p)| p)).collect()),
+                        _ => None,
+                    }),
+                ));
+            }
             _ => return None,
         }
         for (label, arity, spec) in &ctors {
@@ -2201,6 +2352,18 @@ impl<'a> Resolver<'a> {
                 let (args, rest) = w.split_at(*arity);
                 let text = if label.is_empty() {
                     format!("({})", args.join(", "))
+                } else if label == "[]" {
+                    format!("[{}]", args.join(", "))
+                } else if label == "[..]" {
+                    format!("[{}..]", args.iter().map(|a| format!("{}, ", a)).collect::<String>())
+                } else if let Some(names) = label.strip_prefix('{') {
+                    let fields: Vec<String> =
+                        names.split('\u{0}').zip(args).filter(|(_, a)| *a != "_").map(|(n, a)| format!("{}: {}", n, a)).collect();
+                    if fields.is_empty() {
+                        "{ .. }".to_string()
+                    } else {
+                        format!("{{ {}, .. }}", fields.join(", "))
+                    }
                 } else if *arity == 0 {
                     label.clone()
                 } else if args.iter().all(|a| a == "_") {
@@ -2286,6 +2449,43 @@ fn extract_olds(e: &mut Expr, out: &mut Vec<Expr>) {
         }
     }
     for_each_child_mut(e, &mut |c| extract_olds(c, out));
+}
+
+/// The part of a pattern that can never match a value of type `ty`, if any.
+fn pattern_mismatch<'p>(p: &'p Pattern, ty: &Ty) -> Option<&'p Pattern> {
+    if ty.is_any() {
+        return None;
+    }
+    let ok = match (&p.kind, ty) {
+        (PatKind::Wild, _) => true,
+        (PatKind::Bind { sub, .. }, _) => return sub.as_ref().and_then(|s| pattern_mismatch(s, ty)),
+        (PatKind::Or(alts), _) => return alts.iter().find_map(|a| pattern_mismatch(a, ty)),
+        // (Sub-patterns of a constructor are not checked here.)
+        (PatKind::Ctor { ctor, .. }, Ty::Named { id, .. }) => ctor.type_id == *id,
+        (PatKind::Ctor { .. }, _) => false,
+        (PatKind::Lit(Lit::Bool(_)), t) => matches!(t, Ty::Bool),
+        (PatKind::Lit(Lit::Int(_) | Lit::Float(_)), t) => matches!(t, Ty::Int | Ty::Float),
+        (PatKind::Lit(Lit::Str(_)), t) => matches!(t, Ty::Str),
+        (PatKind::Lit(Lit::Unit), t) => matches!(t, Ty::Unit),
+        (PatKind::Range { .. }, t) => matches!(t, Ty::Int | Ty::Float | Ty::Str),
+        (PatKind::Tuple(ps), Ty::Tuple(ts)) => {
+            if ps.len() != ts.len() {
+                false
+            } else {
+                return ps.iter().zip(ts).find_map(|(p, t)| pattern_mismatch(p, t));
+            }
+        }
+        (PatKind::Tuple(_), _) => false,
+        (PatKind::List { before, after, .. }, Ty::List(et)) => return before.iter().chain(after.iter()).find_map(|p| pattern_mismatch(p, et)),
+        (PatKind::List { .. }, _) => false,
+        (PatKind::Record { .. }, Ty::Record(_) | Ty::Named { .. }) => true,
+        (PatKind::Record { .. }, _) => false,
+    };
+    if ok {
+        None
+    } else {
+        Some(p)
+    }
 }
 
 fn flatten_alts<'p>(p: &'p Pattern, out: &mut Vec<&'p Pattern>) {

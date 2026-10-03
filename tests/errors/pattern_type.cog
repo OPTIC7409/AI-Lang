@@ -1,0 +1,7 @@
+# expect: E0119
+type Color = Red | Green
+fn name(c: Color) -> Str => match c {
+  Less => "less"
+  _ => "other"
+}
+print(name(Red))

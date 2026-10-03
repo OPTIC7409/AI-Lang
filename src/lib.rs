@@ -119,7 +119,9 @@ pub fn run_with_value(it: &mut Interp, prog: &Program, ns: &Namespace) -> Result
                 it.exec_stmt(s, &mut env)?;
             }
         }
-        if let Some(f) = it.global_by_name(ns, "main") {
+        // Only a function declared with `fn main()` is the entry point.
+        let declared_fn = ns.values.get("main").is_some_and(|s| matches!(it.ctx.globals[*s as usize].kind, ctx::GlobalKind::Fn));
+        if let (true, Some(f)) = (declared_fn, it.global_by_name(ns, "main")) {
             if f.is_callable() {
                 let r = it.call(&f, vec![], span::Span::default())?;
                 // `main` may return a Result: an error means the program failed.

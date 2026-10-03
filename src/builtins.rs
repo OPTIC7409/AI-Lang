@@ -240,21 +240,55 @@ pub static BUILTINS: &[BuiltinDef] = &[
 
 /// Parameter names of a built-in, read from its documented signature (the
 /// longest non-variadic alternative). Empty for variadic and mutating built-ins.
-pub fn param_names(idx: u16) -> &'static [String] {
-    static NAMES: std::sync::OnceLock<Vec<Vec<String>>> = std::sync::OnceLock::new();
-    let all = NAMES.get_or_init(|| BUILTINS.iter().map(|b| parse_param_names(b.doc)).collect());
+/// The parameter names of each form of a built-in, read from its doc
+/// signature (`remove(xs: List[T], i: Int)  |  remove(m: Map, k)`).
+pub fn param_forms(idx: u16) -> &'static [Vec<String>] {
+    static NAMES: std::sync::OnceLock<Vec<Vec<Vec<String>>>> = std::sync::OnceLock::new();
+    let all = NAMES.get_or_init(|| BUILTINS.iter().map(|b| parse_param_forms(b.doc)).collect());
     &all[idx as usize]
 }
 
-fn parse_param_names(doc: &str) -> Vec<String> {
+/// The parameter names of a built-in's main (longest) form.
+pub fn param_names(idx: u16) -> &'static [String] {
+    param_forms(idx).iter().max_by_key(|f| f.len()).map(|f| f.as_slice()).unwrap_or(&[])
+}
+
+/// The form whose parameters include all the given names.
+pub fn param_form_for(idx: u16, named: &[&str]) -> Option<&'static [String]> {
+    param_forms(idx).iter().find(|f| named.iter().all(|n| f.iter().any(|x| x == n))).map(|f| f.as_slice())
+}
+
+/// Split at `|` outside brackets and quotes.
+fn split_top(s: &str) -> Vec<&str> {
+    let (mut depth, mut in_str, mut start) = (0i32, false, 0);
+    let mut out = Vec::new();
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => in_str = !in_str,
+            '(' | '[' if !in_str => depth += 1,
+            ')' | ']' if !in_str => depth -= 1,
+            '|' if depth == 0 && !in_str => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+fn parse_param_forms(doc: &str) -> Vec<Vec<String>> {
     let first = doc.lines().next().unwrap_or("");
-    let mut best: Vec<String> = Vec::new();
-    for alt in first.split("   |   ").flat_map(|a| a.split(" | ")) {
+    let mut forms = Vec::new();
+    for alt in split_top(first) {
         let alt = alt.trim();
-        if alt.contains('!') || alt.contains("...") {
+        if alt.contains("...") || !alt.contains('(') {
             continue;
         }
-        let Some(open) = alt.find('(') else { continue };
+        // `xs.swap!(i, j)`: the receiver is the first parameter.
+        let recv = alt.split_once('.').filter(|(r, rest)| !r.contains('(') && rest.contains('(')).map(|(r, _)| r.trim().to_string());
+        let open = alt.find('(').unwrap();
         let mut depth = 0;
         let mut close = None;
         let mut in_str = false;
@@ -274,7 +308,7 @@ fn parse_param_names(doc: &str) -> Vec<String> {
         }
         let Some(close) = close else { continue };
         let inner = &alt[open + 1..close];
-        let mut names = Vec::new();
+        let mut names: Vec<String> = recv.into_iter().collect();
         let mut depth = 0;
         let mut in_str = false;
         let mut cur = String::new();
@@ -302,27 +336,30 @@ fn parse_param_names(doc: &str) -> Vec<String> {
                 _ => cur.push(c),
             }
         }
-        if names.len() > best.len() {
-            best = names;
+        if !names.is_empty() && !forms.contains(&names) {
+            forms.push(names);
         }
     }
-    best
+    forms
 }
 
 /// Combine positional and named arguments for a built-in into one positional list.
 pub fn arrange_named(idx: u16, mut pos: Vec<Value>, named: Vec<(crate::types::Name, Value)>) -> Result<Vec<Value>, String> {
-    let names = param_names(idx);
     let b = &BUILTINS[idx as usize];
-    if names.is_empty() {
-        return Err(format!("built-in function `{}` does not take named arguments", b.name));
-    }
+    let given: Vec<&str> = named.iter().map(|(n, _)| &**n).collect();
+    let Some(names) = param_form_for(idx, &given) else {
+        let all = param_names(idx);
+        if all.is_empty() {
+            return Err(format!("built-in function `{}` does not take named arguments", b.name));
+        }
+        let unknown = given.iter().find(|n| !param_forms(idx).iter().any(|f| f.iter().any(|x| x == *n))).copied().unwrap_or(given[0]);
+        let hint =
+            crate::diagnostic::suggest(unknown, all.iter().map(|s| s.as_str())).map(|s| format!("; did you mean `{}`?", s)).unwrap_or_default();
+        return Err(format!("`{}` has no parameter named `{}` (its parameters are: {}){}", b.name, unknown, all.join(", "), hint));
+    };
     let mut slots: Vec<Option<Value>> = pos.drain(..).map(Some).collect();
     for (n, v) in named {
-        let Some(i) = names.iter().position(|x| **x == *n) else {
-            let hint =
-                crate::diagnostic::suggest(&n, names.iter().map(|s| s.as_str())).map(|s| format!("; did you mean `{}`?", s)).unwrap_or_default();
-            return Err(format!("`{}` has no parameter named `{}` (its parameters are: {}){}", b.name, n, names.join(", "), hint));
-        };
+        let i = names.iter().position(|x| **x == *n).unwrap_or(0);
         if slots.len() <= i {
             slots.resize(i + 1, None);
         }
@@ -2107,14 +2144,31 @@ fn b_split(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         return Ok(Value::list(s.split_whitespace().map(Value::str).collect()));
     }
     let sep = str_arg(it, &a, 1, "split", sp)?;
-    if sep.is_empty() {
-        return Ok(Value::list(s.chars().map(|c| Value::str(c.to_string())).collect()));
-    }
-    if a.len() == 3 {
+    let limit = if a.len() == 3 {
         let n = usize_arg(it, &a, 2, "split", sp)?;
         if n == 0 {
             return Err(it.err(sp, "E0216", "`split` limit must be at least 1"));
         }
+        Some(n)
+    } else {
+        None
+    };
+    if sep.is_empty() {
+        // Split into characters; with a limit, the last piece keeps the rest.
+        let n = limit.unwrap_or(usize::MAX);
+        let mut out = Vec::new();
+        let mut rest = s;
+        while out.len() + 1 < n {
+            let Some(c) = rest.chars().next() else { break };
+            out.push(Value::str(c.to_string()));
+            rest = &rest[c.len_utf8()..];
+        }
+        if !rest.is_empty() {
+            out.push(Value::str(rest));
+        }
+        return Ok(Value::list(out));
+    }
+    if let Some(n) = limit {
         return Ok(Value::list(s.splitn(n, sep).map(Value::str).collect()));
     }
     Ok(Value::list(s.split(sep).map(Value::str).collect()))

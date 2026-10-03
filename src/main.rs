@@ -181,9 +181,13 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
             load_errors += 1;
             continue;
         };
-        // Run top-level statements (but not `main`), with output suppressed.
+        // Run top-level statements (but not `main`), with output suppressed
+        // and a step budget, so that a runaway loop is reported.
         it.silent = true;
+        it.budget = Some(opts.budget.saturating_mul(10));
+        it.ticks = 0;
         let r = it.run_program(&prog);
+        it.budget = None;
         it.silent = false;
         if let Err(cogito::interp::Ctrl::Error(d)) = r {
             cogito::err_out!("{}", d.render(&it.ctx.sm, opts.color));
@@ -459,12 +463,38 @@ fn real_main() -> ExitCode {
     }
 }
 
+/// The soft limit on this process's address space (`ulimit -v`), if any.
+fn address_space_limit() -> Option<u64> {
+    let limits = std::fs::read_to_string("/proc/self/limits").ok()?;
+    let line = limits.lines().find(|l| l.starts_with("Max address space"))?;
+    line.split_whitespace().nth(3)?.parse().ok()
+}
+
 fn main() -> ExitCode {
     // Run on a thread with a large stack so that deeply recursive Cogito
-    // programs hit Cogito's own (friendly) recursion limit first.
-    // The stack is reserved, not committed, so a large size costs nothing
-    // until it is used.
-    let stack = usize::try_from(4u64 << 30).unwrap_or(512 << 20);
-    let child = std::thread::Builder::new().stack_size(stack).spawn(real_main).expect("failed to start interpreter thread");
-    child.join().unwrap_or(ExitCode::from(101))
+    // programs hit Cogito's own (friendly) recursion limit first. The stack
+    // is reserved, not committed, so a large size costs nothing until it is
+    // used, unless the address space is limited: then take a quarter of the
+    // limit, and allow proportionally fewer nested calls.
+    const FULL: u64 = 4 << 30;
+    let mut stack = FULL;
+    if let Some(limit) = address_space_limit() {
+        stack = stack.min(limit / 4);
+    }
+    let user_depth = std::env::var_os("COGITO_MAX_DEPTH").is_some();
+    loop {
+        let size = usize::try_from(stack).unwrap_or(512 << 20);
+        if stack < FULL && !user_depth {
+            // About 40 KB of stack per nested call (100,000 calls in 4 GB).
+            std::env::set_var("COGITO_MAX_DEPTH", (stack / (FULL / 100_000)).max(100).to_string());
+        }
+        match std::thread::Builder::new().stack_size(size).spawn(real_main) {
+            Ok(child) => return child.join().unwrap_or(ExitCode::from(101)),
+            Err(_) if stack > (16 << 20) => stack /= 4,
+            Err(e) => {
+                cogito::err_outln!("error: cannot start the interpreter: {}", e);
+                return ExitCode::from(101);
+            }
+        }
+    }
 }

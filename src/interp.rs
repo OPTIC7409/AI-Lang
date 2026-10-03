@@ -645,20 +645,26 @@ impl Interp {
                 _ => {}
             }
         }
-        let (root, steps) = self.eval_place(target, env)?;
+        let (root, mut steps) = self.eval_place(target, env)?;
         let types = self.place_types(&root, &steps, decl, env);
-        // Map keys must have the declared key type.
-        for (k, st) in steps.iter().enumerate() {
-            if let (Some(Ty::Map(kt, _)), Step::Index(key)) = (&types[k], st) {
+        // Map keys must have the declared key type (an Int key becomes a
+        // Float where Float keys are declared).
+        for k in 0..steps.len() {
+            if let (Some(Ty::Map(kt, _)), Step::Index(key)) = (&types[k], &steps[k]) {
                 if !self.has_type(key, kt, false) {
-                    return Err(self.fail(
-                        self.diag(
-                            span,
-                            "E0200",
-                            format!("type mismatch in assignment to `{}`: the key {} is not a {}", self.snippet(span), short_repr(key), kt),
-                        )
-                        .help("the map was declared with a key type, and every new key must have it"),
-                    ));
+                    match self.conform(key.clone(), kt) {
+                        Ok(v) => steps[k] = Step::Index(v),
+                        Err(_) => {
+                            return Err(self.fail(
+                                self.diag(
+                                    span,
+                                    "E0200",
+                                    format!("type mismatch in assignment to `{}`: the key {} is not a {}", self.snippet(span), short_repr(key), kt),
+                                )
+                                .help("the map was declared with a key type, and every new key must have it"),
+                            ))
+                        }
+                    }
                 }
             }
         }
@@ -1067,7 +1073,20 @@ impl Interp {
             }
             ExprKind::Index { target, index } => {
                 let v = self.eval(target, env)?;
-                let i = self.eval(index, env)?;
+                let mut i = self.eval(index, env)?;
+                // `xs[a..=-1]`: an inclusive end counted from the back runs
+                // through that element (the stored exclusive end, -1 + 1 = 0,
+                // would otherwise mean the front).
+                if let (ExprKind::Range { inclusive: true, end: Some(_), .. }, Value::Range(r)) = (&index.kind, &i) {
+                    if let Some(end) = r.end.filter(|end| *end <= 0) {
+                        let len = match &v {
+                            Value::List(xs) | Value::Tuple(xs) => xs.len(),
+                            Value::Str(s) => s.char_len(),
+                            _ => 0,
+                        };
+                        i = Value::Range(Rc::new(RangeVal { start: r.start, end: Some(end + len as i128) }));
+                    }
+                }
                 self.index_value(v, i, e.span)
             }
             ExprKind::Call { callee, args } => {
@@ -1713,6 +1732,7 @@ impl Interp {
                     digits
                 }
             }
+            (Some('e' | '%'), Value::Float(f)) if !f.is_finite() => format_float(*f),
             (Some('e'), x) if numeric => {
                 // Python style: 1.234500e+03
                 let f = x.as_f64().unwrap();
@@ -1745,7 +1765,9 @@ impl Interp {
             (None, Value::Str(s)) if spec.precision.is_some() => s.chars().take(spec.precision.unwrap()).collect(),
             _ => display(v),
         };
-        if spec.group && numeric && spec.kind.is_none() {
+        // Only plain decimal digits are grouped (not `1e16`, `inf` or `nan`).
+        let finite_digits = !body.contains(|c: char| c.is_ascii_alphabetic());
+        if spec.group && numeric && spec.kind.is_none() && finite_digits {
             body = group_thousands(&body);
         }
         if spec.plus && numeric && !body.starts_with('-') {
@@ -1754,7 +1776,7 @@ impl Interp {
         let len = body.chars().count();
         if spec.width > len {
             let pad = spec.width - len;
-            if spec.zero && numeric && spec.align.is_none() {
+            if spec.zero && numeric && finite_digits && spec.align.is_none() {
                 let (sign, rest) = if body.starts_with('-') || body.starts_with('+') { body.split_at(1) } else { ("", body.as_str()) };
                 body = format!("{}{}{}", sign, "0".repeat(pad), rest);
             } else {
@@ -2462,7 +2484,18 @@ impl Interp {
                 match self.eval(en, env)? {
                     Value::Bool(true) => {}
                     Value::Bool(false) => {
-                        let wh = self.where_values(en, env);
+                        // `old(e)` values are kept in hidden variables named `old#N`.
+                        let wh: Vec<String> = self
+                            .where_values(en, env)
+                            .into_iter()
+                            .map(|w| {
+                                let old = w.strip_prefix("old#").and_then(|r| r.split_once(" = ")).and_then(|(n, v)| {
+                                    let (e, _) = def.olds.get(n.parse::<usize>().ok()?)?;
+                                    Some(format!("old({}) = {}", self.snippet(e.span), v))
+                                });
+                                old.unwrap_or(w)
+                            })
+                            .collect();
                         let mut d = self
                             .diag(en.span, "E0302", format!("postcondition of `{}` violated: `{}`", def.display_name(), self.snippet(en.span)))
                             .label("this promise was not kept");
@@ -2473,7 +2506,13 @@ impl Interp {
                             .params
                             .iter()
                             .filter(|p| !wh.iter().any(|w| w.starts_with(&format!("{} = ", p.name))))
-                            .map(|p| format!("{} = {}", p.name, short_repr(&env.locals[p.slot as usize])))
+                            .map(|p| {
+                                let label = match &p.pat {
+                                    Some(pat) => self.snippet(pat.span),
+                                    None => p.name.to_string(),
+                                };
+                                format!("{} = {}", label, short_repr(&env.locals[p.slot as usize]))
+                            })
                             .collect();
                         if !args.is_empty() {
                             d = d.note(format!("called with {}", args.join(", ")));
@@ -2490,20 +2529,49 @@ impl Interp {
 
     #[allow(clippy::too_many_arguments)]
     fn mutating_call(&mut self, receiver: &Expr, method: &Var, method_span: Span, args: &[Arg], span: Span, decl: Option<&Ty>, env: &mut Env) -> R {
-        let (pos, named) = self.eval_args(args, env, None)?;
+        let (mut pos, named) = self.eval_args(args, env, None)?;
         let (root, steps) = self.eval_place(receiver, env)?;
-        let f = if method.res == VarRes::Unresolved {
-            // A mutating function from the module that declared the receiver's type.
-            let found = self.root_value(&root, env).and_then(|v| peek_place(v, &steps)).and_then(|v| self.home_method(v, &method.name));
-            match found {
-                Some(f) => f,
-                None => return Err(self.err(method_span, "E0100", format!("undefined function `{}`", method.name))),
+        // As for other method calls, a function from the module that
+        // declared the receiver's type comes first.
+        let home = self.root_value(&root, env).and_then(|v| peek_place(v, &steps)).and_then(|v| self.home_method(v, &method.name));
+        let f = match home {
+            Some(f) => f,
+            None if method.res == VarRes::Unresolved => {
+                return Err(self.err(method_span, "E0100", format!("undefined function `{}`", method.name)));
             }
-        } else {
-            self.load(method, span, env)?
+            None => self.load(method, span, env)?,
         };
         let types = self.place_types(&root, &steps, decl, env);
         let expected = types[steps.len()].clone();
+        // Built-ins that add elements: check (and convert) the new elements
+        // first, so that a failing call changes nothing.
+        if let (Some(t), Value::Builtin(i)) = (&expected, &f) {
+            let name = BUILTINS[*i as usize].name;
+            let checks: Vec<(usize, Ty)> = match (t, name) {
+                (Ty::List(et), "push!") => vec![(0, (**et).clone())],
+                (Ty::List(_), "extend!") => vec![(0, t.clone())],
+                (Ty::List(et), "insert!") => vec![(1, (**et).clone())],
+                (Ty::Map(kt, vt), "insert!") => vec![(0, (**kt).clone()), (1, (**vt).clone())],
+                _ => vec![],
+            };
+            for (k, want) in checks {
+                if k < pos.len() && !(name == "extend!" && !matches!(pos[k], Value::List(_))) {
+                    match self.conform(std::mem::take(&mut pos[k]), &want) {
+                        Ok(v) => pos[k] = v,
+                        Err(m) => {
+                            return Err(self.fail(
+                                self.diag(
+                                    span,
+                                    "E0200",
+                                    format!("`{}` would break the declared type of `{}`: {}", method.name, self.snippet(receiver.span), m),
+                                )
+                                .help("the variable (or field) was declared with a type, and every change must respect it; nothing was changed"),
+                            ))
+                        }
+                    }
+                }
+            }
+        }
         let stamps = if expected.is_some() { self.valid_stamps(&root, &steps, &types, env) } else { Vec::new() };
         let mut target = self.with_place(&root, &steps, false, env, receiver.span, std::mem::take)?;
         // While the call runs, the global is unavailable (it has been moved
@@ -2518,6 +2586,12 @@ impl Interp {
         let pre = match (&expected, &target) {
             (Some(t @ Ty::List(_)), Value::List(xs)) => Some((xs.checked() == t.fingerprint(), xs.len())),
             (Some(t @ Ty::Map(..)), Value::Map(m)) => Some((m.checked() == t.fingerprint(), m.len())),
+            _ => None,
+        };
+        // A user function whose parameter is not declared with the same type
+        // might break the caller's type; keep the old value to restore then.
+        let backup = match (&expected, &f) {
+            (Some(t), Value::Func(c)) if c.def.params.first().and_then(|p| p.ty.as_ref()).map(|pt| &pt.ty) != Some(t) => Some(target.clone()),
             _ => None,
         };
         let result = self.call_mutating(&f, &mut target, pos, named, span);
@@ -2554,6 +2628,13 @@ impl Interp {
                 match self.conform(target.clone(), t) {
                     Ok(v) => target = v,
                     Err(m) => {
+                        let restored = match backup {
+                            Some(old) => {
+                                target = old;
+                                "; the change was undone"
+                            }
+                            None => "",
+                        };
                         type_error = Some(
                             self.fail(
                                 self.diag(
@@ -2561,7 +2642,7 @@ impl Interp {
                                     "E0200",
                                     format!("`{}` broke the declared type of `{}`: {}", method.name, self.snippet(receiver.span), m),
                                 )
-                                .help("the variable (or field) was declared with a type, and every change must respect it"),
+                                .help(format!("the variable (or field) was declared with a type, and every change must respect it{}", restored)),
                             ),
                         )
                     }

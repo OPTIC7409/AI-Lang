@@ -115,13 +115,13 @@ test "a failing let pattern is an error" {
 }
 
 test "no matching arm is an error" {
-  # List patterns are checked when the match runs (literal and enum
-  # patterns are checked before the program starts).
-  let f = fn(xs) => match xs {
-    [x] => x
+  # Arms with guards are tried when the match runs; every other kind of
+  # pattern is checked for exhaustiveness before the program starts.
+  let f = fn(n) => match n {
+    k if k > 0 => "positive"
   }
-  assert f([1]) == 1
-  assert catch(fn() => f([1, 2])).is_err()
+  assert f(1) == "positive"
+  assert catch(fn() => f(-1)).is_err()
 }
 
 test "match guards" {

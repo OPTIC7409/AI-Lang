@@ -115,8 +115,11 @@ impl<'a> Gen<'a> {
         let mut s = String::new();
         for _ in 0..n {
             let r = self.rng.below(100);
-            if r < 70 {
+            if r < 62 {
                 s.push((b'a' + self.rng.below(26) as u8) as char);
+            } else if r < 74 {
+                // Whitespace, including line breaks, finds bugs in text code.
+                s.push([' ', ' ', ' ', '\n', '\t'][self.rng.below(5)]);
             } else if r < 88 {
                 s.push((b' ' + self.rng.below(95) as u8) as char);
             } else {

@@ -1,5 +1,7 @@
 # Regression tests for issues found by the second round of AI dogfooding.
 
+import "lib/queue.cog"
+
 type Heap = { items: List[Int] }
 
 fn set_at!(xs: List[Int], i: Int, v: Int) {
@@ -151,4 +153,80 @@ test "JSON object keys must stay distinct strings" {
   assert to_json([1: "a"]) == r#"{"1":"a"}"#
   assert catch(fn() => to_json([1: "a", "1": "b"])).is_err()
   assert catch(fn() => to_json([(1, 2): "a"])).is_err()
+}
+
+test "a module's functions come first in method syntax, mutating ones too" {
+  var q = queue.new()
+  q.push!(3)
+  q.push!(4)
+  assert q.len() == 2 and q.items == [3, 4]
+}
+
+var typed_list: List[Int] = [1]
+
+test "a failed mutation leaves the variable unchanged" {
+  assert catch(fn() => typed_list.push!("s")).is_err()
+  assert typed_list == [1]
+  var f: List[Float] = []
+  f.push!(1)
+  f.extend!([2, 3])
+  assert f == [1.0, 2.0, 3.0] and type_of(f[0]) == "Float"
+}
+
+test "annotations on destructuring bindings are enforced" {
+  var (a, b): (Int, Str) = (1, "x")
+  a = 2
+  assert a == 2 and b == "x"
+  assert catch(fn() => { var (c, _d): (Int, Int) = (1, 2); c = "no"; c }).is_err()
+}
+
+test "inclusive slices may end at a negative index" {
+  assert [1, 2, 3][-2..=-1] == [2, 3]
+  assert [1, 2, 3][..=-1] == [1, 2, 3]
+  assert "abc"[..=-1] == "abc"
+  assert [1, 2, 3][..=-2] == [1, 2]
+}
+
+test "formatting edge cases" {
+  assert "{1e16:,}" == "1e16"
+  assert "{inf:010}" == "       inf"
+  assert "{1234567.5:,}" == "1,234,567.5"
+}
+
+test "split with an empty separator respects the limit" {
+  assert "abc".split("", 2) == ["a", "bc"]
+  assert "abc".split("", 1) == ["abc"]
+}
+
+test "a Float equal to an Int is the same map key" {
+  let f = float(min_int)
+  assert [min_int: 1].has(f)
+  assert [min_int, f].unique().len() == 1
+}
+
+test "shared structure is compared and hashed quickly" {
+  var x = [1]
+  var y = [1]
+  for _ in 0..60 {
+    x = [x, x]
+    y = [y, y]
+  }
+  assert x == y
+  assert [x: 1].has(y)
+  assert compare(x, y) == Equal
+}
+
+test "anonymous records with fields in another order can be ordered" {
+  assert { a: 0, b: 9 } < { b: 0, a: 1 }
+}
+
+test "built-ins take named arguments in each of their forms" {
+  assert len(x: [1, 2]) == 2
+  assert Some(1).unwrap_or(default: 3) == 1
+  assert remove(["a": 1, "b": 2], k: "a") == ["b": 2]
+  assert remove([1, 2, 3], i: 0) == [2, 3]
+}
+
+property "a minimum string length steers generation" (s: Str) where s.len() > 30 {
+  assert s.len() > 30
 }

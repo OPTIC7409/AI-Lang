@@ -318,6 +318,36 @@ impl Hash for HKey {
 }
 
 fn hash_value<H: Hasher>(v: &Value, h: &mut H) {
+    hash_inner(v, h, &mut None)
+}
+
+/// Hashes of shared lists, by address (see `EqMemo`).
+type HashMemo = Option<HashMap<usize, u64>>;
+
+/// Hash an element of a list or variant. Lists inside other values are
+/// always hashed to a u64 of their own, so that a shared list is hashed
+/// once however many times it appears.
+fn hash_child<H: Hasher>(x: &Value, h: &mut H, memo: &mut HashMemo) {
+    if let Value::List(c) | Value::Tuple(c) = x {
+        let key = Rc::as_ptr(c) as *const u8 as usize;
+        let shared = Rc::strong_count(c) > 1;
+        if let (true, Some(v)) = (shared, memo.as_ref().and_then(|m| m.get(&key))) {
+            v.hash(h);
+            return;
+        }
+        let mut sub = std::collections::hash_map::DefaultHasher::new();
+        hash_inner(x, &mut sub, memo);
+        let v = sub.finish();
+        if shared {
+            memo.get_or_insert_with(Default::default).insert(key, v);
+        }
+        v.hash(h);
+        return;
+    }
+    hash_inner(x, h, memo)
+}
+
+fn hash_inner<H: Hasher>(v: &Value, h: &mut H, memo: &mut HashMemo) {
     match v {
         Value::Unit => 0u8.hash(h),
         Value::Bool(b) => {
@@ -329,7 +359,8 @@ fn hash_value<H: Hasher>(v: &Value, h: &mut H) {
             i.hash(h)
         }
         Value::Float(f) => {
-            if f.fract() == 0.0 && f.abs() < 9.0e18 {
+            // A Float equal to an Int must hash like it (`1.0 == 1`).
+            if f.fract() == 0.0 && *f >= -9_223_372_036_854_775_808.0 && *f < 9_223_372_036_854_775_808.0 {
                 2u8.hash(h);
                 (*f as i64).hash(h)
             } else {
@@ -345,7 +376,7 @@ fn hash_value<H: Hasher>(v: &Value, h: &mut H) {
             5u8.hash(h);
             xs.len().hash(h);
             for x in xs.iter() {
-                hash_value(x, h);
+                hash_child(x, h, memo);
             }
         }
         Value::Map(m) => {
@@ -361,7 +392,7 @@ fn hash_value<H: Hasher>(v: &Value, h: &mut H) {
             v.ty.id.hash(h);
             v.tag.hash(h);
             for x in &v.values {
-                hash_value(x, h);
+                hash_child(x, h, memo);
             }
         }
         Value::Range(r) => {
@@ -534,6 +565,36 @@ pub fn type_name(v: &Value) -> String {
 }
 
 pub fn values_equal(a: &Value, b: &Value) -> bool {
+    eq_inner(a, b, &mut None)
+}
+
+/// Pairs of shared nodes already known to be equal. Values may share
+/// structure (`x = [x, x]` doubles a list without copying it), so without
+/// this, comparing two such values could take exponential time.
+type EqMemo = Option<std::collections::HashSet<(usize, usize)>>;
+
+fn shared_pair<T>(x: &Rc<T>, y: &Rc<T>) -> Option<(usize, usize)> {
+    if Rc::strong_count(x) > 1 && Rc::strong_count(y) > 1 {
+        Some((Rc::as_ptr(x) as *const u8 as usize, Rc::as_ptr(y) as *const u8 as usize))
+    } else {
+        None
+    }
+}
+
+fn memo_eq(memo: &mut EqMemo, key: Option<(usize, usize)>, f: impl FnOnce(&mut EqMemo) -> bool) -> bool {
+    if let (Some(k), Some(m)) = (key, memo.as_ref()) {
+        if m.contains(&k) {
+            return true;
+        }
+    }
+    let r = f(memo);
+    if let (true, Some(k)) = (r, key) {
+        memo.get_or_insert_with(Default::default).insert(k);
+    }
+    r
+}
+
+fn eq_inner(a: &Value, b: &Value, memo: &mut EqMemo) -> bool {
     match (a, b) {
         (Value::Unit, Value::Unit) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
@@ -542,10 +603,12 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => cmp_int_float(*x, *y) == Some(Ordering::Equal),
         (Value::Str(x), Value::Str(y)) => Rc::ptr_eq(x, y) || x == y,
         (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
-            Rc::ptr_eq(x, y) || (x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b)))
+            Rc::ptr_eq(x, y) || (x.len() == y.len() && memo_eq(memo, shared_pair(x, y), |m| x.iter().zip(y.iter()).all(|(a, b)| eq_inner(a, b, m))))
         }
         (Value::Map(x), Value::Map(y)) => {
-            Rc::ptr_eq(x, y) || (x.len() == y.len() && x.entries.iter().all(|(k, v)| y.get(k).is_some_and(|w| values_equal(v, w))))
+            Rc::ptr_eq(x, y)
+                || (x.len() == y.len()
+                    && memo_eq(memo, shared_pair(x, y), |m| x.entries.iter().all(|(k, v)| y.get(k).is_some_and(|w| eq_inner(v, w, m)))))
         }
         (Value::Record(x), Value::Record(y)) => {
             let same_ty = match (&x.ty, &y.ty) {
@@ -553,10 +616,14 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                 (None, None) => true,
                 _ => false,
             };
-            same_ty && x.values.len() == y.values.len() && x.names.iter().zip(&x.values).all(|(n, v)| y.get(n).is_some_and(|w| values_equal(v, w)))
+            same_ty
+                && x.values.len() == y.values.len()
+                && memo_eq(memo, shared_pair(x, y), |m| x.names.iter().zip(&x.values).all(|(n, v)| y.get(n).is_some_and(|w| eq_inner(v, w, m))))
         }
         (Value::Variant(x), Value::Variant(y)) => {
-            x.ty.id == y.ty.id && x.tag == y.tag && x.values.iter().zip(&y.values).all(|(a, b)| values_equal(a, b))
+            x.ty.id == y.ty.id
+                && x.tag == y.tag
+                && memo_eq(memo, shared_pair(x, y), |m| x.values.iter().zip(&y.values).all(|(a, b)| eq_inner(a, b, m)))
         }
         (Value::Range(x), Value::Range(y)) => x.start == y.start && x.end == y.end,
         (Value::Func(x), Value::Func(y)) => Rc::ptr_eq(x, y),
@@ -569,6 +636,34 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 
 /// Ordering between two values, or `None` if they cannot be compared.
 pub fn compare(a: &Value, b: &Value) -> Option<Ordering> {
+    cmp_inner(a, b, &mut None)
+}
+
+fn cmp_seq<'a>(xs: impl Iterator<Item = (&'a Value, &'a Value)>, memo: &mut EqMemo) -> Option<Ordering> {
+    for (a, b) in xs {
+        match cmp_inner(a, b, memo)? {
+            Ordering::Equal => continue,
+            o => return Some(o),
+        }
+    }
+    Some(Ordering::Equal)
+}
+
+/// Like `memo_eq`, for orderings: shared pairs known to be equal are skipped.
+fn memo_cmp(memo: &mut EqMemo, key: Option<(usize, usize)>, f: impl FnOnce(&mut EqMemo) -> Option<Ordering>) -> Option<Ordering> {
+    if let (Some(k), Some(m)) = (key, memo.as_ref()) {
+        if m.contains(&k) {
+            return Some(Ordering::Equal);
+        }
+    }
+    let r = f(memo);
+    if let (Some(Ordering::Equal), Some(k)) = (r, key) {
+        memo.get_or_insert_with(Default::default).insert(k);
+    }
+    r
+}
+
+fn cmp_inner(a: &Value, b: &Value, memo: &mut EqMemo) -> Option<Ordering> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
@@ -578,34 +673,35 @@ pub fn compare(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
         (Value::Unit, Value::Unit) => Some(Ordering::Equal),
         (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
-            for (a, b) in x.iter().zip(y.iter()) {
-                match compare(a, b)? {
-                    Ordering::Equal => continue,
-                    o => return Some(o),
-                }
+            if Rc::ptr_eq(x, y) {
+                return Some(Ordering::Equal);
             }
-            Some(x.len().cmp(&y.len()))
+            match memo_cmp(memo, shared_pair(x, y), |m| cmp_seq(x.iter().zip(y.iter()), m))? {
+                Ordering::Equal => Some(x.len().cmp(&y.len())),
+                o => Some(o),
+            }
         }
         (Value::Variant(x), Value::Variant(y)) if x.ty.id == y.ty.id => {
             if x.tag != y.tag {
                 return Some(x.tag.cmp(&y.tag));
             }
-            for (a, b) in x.values.iter().zip(&y.values) {
-                match compare(a, b)? {
-                    Ordering::Equal => continue,
-                    o => return Some(o),
-                }
-            }
-            Some(Ordering::Equal)
+            memo_cmp(memo, shared_pair(x, y), |m| cmp_seq(x.values.iter().zip(&y.values), m))
         }
-        (Value::Record(x), Value::Record(y)) if x.ty.as_ref().map(|t| t.id) == y.ty.as_ref().map(|t| t.id) && x.names == y.names => {
-            for (a, b) in x.values.iter().zip(&y.values) {
-                match compare(a, b)? {
-                    Ordering::Equal => continue,
-                    o => return Some(o),
-                }
+        (Value::Record(x), Value::Record(y)) if x.ty.as_ref().map(|t| t.id) == y.ty.as_ref().map(|t| t.id) => {
+            if x.names == y.names {
+                return memo_cmp(memo, shared_pair(x, y), |m| cmp_seq(x.values.iter().zip(&y.values), m));
             }
-            Some(Ordering::Equal)
+            // Anonymous records with the same fields in another order compare
+            // field by field in alphabetical order of the names.
+            let mut names: Vec<&Name> = x.names.iter().collect();
+            names.sort();
+            let mut other: Vec<&Name> = y.names.iter().collect();
+            other.sort();
+            if names != other {
+                return None;
+            }
+            let pairs: Option<Vec<(&Value, &Value)>> = names.iter().map(|n| Some((x.get(n)?, y.get(n)?))).collect();
+            cmp_seq(pairs?.into_iter(), memo)
         }
         _ => None,
     }

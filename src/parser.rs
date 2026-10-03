@@ -387,6 +387,11 @@ impl<'s> Parser<'s> {
             };
             let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
             let default = if self.eat(&Tok::Assign) { Some(self.expr()?) } else { None };
+            if default.is_none() && params.iter().any(|p: &Param| p.default.is_some()) {
+                return Err(Diagnostic::error("E0010", format!("parameter `{}` needs a default value, because an earlier parameter has one", name))
+                    .at(span)
+                    .help("parameters with default values must come after all the others"));
+            }
             params.push(Param { name, span, ty, default, slot: 0, pat });
             if !self.eat(&Tok::Comma) {
                 break;
@@ -936,10 +941,21 @@ impl<'s> Parser<'s> {
                     // `push!(xs, 1)` is sugar for `xs.push!(1)`.
                     if let ExprKind::Var(v) = &e.kind {
                         if v.name.ends_with('!') {
-                            if args.is_empty() || args[0].name.is_some() {
+                            if args.is_empty() {
                                 return Err(Diagnostic::error("E0111", format!("`{}` mutates its first argument, so it needs one", v.name))
                                     .at(span)
                                     .help(format!("call it as `variable.{}(...)`", v.name)));
+                            }
+                            if let Some(n) = &args[0].name {
+                                return Err(Diagnostic::error(
+                                    "E0111",
+                                    format!("the variable that `{}` changes cannot be passed by name (`{}: ...`)", v.name, n),
+                                )
+                                .at(span)
+                                .help(format!(
+                                    "pass the variable first, without a name: `{}(variable, ...)` or `variable.{}(...)`",
+                                    v.name, v.name
+                                )));
                             }
                             let receiver = args.remove(0).value;
                             let method = Var::new(v.name.clone());

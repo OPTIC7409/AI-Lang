@@ -1,6 +1,6 @@
 # expect: E0208
-let xs = [1, 2]
-let r = match xs {
-  [] => "empty"
-  [x] => "one"
+let n = -3
+let r = match n {
+  k if k > 0 => "positive"
+  k if k == 0 => "zero"
 }

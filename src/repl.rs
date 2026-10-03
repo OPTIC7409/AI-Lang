@@ -5,7 +5,7 @@ use crate::builtins::BUILTINS;
 use crate::diagnostic::Colors;
 use crate::interp::{Ctrl, Env, Interp};
 use crate::value::{repr, Value};
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 
 /// Whether the input so far leaves a bracket or a triple-quoted string open.
@@ -46,7 +46,44 @@ pub fn needs_more(src: &str) -> bool {
         return true;
     }
     let t = src.trim_end();
-    t.ends_with(['+', '-', '*', '/', '%', '=', ',', '.']) || t.ends_with("|>") || t.ends_with(" and") || t.ends_with(" or")
+    if t.ends_with(['+', '-', '*', '/', '%', '=', ',', '.']) || t.ends_with("|>") || t.ends_with(" and") || t.ends_with(" or") {
+        return true;
+    }
+    // A function signature (possibly with contracts) still needs its body.
+    let first = src.trim_start();
+    let last = t.lines().last().unwrap_or("").trim_start();
+    let is_fn = first.starts_with("fn ") && !first.starts_with("fn(");
+    if is_fn && !src.contains("=>") && !src.contains('{') {
+        return true;
+    }
+    if is_fn && (last.starts_with("requires") || last.starts_with("ensures")) && !last.contains("=>") {
+        return true;
+    }
+    false
+}
+
+/// Whether a line continues the previous input: `| Variant(...)`,
+/// `.method()`, `and ...`, `requires ...`, and so on.
+pub fn continues(line: &str) -> bool {
+    let t = line.trim_start();
+    (t.starts_with('|') && !t.starts_with("||"))
+        || (t.starts_with('.') && !t.starts_with(".."))
+        || t.starts_with("and ")
+        || t.starts_with("or ")
+        || t.starts_with("requires ")
+        || t.starts_with("ensures ")
+        || t.starts_with("else")
+        || t.starts_with("=>")
+}
+
+/// Read one line of input, replacing invalid UTF-8 rather than stopping.
+fn read_line_lossy(stdin: &std::io::Stdin) -> Option<String> {
+    use std::io::BufRead;
+    let mut bytes = Vec::new();
+    match stdin.lock().read_until(b'\n', &mut bytes) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+    }
 }
 
 pub fn run(it: &mut Interp, color: bool) {
@@ -59,17 +96,20 @@ pub fn run(it: &mut Interp, color: bool) {
     }
     let mut ns = Namespace::default();
     let mut input_no = 0;
+    // Piped input can be read ahead, so a line that continues the previous
+    // one (`| Variant`, `.method()`, `requires ...`) joins it.
+    let mut pending: Option<String> = None;
     loop {
         let mut src = String::new();
         let mut first = true;
         loop {
-            if interactive {
+            if interactive && pending.is_none() {
                 crate::out!("{}", if first { ">>> " } else { "... " });
                 let _ = std::io::stdout().flush();
             }
-            let mut line = String::new();
-            match stdin.lock().read_line(&mut line) {
-                Ok(0) | Err(_) => {
+            let line = match pending.take().or_else(|| read_line_lossy(&stdin)) {
+                Some(l) => l,
+                None => {
                     if src.trim().is_empty() {
                         if interactive {
                             crate::outln!();
@@ -78,13 +118,28 @@ pub fn run(it: &mut Interp, color: bool) {
                     }
                     break;
                 }
-                Ok(_) => {}
+            };
+            // Interactively, a type's variants on following lines continue it
+            // until a blank line.
+            if interactive && !first && line.trim().is_empty() {
+                break;
             }
             src.push_str(&line);
             first = false;
-            if !needs_more(&src) {
-                break;
+            let open_type = interactive && src.trim_start().starts_with("type ") && line.trim_start().starts_with('|');
+            if needs_more(&src) || open_type {
+                continue;
             }
+            if !interactive {
+                match read_line_lossy(&stdin) {
+                    Some(next) if continues(&next) => {
+                        pending = Some(next);
+                        continue;
+                    }
+                    next => pending = next,
+                }
+            }
+            break;
         }
         let trimmed = src.trim();
         if trimmed.is_empty() {

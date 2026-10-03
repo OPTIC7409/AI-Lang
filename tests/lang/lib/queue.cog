@@ -1,0 +1,10 @@
+# A module whose functions share names with built-ins (used by round2.cog).
+type Queue = { items: List[Int] }
+
+fn new() -> Queue => Queue(items: [])
+
+fn push!(q: Queue, x: Int) {
+  q.items.push!(x)
+}
+
+fn len(q: Queue) -> Int => q.items.len()
