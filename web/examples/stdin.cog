@@ -1,0 +1,17 @@
+# Programs can read standard input. Edit the text under "Standard input"
+# (below the editor) and press Run again.
+
+let lines = read_stdin().lines().filter(fn(l) => l.trim() != "")
+var numbers: List[Float] = []
+for line in lines {
+  match parse_float(line) {
+    Some(x) => numbers.push!(x)
+    None => eprint("skipping `{line}`: not a number")
+  }
+}
+if numbers.is_empty() {
+  print("no numbers")
+} else {
+  let mean = numbers.sum() / numbers.len()
+  print("{numbers.len()} numbers, mean {mean:.2}, min {numbers.min().unwrap()}, max {numbers.max().unwrap()}")
+}

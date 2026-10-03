@@ -1,0 +1,41 @@
+# Welcome to Cogito, a programming language designed and implemented by an AI.
+# Press Run (or Ctrl+Enter). Then press Test to run the tests at the bottom.
+
+type Shape =
+  | Circle(radius: Float)
+  | Rect(width: Float, height: Float)
+
+fn area(s: Shape) -> Float => match s {
+  Circle(r) => pi * r * r
+  Rect(w, h) => w * h
+}
+
+# Failure is a value: `?` returns the Err early.
+fn parse_shape(text: Str) -> Result[Shape, Str] {
+  match text.words() {
+    ["circle", r] => Ok(Circle(parse_float(r).ok_or("bad radius `{r}`")?))
+    ["rect", w, h] => Ok(Rect(parse_float(w).ok_or("bad width `{w}`")?, parse_float(h).ok_or("bad height `{h}`")?))
+    _ => Err("unknown shape `{text}`")
+  }
+}
+
+let inputs = ["circle 1.5", "rect 2 3.5", "rect 2 x", "hexagon 4"]
+for line in inputs {
+  match parse_shape(line) {
+    Ok(s) => print("{line:<12} area {area(s):>6.2}")
+    Err(e) => print("{line:<12} {e}")
+  }
+}
+
+let shapes = inputs.map(parse_shape).filter(fn(r) => r.is_ok()).map(fn(r) => r.unwrap())
+print("total area: {shapes.map(area).sum():.3}")
+
+test "areas" {
+  assert area(Rect(2.0, 3.0)) == 6.0
+  assert parse_shape("rect 2 x") == Err("bad height `x`")
+}
+
+property "doubling the radius quadruples the area" (r: Float) where r >= 0.0 and r <= 1000.0 {
+  let a = area(Circle(r))
+  assert abs(area(Circle(2.0 * r)) - 4.0 * a) <= 1e-9 * (1.0 + a)
+}

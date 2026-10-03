@@ -1,0 +1,20 @@
+# A contract states what a function needs (`requires`) and what it
+# promises (`ensures`). Press Verify: Cogito generates random inputs,
+# checks the promise on each, and shrinks the first failure to a small
+# counterexample.
+
+fn average(xs: List[Float]) -> Float
+  requires not xs.is_empty()
+  ensures xs.min().unwrap() <= result and result <= xs.max().unwrap()
+{
+  xs.sum() / xs.len()
+}
+
+# The promise looks obviously true, but floating-point rounding breaks it.
+# To fix it, replace the body with:
+#
+#   clamp(xs.sum() / xs.len(), xs.min().unwrap(), xs.max().unwrap())
+#
+# and press Verify again.
+
+print(average([1.0, 2.0, 4.0]))

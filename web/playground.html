@@ -1,0 +1,682 @@
+<title>Cogito Playground</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: an instrument panel. Source on the left, readout on the right,
+   controls in one strip between the masthead and the panes. */
+:root {
+  --bg: #e9edf1;
+  --panel: #fbfcfd;
+  --sunken: #f2f5f8;
+  --ink: #17202b;
+  --muted: #5d6978;
+  --line: #d2d9e1;
+  --accent: #1f4fd1;
+  --accent-ink: #ffffff;
+  --focus: #1f4fd1;
+  --t-kw: #1f4fd1;
+  --t-str: #0b7656;
+  --t-interp: #0a5c86;
+  --t-num: #9a4a00;
+  --t-type: #94285f;
+  --t-comment: #737f8e;
+  --t-fn: #17325f;
+  --t-mut: #c03d0a;
+  --ok: #1d7a3d;
+  --warn: #9a5a00;
+  --err: #c42727;
+  --info: #1f4fd1;
+  --hint: #0d7287;
+  --font-display: "Instrument Serif", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --font-ui: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-code: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --code-size: 13.5px;
+  --code-line: 1.6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1218; --panel: #131a23; --sunken: #0f151d; --ink: #dde4ec; --muted: #8d99a8; --line: #253040;
+    --accent: #7ea3ff; --accent-ink: #0b1220; --focus: #7ea3ff;
+    --t-kw: #8fb0ff; --t-str: #5fd0a3; --t-interp: #79c8ef; --t-num: #f0a35e; --t-type: #f08dbf; --t-comment: #6f7c8c; --t-fn: #cfdcff; --t-mut: #ff8a5c;
+    --ok: #5bcf88; --warn: #f0b84b; --err: #ff6f6f; --info: #8fb0ff; --hint: #6fd3e6;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1218; --panel: #131a23; --sunken: #0f151d; --ink: #dde4ec; --muted: #8d99a8; --line: #253040;
+  --accent: #7ea3ff; --accent-ink: #0b1220; --focus: #7ea3ff;
+  --t-kw: #8fb0ff; --t-str: #5fd0a3; --t-interp: #79c8ef; --t-num: #f0a35e; --t-type: #f08dbf; --t-comment: #6f7c8c; --t-fn: #cfdcff; --t-mut: #ff8a5c;
+  --ok: #5bcf88; --warn: #f0b84b; --err: #ff6f6f; --info: #8fb0ff; --hint: #6fd3e6;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding-inline: 20px;
+  padding-block: 18px 22px;
+}
+
+/* masthead */
+.mast { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 24px; }
+.mark { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; min-width: 0; }
+.mark h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 40px;
+  line-height: 1;
+  letter-spacing: 0.005em;
+}
+.mark h1 em { font-style: italic; color: var(--accent); }
+.mark p { margin: 0; color: var(--muted); font-size: 14px; max-width: 46ch; }
+.mast .meta { color: var(--muted); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+
+/* control strip */
+.strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+button, select {
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+button .key { font-family: var(--font-code); font-size: 11px; opacity: 0.75; margin-left: 6px; }
+button.stop { color: var(--err); border-color: var(--err); background: transparent; }
+.what { color: var(--muted); font-size: 13px; flex: 1 1 240px; min-width: 0; }
+.picker { display: flex; align-items: center; gap: 8px; }
+.picker label { color: var(--muted); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+select { padding-right: 28px; max-width: 100%; }
+
+/* panes */
+.panes {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
+  gap: 14px;
+  min-height: 520px;
+}
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.pane-head .file { font-family: var(--font-code); text-transform: none; letter-spacing: 0; color: var(--ink); font-size: 12.5px; }
+
+/* editor */
+.editor {
+  position: relative;
+  flex: 1;
+  min-height: 360px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  background: var(--panel);
+  overflow: hidden;
+}
+.gutter {
+  margin: 0;
+  padding: 14px 10px 14px 14px;
+  font-family: var(--font-code);
+  font-size: var(--code-size);
+  line-height: var(--code-line);
+  color: var(--t-comment);
+  text-align: right;
+  user-select: none;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+  background: var(--sunken);
+  min-width: 3.4em;
+}
+.code-wrap { position: relative; min-width: 0; overflow: hidden; }
+.code-wrap pre, .code-wrap textarea {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 14px 16px 14px 14px;
+  font-family: var(--font-code);
+  font-size: var(--code-size);
+  line-height: var(--code-line);
+  tab-size: 2;
+  white-space: pre;
+  word-wrap: normal;
+  overflow: auto;
+  border: 0;
+}
+.code-wrap pre { pointer-events: none; overflow: hidden; color: var(--ink); }
+.code-wrap textarea {
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  outline: none;
+}
+.code-wrap textarea::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); color: transparent; }
+.tk-kw { color: var(--t-kw); font-weight: 500; }
+.tk-str { color: var(--t-str); }
+.tk-in { color: var(--t-interp); }
+.tk-num { color: var(--t-num); }
+.tk-ty { color: var(--t-type); }
+.tk-com { color: var(--t-comment); font-style: italic; }
+.tk-fn { color: var(--t-fn); font-weight: 500; }
+.tk-mut { color: var(--t-mut); font-weight: 500; }
+
+details.stdin { border-top: 1px solid var(--line); }
+details.stdin summary {
+  cursor: pointer;
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+details.stdin textarea {
+  display: block;
+  width: 100%;
+  height: 84px;
+  resize: vertical;
+  border: 0;
+  border-top: 1px solid var(--line);
+  padding: 10px 14px;
+  font-family: var(--font-code);
+  font-size: 13px;
+  background: var(--sunken);
+  color: var(--ink);
+}
+
+/* output */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-family: var(--font-code);
+  font-size: 11.5px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.status.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.status.fail { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+.status.busy { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.status.busy::before { animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .status.busy::before { animation: none; } }
+.output {
+  flex: 1;
+  margin: 0;
+  padding: 14px 16px;
+  min-height: 240px;
+  overflow: auto;
+  font-family: var(--font-code);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre;
+  color: var(--ink);
+}
+.output .diag { display: block; }
+.output .placeholder { color: var(--muted); font-family: var(--font-ui); white-space: normal; }
+.a-b { font-weight: 600; }
+.a-d { opacity: 0.68; }
+.a-r { color: var(--err); }
+.a-y { color: var(--warn); }
+.a-g { color: var(--ok); }
+.a-u { color: var(--info); }
+.a-c { color: var(--hint); }
+.result-line { color: var(--muted); }
+
+/* notes */
+.notes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px 28px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.notes p { margin: 0; max-width: 62ch; }
+.notes b { color: var(--ink); font-weight: 600; }
+.notes code { font-family: var(--font-code); font-size: 12.5px; color: var(--ink); }
+
+@media (max-width: 860px) {
+  .panes { grid-template-columns: minmax(0, 1fr); }
+  .editor { min-height: 340px; }
+  .mark h1 { font-size: 34px; }
+}
+@media (max-width: 480px) {
+  .page { padding-inline: 16px; }
+  :root { --code-size: 12.5px; }
+  .gutter { min-width: 2.8em; padding-left: 8px; }
+}
+</style>
+
+<div class="page">
+  <header class="mast">
+    <div class="mark">
+      <h1>Cogito <em>playground</em></h1>
+      <p>A programming language designed and implemented by an AI, running in your browser through WebAssembly.</p>
+    </div>
+    <span class="meta" id="version">Interpreter loading…</span>
+  </header>
+
+  <section class="strip" aria-label="Controls">
+    <div class="actions">
+      <button class="primary" id="btn-run" disabled>Run<span class="key" id="run-key">Ctrl ↵</span></button>
+      <button id="btn-test" disabled title="Run the test and property blocks">Test</button>
+      <button id="btn-verify" disabled title="Check function contracts against generated inputs">Verify</button>
+      <button id="btn-check" disabled title="Report errors and warnings without running">Check</button>
+      <button class="stop" id="btn-stop" hidden>Stop</button>
+    </div>
+    <p class="what" id="what">Loading the interpreter…</p>
+    <div class="picker">
+      <label for="example">Example</label>
+      <select id="example"></select>
+    </div>
+  </section>
+
+  <main class="panes">
+    <section class="pane" aria-label="Program">
+      <div class="pane-head"><span class="file">playground.cog</span><span id="lines">0 lines</span></div>
+      <div class="editor">
+        <pre class="gutter" id="gutter" aria-hidden="true">1</pre>
+        <div class="code-wrap">
+          <pre id="highlight" aria-hidden="true"></pre>
+          <textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="Cogito source code"></textarea>
+        </div>
+      </div>
+      <details class="stdin" id="stdin-box">
+        <summary>Standard input</summary>
+        <textarea id="stdin" spellcheck="false" aria-label="Standard input for read_line, read_stdin and input" placeholder="Text that read_line(), read_stdin() and input() will read"></textarea>
+      </details>
+    </section>
+
+    <section class="pane" aria-label="Output">
+      <div class="pane-head"><span>Output</span><span class="status" id="status">idle</span></div>
+      <pre class="output" id="output" aria-live="polite"><span class="placeholder">Output appears here.</span></pre>
+    </section>
+  </main>
+
+  <footer class="notes">
+    <p><b>Run</b> executes the program. <b>Test</b> runs its <code>test</code> and <code>property</code> blocks, generating random inputs for properties. <b>Verify</b> checks every function's <code>requires</code>/<code>ensures</code> contracts against generated inputs and shrinks any failure to a small counterexample.</p>
+    <p><b>In the browser</b>, programs cannot read files or import modules, recursion stops at 300 nested calls, and a run stops after 40 million steps. The <code>cogito</code> command-line tool has none of these limits.</p>
+    <p><b>Error codes</b> such as <code>E0200</code> are explained in detail by <code>cogito explain E0200</code>. The full language fits in one compact specification, written so that a language model can learn it from a single read.</p>
+  </footer>
+</div>
+
+<script>
+/*WASM_URL*/
+/*EXAMPLES*/
+</script>
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const src = $("source"), hl = $("highlight"), gutter = $("gutter"), out = $("output"), status = $("status");
+  const buttons = { run: $("btn-run"), test: $("btn-test"), verify: $("btn-verify"), check: $("btn-check") };
+  const MODES = { run: 0, test: 1, verify: 2, check: 3 };
+  const VERBS = { run: "Running", test: "Testing", verify: "Verifying", check: "Checking" };
+
+  // ---------------------------------------------------------------- editor
+
+  const KEYWORDS = new Set("let var fn return if else while for in loop break continue match type test property requires ensures and or not true false import as assert where".split(" "));
+  const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+  function highlight(code) {
+    let html = "", i = 0;
+    const n = code.length;
+    const span = (cls, text) => `<span class="${cls}">${esc(text)}</span>`;
+    while (i < n) {
+      const c = code[i];
+      if (c === "#") {
+        let j = code.indexOf("\n", i); if (j < 0) j = n;
+        html += span("tk-com", code.slice(i, j)); i = j; continue;
+      }
+      if (c === "r" && (code[i + 1] === '"' || code[i + 1] === "#")) {
+        const m = /^r(#*)"/.exec(code.slice(i));
+        if (m) {
+          const triple = !m[1] && code.startsWith('r"""', i);
+          const close = triple ? '"""' : '"' + m[1];
+          const start = i + (triple ? 4 : m[0].length);
+          let j = code.indexOf(close, start); j = j < 0 ? n : j + close.length;
+          html += span("tk-str", code.slice(i, j)); i = j; continue;
+        }
+      }
+      if (c === '"') {
+        const triple = code.startsWith('"""', i);
+        let j = i + (triple ? 3 : 1), buf = triple ? '"""' : '"';
+        let parts = "";
+        while (j < n) {
+          const d = code[j];
+          if (d === "\\") { buf += code.slice(j, j + 2); j += 2; continue; }
+          if (triple ? code.startsWith('"""', j) : d === '"') { buf += triple ? '"""' : '"'; j += triple ? 3 : 1; break; }
+          if (!triple && d === "\n") break;
+          if (d === "{") {
+            let depth = 1, k = j + 1;
+            while (k < n && depth > 0 && code[k] !== "\n") { if (code[k] === "{") depth++; else if (code[k] === "}") depth--; k++; }
+            parts += span("tk-str", buf) + `<span class="tk-in">${esc(code.slice(j, k))}</span>`; buf = ""; j = k; continue;
+          }
+          buf += d; j++;
+        }
+        html += parts + span("tk-str", buf); i = j; continue;
+      }
+      if (/[0-9]/.test(c)) {
+        const m = /^(0x[0-9a-fA-F_]+|0b[01_]+|0o[0-7_]+|[0-9][0-9_]*(\.[0-9][0-9_]*)?([eE][+-]?[0-9]+)?)/.exec(code.slice(i));
+        html += span("tk-num", m[0]); i += m[0].length; continue;
+      }
+      if (/[A-Za-z_]/.test(c)) {
+        const m = /^[A-Za-z_][A-Za-z0-9_]*!?/.exec(code.slice(i));
+        const w = m[0];
+        const next = code.slice(i + w.length).match(/^\s*(\(|\[)/);
+        let cls = null;
+        if (KEYWORDS.has(w)) cls = "tk-kw";
+        else if (/^[A-Z]/.test(w)) cls = "tk-ty";
+        else if (w.endsWith("!")) cls = "tk-mut";
+        else if (next && next[1] === "(") cls = "tk-fn";
+        html += cls ? span(cls, w) : esc(w); i += w.length; continue;
+      }
+      html += esc(c); i++;
+    }
+    return html + "\n";
+  }
+
+  function refresh() {
+    const code = src.value;
+    hl.innerHTML = highlight(code);
+    const count = code.split("\n").length;
+    let g = "";
+    for (let k = 1; k <= count; k++) g += k + "\n";
+    gutter.textContent = g;
+    $("lines").textContent = count + (count === 1 ? " line" : " lines");
+    sync();
+  }
+  function sync() {
+    hl.scrollTop = src.scrollTop; hl.scrollLeft = src.scrollLeft;
+    gutter.scrollTop = src.scrollTop;
+  }
+  src.addEventListener("input", () => { refresh(); saveDraft(); });
+  src.addEventListener("scroll", sync);
+
+  function insert(text) {
+    src.focus();
+    if (!document.execCommand || !document.execCommand("insertText", false, text)) {
+      src.setRangeText(text, src.selectionStart, src.selectionEnd, "end");
+      refresh();
+    }
+  }
+  src.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); start("run"); return; }
+    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); insert("  "); return; }
+    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const before = src.value.slice(0, src.selectionStart);
+      const line = before.slice(before.lastIndexOf("\n") + 1);
+      let indent = (/^[ \t]*/.exec(line) || [""])[0];
+      if (/[{(\[]\s*$/.test(line) || /=>\s*$/.test(line)) indent += "  ";
+      e.preventDefault(); insert("\n" + indent);
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && e.target !== src) { e.preventDefault(); start("run"); }
+  });
+  if (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) $("run-key").textContent = "⌘ ↵";
+
+  // ---------------------------------------------------------------- examples
+
+  const examples = window.COGITO_EXAMPLES || [];
+  const picker = $("example");
+  examples.forEach((ex, k) => {
+    const o = document.createElement("option");
+    o.value = String(k); o.textContent = ex.title; picker.appendChild(o);
+  });
+  const DRAFT = "cogito-playground-draft";
+  function saveDraft() { try { localStorage.setItem(DRAFT, JSON.stringify({ example: picker.value, code: src.value })); } catch (_) {} }
+  function loadExample(k, run) {
+    const ex = examples[k]; if (!ex) return;
+    picker.value = String(k);
+    src.value = ex.code; src.scrollTop = 0; src.scrollLeft = 0;
+    $("stdin").value = ex.stdin || "";
+    $("stdin-box").open = !!ex.stdin;
+    $("what").textContent = ex.hint || "";
+    refresh(); saveDraft();
+    if (run && ready) start(ex.action || "run");
+  }
+  picker.addEventListener("change", () => loadExample(Number(picker.value), true));
+
+  // ---------------------------------------------------------------- output
+
+  const ANSI = { 1: "a-b", 2: "a-d", 31: "a-r", 33: "a-y", 32: "a-g", 34: "a-u", 36: "a-c" };
+  function ansiToHtml(text) {
+    let html = "", bold = false, dim = false, color = null;
+    for (const part of text.split(/(\x1b\[[0-9;]*m)/)) {
+      const m = /^\x1b\[([0-9;]*)m$/.exec(part);
+      if (m) {
+        for (const code of (m[1] || "0").split(";").map(Number)) {
+          if (code === 0) { bold = false; dim = false; color = null; }
+          else if (code === 1) bold = true;
+          else if (code === 2) dim = true;
+          else if (ANSI[code]) color = ANSI[code];
+        }
+        continue;
+      }
+      if (!part) continue;
+      const cls = [bold && "a-b", dim && "a-d", color].filter(Boolean).join(" ");
+      html += cls ? `<span class="${cls}">${esc(part)}</span>` : esc(part);
+    }
+    return html;
+  }
+  function setStatus(text, kind) { status.textContent = text; status.className = "status" + (kind ? " " + kind : ""); }
+  function show(result, ms, action) {
+    let html = "";
+    if (result.out) html += ansiToHtml(result.out);
+    if (result.out && result.diag && !result.out.endsWith("\n")) html += "\n";
+    if (result.diag) html += `<span class="diag">${ansiToHtml(result.diag)}</span>`;
+    if (!html) html = `<span class="placeholder">${action === "check" ? "" : "The program finished without printing anything."}</span>`;
+    out.innerHTML = html;
+    const t = ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
+    if (result.trap) setStatus("crashed", "fail");
+    else if (result.status === 0) setStatus(`${action === "run" ? "exit 0" : "ok"} · ${t}`, "ok");
+    else if (result.status === 2) setStatus(`errors · ${t}`, "fail");
+    else setStatus(`${action === "run" ? "exit " + result.status : "failed"} · ${t}`, "fail");
+  }
+
+  // ---------------------------------------------------------------- interpreter
+
+  let module = null, worker = null, ready = false, busy = null, timer = null, nextId = 1;
+
+  // runOnce runs in a Web Worker (so a long run never freezes the page and
+  // can be stopped), or on this page if workers are unavailable.
+  async function runOnce(m, code, input, mode) {
+    const inst = await WebAssembly.instantiate(m, { env: { cogito_host_now_ms: () => Date.now(), cogito_host_clock_ms: () => performance.now() } });
+    const e = inst.exports, enc = new TextEncoder();
+    const s = enc.encode(code), i = enc.encode(input);
+    const sp = e.cogito_alloc(s.length), ip = e.cogito_alloc(i.length);
+    new Uint8Array(e.memory.buffer, sp, s.length).set(s);
+    new Uint8Array(e.memory.buffer, ip, i.length).set(i);
+    try {
+      const p = e.cogito_run(sp, s.length, ip, i.length, mode);
+      const len = new DataView(e.memory.buffer).getUint32(p, true);
+      return JSON.parse(new TextDecoder().decode(new Uint8Array(e.memory.buffer, p + 4, len)));
+    } catch (err) {
+      const panic = new TextDecoder().decode(new Uint8Array(e.memory.buffer, e.cogito_panic_ptr(), e.cogito_panic_len()));
+      const deep = /call stack|too much recursion|stack/i.test(String(err));
+      const why = deep
+        ? "the program nested calls more deeply than the browser's stack allows; use fewer nested calls, or run it with the cogito command-line tool"
+        : "the interpreter stopped unexpectedly" + (panic ? ": " + panic : " (" + err + ")");
+      return { out: "", diag: "\x1b[1m\x1b[31merror\x1b[0m\x1b[1m: " + why + "\x1b[0m\n", status: 101, trap: true };
+    }
+  }
+  const WORKER_SOURCE = runOnce.toString() + `
+    let mod = null;
+    self.onmessage = async (ev) => {
+      const m = ev.data;
+      if (m.type === "init") { mod = m.module; self.postMessage({ type: "ready" }); return; }
+      const t = performance.now();
+      const result = await runOnce(mod, m.code, m.input, m.mode);
+      self.postMessage({ type: "result", id: m.id, result, ms: performance.now() - t });
+    };`;
+
+  // Start a worker; resolves to true once it has the compiled module.
+  function spawn() {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (ok) => { if (!settled) { settled = true; resolve(ok); } };
+      try {
+        const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "text/javascript" }));
+        const w = new Worker(url);
+        w.onmessage = (ev) => {
+          if (ev.data.type === "ready") { worker = w; done(true); return; }
+          onWorker(ev);
+        };
+        w.onerror = () => {
+          if (worker === w) worker = null;
+          done(false);
+          // A run that was waiting on this worker continues on the page.
+          if (busy && busy.msg) runInPage(busy.msg);
+        };
+        w.postMessage({ type: "init", module });
+        setTimeout(() => done(false), 4000);
+      } catch (_) {
+        done(false);
+      }
+    });
+  }
+  function onWorker(ev) {
+    const m = ev.data;
+    if (m.type === "result" && busy && busy.id === m.id) finish(m.result, m.ms);
+  }
+  function finish(result, ms) {
+    const action = busy.action;
+    busy = null; clearInterval(timer);
+    show(result, ms, action);
+    setBusy(false);
+  }
+  function setBusy(on) {
+    Object.values(buttons).forEach((b) => (b.disabled = on || !ready));
+    $("btn-stop").hidden = !(on && worker);
+  }
+  async function runInPage(msg) {
+    // Let the status paint before the page is busy.
+    await new Promise((r) => setTimeout(r, 30));
+    const t = performance.now();
+    const result = await runOnce(module, msg.code, msg.input, msg.mode);
+    if (busy && busy.id === msg.id) finish(result, performance.now() - t);
+  }
+  function start(action) {
+    if (!ready || busy) return;
+    const id = nextId++;
+    const msg = { type: "run", id, code: src.value, input: $("stdin").value, mode: MODES[action] };
+    busy = { id, action, msg };
+    setBusy(true);
+    const t0 = performance.now();
+    const verb = VERBS[action].toLowerCase();
+    setStatus(`${verb}…`, "busy");
+    timer = setInterval(() => setStatus(`${verb}… ${((performance.now() - t0) / 1000).toFixed(1)} s`, "busy"), 200);
+    if (worker) worker.postMessage(msg);
+    else runInPage(msg);
+  }
+  $("btn-stop").addEventListener("click", () => {
+    if (!busy || !worker) return;
+    worker.terminate(); worker = null;
+    busy = null; clearInterval(timer);
+    out.innerHTML = `<span class="diag">${ansiToHtml("\x1b[1m\x1b[33mstopped\x1b[0m: the program was stopped before it finished.\n")}</span>`;
+    setStatus("stopped", "fail");
+    ready = false; setBusy(false);
+    spawn().then(() => { ready = true; setBusy(false); });
+  });
+  Object.entries(buttons).forEach(([action, b]) => b.addEventListener("click", () => start(action)));
+
+  async function boot() {
+    let bytes;
+    try {
+      if (window.COGITO_WASM_BASE64) {
+        const bin = atob(window.COGITO_WASM_BASE64);
+        bytes = new Uint8Array(bin.length);
+        for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+      } else {
+        const r = await fetch(window.COGITO_WASM_URL || "cogito.wasm");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        bytes = new Uint8Array(await r.arrayBuffer());
+      }
+      module = await WebAssembly.compile(bytes);
+    } catch (err) {
+      $("version").textContent = "Interpreter unavailable";
+      $("what").textContent = "The interpreter could not be loaded in this browser (" + err.message + ").";
+      setStatus("unavailable", "fail");
+      return;
+    }
+    await spawn();
+    ready = true;
+    $("version").textContent = "WebAssembly · " + Math.round(bytes.length / 1024) + " KB";
+    setBusy(false);
+    start(examples[Number(picker.value)]?.action || "run");
+  }
+
+  // Restore the viewer's last draft, or open the first example.
+  let restored = false;
+  try {
+    const d = JSON.parse(localStorage.getItem(DRAFT) || "null");
+    if (d && typeof d.code === "string" && d.code.trim()) {
+      picker.value = d.example || "0";
+      src.value = d.code;
+      const ex = examples[Number(picker.value)];
+      $("what").textContent = ex ? ex.hint || "" : "";
+      restored = true;
+      refresh();
+    }
+  } catch (_) {}
+  if (!restored) loadExample(0, false);
+  boot();
+})();
+</script>

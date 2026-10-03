@@ -1,0 +1,14 @@
+# Cogito's messages say what went wrong and how to fix it.
+# Press Check to see what is found before the program runs, then Run.
+
+type Point = { x: Float, y: Float }
+
+fn dist(a: Point, b: Point) -> Float => hypot(b.x - a.x, b.y - a.y)
+
+var scores = [3, 1, 2]
+scores.sort()            # returns a sorted copy, which is thrown away
+print(scores)
+
+let p = Point(x: 1.0, y: 2.0)
+print(dist(p, { x: 4, y: 6 }))   # an anonymous record with the right fields is fine
+print(dist(p, "origin"))         # but a Str is not a Point
