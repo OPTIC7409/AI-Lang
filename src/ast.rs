@@ -217,10 +217,25 @@ pub struct Stmt {
 #[derive(Debug)]
 pub enum StmtKind {
     /// `let pattern = value` or (with `mutable`) `var pattern = value`.
-    Let { pat: Pattern, ty: Option<TypeExpr>, value: Expr, mutable: bool },
-    Assign { target: Expr, op: Option<BinOp>, value: Expr },
-    Fn { def: Rc<FnDef>, res: VarRes },
-    Assert { cond: Expr, msg: Option<Expr> },
+    Let {
+        pat: Pattern,
+        ty: Option<TypeExpr>,
+        value: Expr,
+        mutable: bool,
+    },
+    Assign {
+        target: Expr,
+        op: Option<BinOp>,
+        value: Expr,
+    },
+    Fn {
+        def: Rc<FnDef>,
+        res: VarRes,
+    },
+    Assert {
+        cond: Expr,
+        msg: Option<Expr>,
+    },
     Expr(Expr),
 }
 
@@ -384,14 +399,35 @@ pub struct Pattern {
 #[derive(Debug)]
 pub enum PatKind {
     Wild,
-    Bind { name: Name, res: VarRes, sub: Option<Box<Pattern>> },
+    Bind {
+        name: Name,
+        res: VarRes,
+        sub: Option<Box<Pattern>>,
+    },
     Lit(Lit),
-    Range { lo: Lit, hi: Lit, inclusive: bool },
+    Range {
+        lo: Lit,
+        hi: Lit,
+        inclusive: bool,
+    },
     Tuple(Vec<Pattern>),
-    List { before: Vec<Pattern>, rest: Option<Option<Box<Pattern>>>, after: Vec<Pattern> },
+    List {
+        before: Vec<Pattern>,
+        rest: Option<Option<Box<Pattern>>>,
+        after: Vec<Pattern>,
+    },
     /// `Circle(r)`, `Rect(w: w, ..)`, `None`, `Point(x, y)`.
-    Ctor { name: Name, args: Vec<(Option<Name>, Pattern)>, rest: bool, ctor: CtorRef, field_idx: Vec<u32> },
-    Record { fields: Vec<(Name, Pattern)>, rest: bool },
+    Ctor {
+        name: Name,
+        args: Vec<(Option<Name>, Pattern)>,
+        rest: bool,
+        ctor: CtorRef,
+        field_idx: Vec<u32>,
+    },
+    Record {
+        fields: Vec<(Name, Pattern)>,
+        rest: bool,
+    },
     Or(Vec<Pattern>),
 }
 
@@ -401,7 +437,7 @@ impl Pattern {
     pub fn covers(&self) -> bool {
         match &self.kind {
             PatKind::Wild => true,
-            PatKind::Bind { sub, .. } => sub.as_ref().map_or(true, |s| s.covers()),
+            PatKind::Bind { sub, .. } => sub.as_ref().is_none_or(|s| s.covers()),
             PatKind::Or(alts) => alts.iter().any(|a| a.covers()),
             PatKind::Tuple(items) => items.iter().all(|p| p.covers()),
             PatKind::Record { fields, rest: true } => fields.iter().all(|(_, p)| p.covers()),
@@ -414,7 +450,7 @@ impl Pattern {
     pub fn is_irrefutable(&self) -> bool {
         match &self.kind {
             PatKind::Wild => true,
-            PatKind::Bind { sub, .. } => sub.as_ref().map_or(true, |s| s.is_irrefutable()),
+            PatKind::Bind { sub, .. } => sub.as_ref().is_none_or(|s| s.is_irrefutable()),
             PatKind::Or(alts) => alts.iter().any(|a| a.is_irrefutable()),
             _ => false,
         }

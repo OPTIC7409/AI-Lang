@@ -3,6 +3,10 @@
 //! The pipeline is: source text -> [`lexer`] -> [`parser`] (AST) ->
 //! [`resolver`] (static checks, name resolution) -> [`interp`] (execution).
 
+// Errors are cold paths; boxing every diagnostic is not worth the noise.
+#![allow(clippy::result_large_err)]
+#![allow(clippy::type_complexity)]
+
 pub mod ast;
 pub mod builtins;
 pub mod ctx;
@@ -27,7 +31,14 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Parse and resolve source code. On success returns the program and any
 /// warnings; on failure returns all diagnostics.
-pub fn load_source(it: &mut Interp, name: &str, src: &str, dir: &Path, ns: &mut Namespace, repl: bool) -> Result<(Program, Vec<Diagnostic>), Vec<Diagnostic>> {
+pub fn load_source(
+    it: &mut Interp,
+    name: &str,
+    src: &str,
+    dir: &Path,
+    ns: &mut Namespace,
+    repl: bool,
+) -> Result<(Program, Vec<Diagnostic>), Vec<Diagnostic>> {
     let file = it.ctx.sm.add(name, src);
     let mut prog = parser::parse_program(src, file).map_err(|d| vec![d])?;
     let diags = resolver::resolve_program(&mut it.ctx, &mut prog, ns, dir, repl);
@@ -40,8 +51,7 @@ pub fn load_source(it: &mut Interp, name: &str, src: &str, dir: &Path, ns: &mut 
 
 /// Read, parse and resolve a file.
 pub fn load_file(it: &mut Interp, path: &Path, ns: &mut Namespace) -> Result<(Program, Vec<Diagnostic>), Vec<Diagnostic>> {
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| vec![Diagnostic::error("E0114", format!("cannot read `{}`: {}", path.display(), e))])?;
+    let src = std::fs::read_to_string(path).map_err(|e| vec![Diagnostic::error("E0114", format!("cannot read `{}`: {}", path.display(), e))])?;
     let dir = path.parent().map(|p| if p.as_os_str().is_empty() { Path::new(".") } else { p }).unwrap_or(Path::new("."));
     load_source(it, &path.display().to_string(), &src, dir, ns, false)
 }

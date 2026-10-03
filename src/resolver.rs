@@ -136,7 +136,9 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
 fn confusion_hint(name: &str) -> Option<&'static str> {
     Some(match name {
         "null" | "nil" | "undefined" | "none" | "NULL" => "Cogito has no null; use `None` (an Option) for a missing value",
-        "self" | "this" => "Cogito has no implicit receiver; write ordinary functions whose first parameter is the value, then call them as `value.func()`",
+        "self" | "this" => {
+            "Cogito has no implicit receiver; write ordinary functions whose first parameter is the value, then call them as `value.func()`"
+        }
         "True" | "False" | "TRUE" | "FALSE" => "booleans are lowercase: `true` and `false`",
         "println" | "puts" | "printf" | "echo" | "console" | "printLn" | "say" => "use `print(...)`",
         "elif" | "elsif" | "elseif" => "write `else if`",
@@ -289,14 +291,14 @@ impl<'a> Resolver<'a> {
         }
         out.extend(self.ns.values.keys().map(|k| k.to_string()));
         out.extend(self.ctx.builtins.values.keys().map(|k| k.to_string()));
-        out.retain(|n| n.chars().next().map_or(false, |c| c.is_ascii_uppercase()) == upper);
+        out.retain(|n| n.chars().next().is_some_and(|c| c.is_ascii_uppercase()) == upper);
         out.sort();
         out.dedup();
         out
     }
 
     fn undefined(&mut self, name: &str, span: Span, what: &str) {
-        let upper = name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
+        let upper = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
         let names = self.visible_names(upper);
         let mut d = Diagnostic::error("E0100", format!("undefined {} `{}`", what, name)).at(span).label("not found in this scope");
         if let Some(s) = suggest(name, names.iter().map(|s| s.as_str())) {
@@ -314,7 +316,7 @@ impl<'a> Resolver<'a> {
             Some(found) => {
                 if let VarRes::Global(slot) = found.res {
                     let info = &self.ctx.globals[slot as usize];
-                    if !info.declared && self.fns.last().map_or(false, |f| f.kind == FnKind::TopLevel) {
+                    if !info.declared && self.fns.last().is_some_and(|f| f.kind == FnKind::TopLevel) {
                         let decl = info.span;
                         let d = Diagnostic::error("E0103", format!("`{}` is used before its declaration", v.name))
                             .at(span)
@@ -327,7 +329,7 @@ impl<'a> Resolver<'a> {
                 Some(found)
             }
             None => {
-                let what = if v.name.chars().next().map_or(false, |c| c.is_ascii_uppercase()) { "constructor" } else { "name" };
+                let what = if v.name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) { "constructor" } else { "name" };
                 let name = v.name.clone();
                 self.undefined(&name, span, what);
                 None
@@ -343,11 +345,7 @@ impl<'a> Resolver<'a> {
                     .at(span)
                     .label("redefined here")
                     .note(format!("first defined at {}", self.line_of(prev)));
-                let d = if matches!(kind, GlobalKind::Let) {
-                    d.help("use `var` for a value that changes, or choose a different name")
-                } else {
-                    d
-                };
+                let d = if matches!(kind, GlobalKind::Let) { d.help("use `var` for a value that changes, or choose a different name") } else { d };
                 self.error(d);
                 return old;
             }
@@ -458,7 +456,8 @@ impl<'a> Resolver<'a> {
                         TypeBody::Enum(variants) => {
                             for (tag, v) in variants.iter_mut().enumerate() {
                                 if self.ctx.builtins.values.contains_key(&v.name) {
-                                    let d = Diagnostic::error("E0102", format!("`{}` is a built-in constructor and cannot be redefined", v.name)).at(v.span);
+                                    let d = Diagnostic::error("E0102", format!("`{}` is a built-in constructor and cannot be redefined", v.name))
+                                        .at(v.span);
                                     self.diags.push(d);
                                 }
                                 v.slot = self.define_global(
@@ -545,10 +544,13 @@ impl<'a> Resolver<'a> {
                 };
                 let slot = def.global_slot.unwrap();
                 if let Some((_, prev)) = seen_sigs.iter().find(|(s, sg)| *s == slot && sg.same_types(&sig)) {
-                    let d = Diagnostic::error("E0102", format!("function `{}` is defined more than once with the same parameter types", def.name.as_ref().unwrap()))
-                        .at(def.name_span)
-                        .note(format!("first defined at {}", self.line_of(prev.span)))
-                        .help("overloads must differ in their parameter type annotations");
+                    let d = Diagnostic::error(
+                        "E0102",
+                        format!("function `{}` is defined more than once with the same parameter types", def.name.as_ref().unwrap()),
+                    )
+                    .at(def.name_span)
+                    .note(format!("first defined at {}", self.line_of(prev.span)))
+                    .help("overloads must differ in their parameter type annotations");
                     self.error(d);
                 }
                 seen_sigs.push((slot, sig.clone()));
@@ -581,7 +583,10 @@ impl<'a> Resolver<'a> {
                         if param.ty.is_none() {
                             let d = Diagnostic::error("E0106", format!("property input `{}` needs a type annotation", param.name))
                                 .at(param.span)
-                                .help(format!("Cogito generates random inputs from the type: write `{}: Int`, `{}: List[Str]`, ...", param.name, param.name));
+                                .help(format!(
+                                    "Cogito generates random inputs from the type: write `{}: Int`, `{}: List[Str]`, ...",
+                                    param.name, param.name
+                                ));
                             self.diags.push(d);
                         }
                     }
@@ -625,7 +630,7 @@ impl<'a> Resolver<'a> {
             Some(a) => a.clone(),
             None => {
                 let stem = canon.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                let valid = stem.chars().next().map_or(false, |c| c.is_ascii_lowercase() || c == '_')
+                let valid = stem.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
                     && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
                 if !valid {
                     let d = Diagnostic::error("E0114", format!("the file name `{}` is not a valid module name", stem))
@@ -787,8 +792,11 @@ impl<'a> Resolver<'a> {
                 let mut targs: Vec<Ty> = args.iter_mut().map(|t| self.resolve_type(t, type_params)).collect();
                 let span = te.span;
                 let arity_err = |me: &mut Self, want: usize| {
-                    let d = Diagnostic::error("E0106", format!("`{}` takes {} type argument{}, but {} were given", name, want, if want == 1 { "" } else { "s" }, targs.len()))
-                        .at(span);
+                    let d = Diagnostic::error(
+                        "E0106",
+                        format!("`{}` takes {} type argument{}, but {} were given", name, want, if want == 1 { "" } else { "s" }, targs.len()),
+                    )
+                    .at(span);
                     me.error(d);
                 };
                 match &*name {
@@ -844,10 +852,8 @@ impl<'a> Resolver<'a> {
                             let short: Name = Rc::from(name.rsplit('.').next().unwrap());
                             Ty::Named { id, name: short, args: targs }
                         } else {
-                            let mut cands: Vec<String> = vec!["Int", "Float", "Str", "Bool", "Unit", "Any", "List", "Map", "Range"]
-                                .into_iter()
-                                .map(String::from)
-                                .collect();
+                            let mut cands: Vec<String> =
+                                vec!["Int", "Float", "Str", "Bool", "Unit", "Any", "List", "Map", "Range"].into_iter().map(String::from).collect();
                             cands.extend(self.ns.types.keys().map(|k| k.to_string()));
                             cands.extend(self.ns.aliases.keys().map(|k| k.to_string()));
                             cands.extend(self.ctx.builtins.types.keys().map(|k| k.to_string()));
@@ -881,9 +887,12 @@ impl<'a> Resolver<'a> {
         let mut seen: Vec<Name> = Vec::new();
         let mutating = def.mutating;
         if mutating && def.params.is_empty() {
-            let d = Diagnostic::error("E0111", format!("mutating function `{}` must take the value it changes as its first parameter", def.display_name()))
-                .at(def.name_span)
-                .help(format!("write `fn {}(xs: List[Int], ...)`", def.display_name()));
+            let d = Diagnostic::error(
+                "E0111",
+                format!("mutating function `{}` must take the value it changes as its first parameter", def.display_name()),
+            )
+            .at(def.name_span)
+            .help(format!("write `fn {}(xs: List[Int], ...)`", def.display_name()));
             self.error(d);
         }
         for (i, p) in def.params.iter_mut().enumerate() {
@@ -934,7 +943,13 @@ impl<'a> Resolver<'a> {
                 if let Some(t) = ty {
                     self.resolve_type(t, &[]);
                 }
-                let mode = if self.at_global_scope() { BindMode::Global } else if *mutable { BindMode::LocalMut } else { BindMode::Local };
+                let mode = if self.at_global_scope() {
+                    BindMode::Global
+                } else if *mutable {
+                    BindMode::LocalMut
+                } else {
+                    BindMode::Local
+                };
                 self.pattern(pat, mode);
             }
             StmtKind::Assign { target, op: _, value } => {
@@ -1089,14 +1104,17 @@ impl<'a> Resolver<'a> {
                 if positional < b.min as usize || positional > b.max as usize {
                     let expect = if b.min == b.max {
                         format!("{}", b.min)
-                    } else if b.max as usize >= crate::builtins::VARIADIC as usize {
+                    } else if b.max == crate::builtins::VARIADIC {
                         format!("at least {}", b.min)
                     } else {
                         format!("{} to {}", b.min, b.max)
                     };
-                    let d = Diagnostic::error("E0107", format!("`{}` takes {} argument{}, but {} were given", b.name, expect, if expect == "1" { "" } else { "s" }, positional))
-                        .at(span)
-                        .note(format!("usage: {}", b.doc.lines().next().unwrap_or("")));
+                    let d = Diagnostic::error(
+                        "E0107",
+                        format!("`{}` takes {} argument{}, but {} were given", b.name, expect, if expect == "1" { "" } else { "s" }, positional),
+                    )
+                    .at(span)
+                    .note(format!("usage: {}", b.doc.lines().next().unwrap_or("")));
                     self.error(d);
                 }
             }
@@ -1124,7 +1142,8 @@ impl<'a> Resolver<'a> {
                     return;
                 }
                 if !field_named && !named.is_empty() {
-                    let d = Diagnostic::error("E0108", format!("`{}` has positional fields; it cannot be called with named arguments", info.name)).at(span);
+                    let d = Diagnostic::error("E0108", format!("`{}` has positional fields; it cannot be called with named arguments", info.name))
+                        .at(span);
                     self.error(d);
                     return;
                 }
@@ -1140,9 +1159,12 @@ impl<'a> Resolver<'a> {
         let total = params.len();
         let required = params.iter().filter(|p| !p.1).count();
         if positional > total {
-            let d = Diagnostic::error("E0107", format!("{} `{}` takes {} argument{}, but {} were given", what, name, total, if total == 1 { "" } else { "s" }, positional))
-                .at(span)
-                .note(format!("`{}` is defined at {}", name, self.line_of(def_span)));
+            let d = Diagnostic::error(
+                "E0107",
+                format!("{} `{}` takes {} argument{}, but {} were given", what, name, total, if total == 1 { "" } else { "s" }, positional),
+            )
+            .at(span)
+            .note(format!("`{}` is defined at {}", name, self.line_of(def_span)));
             self.error(d);
             return;
         }
@@ -1198,17 +1220,15 @@ impl<'a> Resolver<'a> {
         // Module member access is rewritten into a direct global reference.
         let mut replacement: Option<ExprKind> = None;
         match &mut e.kind {
-            ExprKind::Field { target, name, name_span } => {
-                match self.module_member(target, name) {
-                    Some(Ok(slot)) => replacement = Some(ExprKind::Var(Var { name: name.clone(), res: VarRes::Global(slot) })),
-                    Some(Err((m, alias))) => {
-                        let (n, s) = (name.clone(), *name_span);
-                        self.unknown_member(&m, &alias, &n, s);
-                        return;
-                    }
-                    None => {}
+            ExprKind::Field { target, name, name_span } => match self.module_member(target, name) {
+                Some(Ok(slot)) => replacement = Some(ExprKind::Var(Var { name: name.clone(), res: VarRes::Global(slot) })),
+                Some(Err((m, alias))) => {
+                    let (n, s) = (name.clone(), *name_span);
+                    self.unknown_member(&m, &alias, &n, s);
+                    return;
                 }
-            }
+                None => {}
+            },
             ExprKind::MethodCall { receiver, method, method_span, args, mutating } => match self.module_member(receiver, &method.name) {
                 Some(Ok(slot)) => {
                     let callee = Expr { kind: ExprKind::Var(Var { name: method.name.clone(), res: VarRes::Global(slot) }), span: *method_span };
@@ -1445,9 +1465,7 @@ impl<'a> Resolver<'a> {
                     self.expr(v);
                 }
                 if self.cur().kind == FnKind::TopLevel {
-                    let d = Diagnostic::error("E0105", "`return` outside of a function")
-                        .at(span)
-                        .help("use `exit(code)` to stop a script early");
+                    let d = Diagnostic::error("E0105", "`return` outside of a function").at(span).help("use `exit(code)` to stop a script early");
                     self.error(d);
                 }
             }
@@ -1533,10 +1551,7 @@ impl<'a> Resolver<'a> {
                         self.pattern_inner(alt, mode);
                         let mut names = vec![];
                         Self::bound_names(alt, &mut names);
-                        first_bindings = names
-                            .iter()
-                            .map(|(n, _)| (n.clone(), self.lookup_binding(n, mode)))
-                            .collect();
+                        first_bindings = names.iter().map(|(n, _)| (n.clone(), self.lookup_binding(n, mode))).collect();
                     } else {
                         self.or_bindings = Some(first_bindings.clone());
                         self.pattern_inner(alt, mode);
@@ -1575,7 +1590,13 @@ impl<'a> Resolver<'a> {
                 if positional > fields.len() || (!*rest && args.len() != fields.len()) {
                     let d = Diagnostic::error(
                         "E0112",
-                        format!("`{}` has {} field{}, but the pattern lists {}", name, fields.len(), if fields.len() == 1 { "" } else { "s" }, args.len()),
+                        format!(
+                            "`{}` has {} field{}, but the pattern lists {}",
+                            name,
+                            fields.len(),
+                            if fields.len() == 1 { "" } else { "s" },
+                            args.len()
+                        ),
                     )
                     .at(span)
                     .help(if fields.is_empty() {
@@ -1700,9 +1721,11 @@ impl<'a> Resolver<'a> {
             .collect();
         if !missing.is_empty() {
             let list = missing.iter().map(|m| format!("`{}`", m)).collect::<Vec<_>>().join(", ");
-            let d = Diagnostic::error("E0109", format!("non-exhaustive match on `{}`: {} not handled", td.name, list))
-                .at(span)
-                .help(format!("add {} for {}, or a catch-all arm `_ => ...`", if missing.len() == 1 { "an arm" } else { "arms" }, list));
+            let d = Diagnostic::error("E0109", format!("non-exhaustive match on `{}`: {} not handled", td.name, list)).at(span).help(format!(
+                "add {} for {}, or a catch-all arm `_ => ...`",
+                if missing.len() == 1 { "an arm" } else { "arms" },
+                list
+            ));
             self.error(d);
         }
     }

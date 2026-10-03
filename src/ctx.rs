@@ -82,7 +82,11 @@ impl Ctx {
             ctx.builtins.types.insert(td.name.clone(), td.id);
             if let TypeKind::Enum { variants } = &td.kind {
                 for (tag, v) in variants.iter().enumerate() {
-                    let slot = ctx.add_global(v.name.clone(), GlobalKind::Ctor(CtorRef { type_id: td.id, tag: tag as u32, is_record: false }), Span::default());
+                    let slot = ctx.add_global(
+                        v.name.clone(),
+                        GlobalKind::Ctor(CtorRef { type_id: td.id, tag: tag as u32, is_record: false }),
+                        Span::default(),
+                    );
                     ctx.builtins.values.insert(v.name.clone(), slot);
                 }
             }

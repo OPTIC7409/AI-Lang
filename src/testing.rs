@@ -218,7 +218,7 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
     for (p, a) in def.params.iter().zip(&f.args) {
         out.push_str(&format!("        {}{}{} = {}\n", c.bold, p.name, c.reset, repr(a)));
     }
-    out.push_str(&indent(&f.diag.render(&it.ctx.sm, c.red != ""), 6));
+    out.push_str(&indent(&f.diag.render(&it.ctx.sm, !c.red.is_empty()), 6));
     out.push('\n');
 }
 

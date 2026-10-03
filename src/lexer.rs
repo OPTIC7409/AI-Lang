@@ -93,7 +93,11 @@ pub enum Tok {
 pub enum StrPart {
     Lit(String),
     /// An interpolated expression: byte range in the source, plus an optional format spec.
-    Expr { start: u32, end: u32, spec: Option<String> },
+    Expr {
+        start: u32,
+        end: u32,
+        spec: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -136,8 +140,8 @@ pub fn keyword(s: &str) -> Option<Tok> {
 }
 
 pub const KEYWORDS: &[&str] = &[
-    "let", "var", "fn", "return", "if", "else", "while", "for", "in", "loop", "break", "continue", "match", "type", "test",
-    "property", "requires", "ensures", "and", "or", "not", "true", "false", "import", "as", "assert", "where",
+    "let", "var", "fn", "return", "if", "else", "while", "for", "in", "loop", "break", "continue", "match", "type", "test", "property", "requires",
+    "ensures", "and", "or", "not", "true", "false", "import", "as", "assert", "where",
 ];
 
 impl Tok {
@@ -309,7 +313,7 @@ impl<'a> Lexer<'a> {
             return true;
         }
         for kw in [&b"and"[..], &b"or"[..]] {
-            if rest.starts_with(kw) && rest.get(kw.len()).map_or(true, |c| !is_ident_char(*c)) {
+            if rest.starts_with(kw) && rest.get(kw.len()).is_none_or(|c| !is_ident_char(*c)) {
                 return true;
             }
         }
@@ -342,9 +346,7 @@ impl<'a> Lexer<'a> {
                             break;
                         }
                     }
-                    if !self.continuation_ahead()
-                        && !matches!(self.toks.last(), None | Some(Token { tok: Tok::Newline, .. }))
-                    {
+                    if !self.continuation_ahead() && !matches!(self.toks.last(), None | Some(Token { tok: Tok::Newline, .. })) {
                         self.toks.push(Token { tok: Tok::Newline, span: Span::new(self.file, start, start + 1) });
                     }
                 }
@@ -541,9 +543,7 @@ impl<'a> Lexer<'a> {
             },
             b'|' => match c1 {
                 b'>' => (Tok::PipeGt, 2),
-                b'|' => {
-                    return Err(self.err("E0001", "unexpected `||`", start, start + 2).help("use the keyword `or` for boolean disjunction"))
-                }
+                b'|' => return Err(self.err("E0001", "unexpected `||`", start, start + 2).help("use the keyword `or` for boolean disjunction")),
                 _ => (Tok::Bar, 1),
             },
             b'&' => {
@@ -609,9 +609,7 @@ impl<'a> Lexer<'a> {
                     parts.push(self.interpolation()?);
                 }
                 b'}' => {
-                    return Err(self
-                        .err("E0005", "unmatched `}` in string", self.pos, self.pos + 1)
-                        .help("write `\\}` for a literal closing brace"));
+                    return Err(self.err("E0005", "unmatched `}` in string", self.pos, self.pos + 1).help("write `\\}` for a literal closing brace"));
                 }
                 _ => {
                     let ch = self.src[self.pos..].chars().next().unwrap();
@@ -761,7 +759,9 @@ impl<'a> Lexer<'a> {
         let mut p = body_start;
         while p < self.end && self.b[p] != b'"' {
             if self.b[p] == b'\n' {
-                return Err(self.err("E0002", "unterminated raw string", start, p).help("raw strings cannot span lines unless they use triple quotes: r\"\"\"...\"\"\""));
+                return Err(self
+                    .err("E0002", "unterminated raw string", start, p)
+                    .help("raw strings cannot span lines unless they use triple quotes: r\"\"\"...\"\"\""));
             }
             p += 1;
         }
@@ -802,19 +802,14 @@ impl<'a> Lexer<'a> {
         let raw = &self.src[body_start..close];
         let mut lines: Vec<&str> = raw.split('\n').collect();
         let skip_first = lines.len() > 1 && lines[0].trim().is_empty();
-        let drop_last = lines.len() > 1 && lines.last().map_or(false, |l| l.trim().is_empty());
+        let drop_last = lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty());
         if skip_first {
             lines.remove(0);
         }
         if drop_last {
             lines.pop();
         }
-        let indent = lines
-            .iter()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.len() - l.trim_start_matches([' ', '\t']).len())
-            .min()
-            .unwrap_or(0);
+        let indent = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start_matches([' ', '\t']).len()).min().unwrap_or(0);
         // Now scan for real.
         self.pos = body_start;
         if skip_first {
@@ -876,15 +871,10 @@ pub fn dedent(raw: &str) -> String {
     if lines.len() > 1 && lines[0].trim().is_empty() {
         lines.remove(0);
     }
-    if lines.len() > 1 && lines.last().map_or(false, |l| l.trim().is_empty()) {
+    if lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
-    let indent = lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start_matches([' ', '\t']).len())
-        .min()
-        .unwrap_or(0);
+    let indent = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start_matches([' ', '\t']).len()).min().unwrap_or(0);
     lines.iter().map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() }).collect::<Vec<_>>().join("\n")
 }
 
@@ -907,10 +897,7 @@ mod tests {
     #[test]
     fn ranges_and_tuple_index() {
         assert_eq!(toks("1..5"), vec![Tok::Int(1), Tok::DotDot, Tok::Int(5), Tok::Newline, Tok::Eof]);
-        assert_eq!(
-            toks("t.0.1"),
-            vec![Tok::Ident("t".into()), Tok::Dot, Tok::Int(0), Tok::Dot, Tok::Int(1), Tok::Newline, Tok::Eof]
-        );
+        assert_eq!(toks("t.0.1"), vec![Tok::Ident("t".into()), Tok::Dot, Tok::Int(0), Tok::Dot, Tok::Int(1), Tok::Newline, Tok::Eof]);
     }
 
     #[test]

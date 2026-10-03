@@ -390,7 +390,11 @@ fn ordering_of(it: &Interp, v: &Value, sp: Span) -> R<Ordering> {
             _ => Ordering::Greater,
         }),
         Value::Int(n) => Ok(n.cmp(&0)),
-        other => Err(it.err(sp, "E0200", format!("a comparison function must return an Ordering (Less, Equal, Greater) or an Int, got {}", describe(other)))),
+        other => Err(it.err(
+            sp,
+            "E0200",
+            format!("a comparison function must return an Ordering (Less, Equal, Greater) or an Int, got {}", describe(other)),
+        )),
     }
 }
 
@@ -633,7 +637,8 @@ fn b_int(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         Value::Str(s) => match s.trim().replace('_', "").parse::<i64>() {
             Ok(n) => Ok(Value::Int(n)),
             Err(_) => Err(it.fail(
-                it.diag(sp, "E0216", format!("cannot convert {} to Int", repr(&a[0]))).help("use `parse_int(s)`, which returns None instead of failing"),
+                it.diag(sp, "E0216", format!("cannot convert {} to Int", repr(&a[0])))
+                    .help("use `parse_int(s)`, which returns None instead of failing"),
             )),
         },
         v => Err(type_err(it, "int", 0, "a Float, Str or Bool", v, sp)),
@@ -647,7 +652,8 @@ fn b_float(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         Value::Str(s) => match s.trim().replace('_', "").parse::<f64>() {
             Ok(n) => Ok(Value::Float(n)),
             Err(_) => Err(it.fail(
-                it.diag(sp, "E0216", format!("cannot convert {} to Float", repr(&a[0]))).help("use `parse_float(s)`, which returns None instead of failing"),
+                it.diag(sp, "E0216", format!("cannot convert {} to Float", repr(&a[0])))
+                    .help("use `parse_float(s)`, which returns None instead of failing"),
             )),
         },
         v => Err(type_err(it, "float", 0, "an Int or Str", v, sp)),
@@ -1007,7 +1013,8 @@ fn b_is_empty(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 }
 
 fn b_range(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
-    let (start, end) = if a.len() == 1 { (0, int_arg(it, &a, 0, "range", sp)?) } else { (int_arg(it, &a, 0, "range", sp)?, int_arg(it, &a, 1, "range", sp)?) };
+    let (start, end) =
+        if a.len() == 1 { (0, int_arg(it, &a, 0, "range", sp)?) } else { (int_arg(it, &a, 0, "range", sp)?, int_arg(it, &a, 1, "range", sp)?) };
     if a.len() == 3 {
         let step = int_arg(it, &a, 2, "range", sp)?;
         if step == 0 {
@@ -1275,7 +1282,8 @@ fn b_map(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
         }
         Value::Map(_) => {
             return Err(it.fail(
-                it.diag(sp, "E0200", "`map` over a Map is ambiguous").help("use `m.map_values(f)` to transform values, or `m.entries().map(f)` for (key, value) pairs"),
+                it.diag(sp, "E0200", "`map` over a Map is ambiguous")
+                    .help("use `m.map_values(f)` to transform values, or `m.entries().map(f)` for (key, value) pairs"),
             ))
         }
         _ => {}
@@ -1295,7 +1303,11 @@ fn b_filter(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
         let two = wants_two(&f);
         let mut out = MapVal::new();
         for (k, x) in m.entries.iter() {
-            let keep = if two { bool_result(it, &f, vec![k.clone(), x.clone()], sp, "filter")? } else { bool_result(it, &f, vec![Value::tuple(vec![k.clone(), x.clone()])], sp, "filter")? };
+            let keep = if two {
+                bool_result(it, &f, vec![k.clone(), x.clone()], sp, "filter")?
+            } else {
+                bool_result(it, &f, vec![Value::tuple(vec![k.clone(), x.clone()])], sp, "filter")?
+            };
             if keep {
                 out.insert(k.clone(), x.clone());
             }

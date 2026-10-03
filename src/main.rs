@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use cogito::ast::Namespace;
 use cogito::diagnostic::{explain, Colors, Diagnostic, CATALOG};
 use cogito::interp::Interp;
@@ -215,10 +217,26 @@ fn cmd_check(paths: &[String], color: bool) -> ExitCode {
     }
     let c = Colors::new(color);
     if errors == 0 {
-        eprintln!("{}ok{}: {} file{} checked, {} warning{}", c.green, c.reset, files.len(), if files.len() == 1 { "" } else { "s" }, warnings, if warnings == 1 { "" } else { "s" });
+        eprintln!(
+            "{}ok{}: {} file{} checked, {} warning{}",
+            c.green,
+            c.reset,
+            files.len(),
+            if files.len() == 1 { "" } else { "s" },
+            warnings,
+            if warnings == 1 { "" } else { "s" }
+        );
         ExitCode::SUCCESS
     } else {
-        eprintln!("{}error{}: {} error{}, {} warning{}", c.red, c.reset, errors, if errors == 1 { "" } else { "s" }, warnings, if warnings == 1 { "" } else { "s" });
+        eprintln!(
+            "{}error{}: {} error{}, {} warning{}",
+            c.red,
+            c.reset,
+            errors,
+            if errors == 1 { "" } else { "s" },
+            warnings,
+            if warnings == 1 { "" } else { "s" }
+        );
         ExitCode::from(1)
     }
 }

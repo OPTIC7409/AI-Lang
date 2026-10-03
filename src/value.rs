@@ -82,8 +82,12 @@ impl RangeVal {
         self.end.map(|e| if e > self.start { (e as i128 - self.start as i128) as usize } else { 0 })
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == Some(0)
+    }
+
     pub fn contains(&self, n: i64) -> bool {
-        n >= self.start && self.end.map_or(true, |e| n < e)
+        n >= self.start && self.end.is_none_or(|e| n < e)
     }
 }
 
@@ -327,9 +331,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                 (None, None) => true,
                 _ => false,
             };
-            same_ty
-                && x.values.len() == y.values.len()
-                && x.names.iter().zip(&x.values).all(|(n, v)| y.get(n).is_some_and(|w| values_equal(v, w)))
+            same_ty && x.values.len() == y.values.len() && x.names.iter().zip(&x.values).all(|(n, v)| y.get(n).is_some_and(|w| values_equal(v, w)))
         }
         (Value::Variant(x), Value::Variant(y)) => {
             x.ty.id == y.ty.id && x.tag == y.tag && x.values.iter().zip(&y.values).all(|(a, b)| values_equal(a, b))
@@ -534,7 +536,7 @@ pub fn write_value(out: &mut String, v: &Value, quote: bool) {
             let _ = write!(out, "<fn {}>", crate::builtins::BUILTINS[*i as usize].name);
         }
         Value::Overload(fs) => {
-            let name = fs.first().map(|f| display(f)).unwrap_or_default();
+            let name = fs.first().map(display).unwrap_or_default();
             let _ = write!(out, "{} (+{} overloads)", name, fs.len().saturating_sub(1));
         }
         Value::Ctor(td, tag) => {

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Cogito",
+  "scopeName": "source.cogito",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#declaration" },
+    { "include": "#raw-string" },
+    { "include": "#triple-string" },
+    { "include": "#string" },
+    { "include": "#number" },
+    { "include": "#keyword" },
+    { "include": "#constant" },
+    { "include": "#type" },
+    { "include": "#function-call" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.cogito"
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([a-z_][A-Za-z0-9_]*!?)",
+          "captures": { "1": { "name": "keyword.declaration.function.cogito" }, "2": { "name": "entity.name.function.cogito" } }
+        },
+        {
+          "match": "\\b(type)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "keyword.declaration.type.cogito" }, "2": { "name": "entity.name.type.cogito" } }
+        },
+        {
+          "match": "\\b(test|property)\\b",
+          "name": "keyword.other.test.cogito"
+        }
+      ]
+    },
+    "keyword": {
+      "patterns": [
+        { "match": "\\b(if|else|while|for|in|loop|break|continue|match|return)\\b", "name": "keyword.control.cogito" },
+        { "match": "\\b(requires|ensures|where|assert)\\b", "name": "keyword.other.contract.cogito" },
+        { "match": "\\b(let|var|fn|type|import|as)\\b", "name": "storage.type.cogito" },
+        { "match": "\\b(and|or|not)\\b", "name": "keyword.operator.logical.cogito" },
+        { "match": "\\bresult\\b", "name": "variable.language.result.cogito" }
+      ]
+    },
+    "constant": {
+      "patterns": [
+        { "match": "\\b(true|false)\\b", "name": "constant.language.boolean.cogito" },
+        { "match": "\\b(None|Some|Ok|Err|Less|Equal|Greater)\\b", "name": "support.constant.cogito" },
+        { "match": "\\b(pi|tau|e|inf|max_int|min_int)\\b", "name": "constant.language.cogito" }
+      ]
+    },
+    "type": {
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+      "name": "entity.name.type.cogito"
+    },
+    "function-call": {
+      "match": "\\b([a-z_][A-Za-z0-9_]*!?)(?=\\s*\\()",
+      "captures": { "1": { "name": "entity.name.function.call.cogito" } }
+    },
+    "number": {
+      "patterns": [
+        { "match": "\\b0x[0-9A-Fa-f_]+\\b", "name": "constant.numeric.hex.cogito" },
+        { "match": "\\b0b[01_]+\\b", "name": "constant.numeric.binary.cogito" },
+        { "match": "\\b0o[0-7_]+\\b", "name": "constant.numeric.octal.cogito" },
+        { "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9]+)?\\b", "name": "constant.numeric.cogito" }
+      ]
+    },
+    "operator": {
+      "patterns": [
+        { "match": "\\|>", "name": "keyword.operator.pipe.cogito" },
+        { "match": "=>|->", "name": "keyword.operator.arrow.cogito" },
+        { "match": "\\.\\.=?", "name": "keyword.operator.range.cogito" },
+        { "match": "==|!=|<=|>=|<|>", "name": "keyword.operator.comparison.cogito" },
+        { "match": "\\+=|-=|\\*=|/=|%=|=", "name": "keyword.operator.assignment.cogito" },
+        { "match": "\\*\\*|//|[+\\-*/%?]", "name": "keyword.operator.arithmetic.cogito" }
+      ]
+    },
+    "escape": {
+      "match": "\\\\(u\\{[0-9A-Fa-f]+\\}|[ntr0\\\\\"{}])",
+      "name": "constant.character.escape.cogito"
+    },
+    "interpolation": {
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.cogito" } },
+      "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.cogito" } },
+      "name": "meta.interpolation.cogito",
+      "patterns": [
+        { "include": "#string" },
+        { "include": "#number" },
+        { "include": "#keyword" },
+        { "include": "#constant" },
+        { "include": "#type" },
+        { "include": "#function-call" },
+        { "include": "#operator" }
+      ]
+    },
+    "string": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.cogito",
+      "patterns": [{ "include": "#escape" }, { "include": "#interpolation" }]
+    },
+    "triple-string": {
+      "begin": "\"\"\"",
+      "end": "\"\"\"",
+      "name": "string.quoted.triple.cogito",
+      "patterns": [{ "include": "#escape" }, { "include": "#interpolation" }]
+    },
+    "raw-string": {
+      "patterns": [
+        { "begin": "r\"\"\"", "end": "\"\"\"", "name": "string.quoted.raw.triple.cogito" },
+        { "begin": "r\"", "end": "\"", "name": "string.quoted.raw.cogito" }
+      ]
+    }
+  }
+}

@@ -45,7 +45,8 @@ fn error_codes() {
     let mut failures = Vec::new();
     for f in files("tests/errors", "cog") {
         let src = std::fs::read_to_string(&f).unwrap();
-        let expect = src.lines().next().and_then(|l| l.strip_prefix("# expect: ")).unwrap_or_else(|| panic!("{} has no `# expect:` line", f.display()));
+        let expect =
+            src.lines().next().and_then(|l| l.strip_prefix("# expect: ")).unwrap_or_else(|| panic!("{} has no `# expect:` line", f.display()));
         let out = cogito(&["run", f.to_str().unwrap()]);
         let stderr = text(&out.stderr);
         if out.status.success() || !stderr.contains(&format!("error[{}]", expect.trim())) {

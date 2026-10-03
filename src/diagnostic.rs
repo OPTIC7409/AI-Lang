@@ -149,10 +149,31 @@ fn render_excerpt(out: &mut String, sm: &SourceMap, span: Span, label: Option<&s
     let text = file.line_text(line);
     let _ = writeln!(out, "{}{:>w$} |{} {}", c.blue, line, c.reset, text.replace('\t', "    "), w = gutter);
     let text_chars = text.chars().count();
-    let to = if line == end_line { if end_col > col { end_col } else { col + 1 } } else { text_chars + 1 };
+    let to = if line == end_line {
+        if end_col > col {
+            end_col
+        } else {
+            col + 1
+        }
+    } else {
+        text_chars + 1
+    };
     let width = to.saturating_sub(col).max(1);
     let prefix: String = text.chars().take(col.saturating_sub(1)).map(|ch| if ch == '\t' { "    " } else { " " }).collect();
-    let _ = writeln!(out, "{:>w$} {}|{} {}{}{}{} {}{}", "", c.blue, c.reset, prefix, c.bold, kc, "^".repeat(width), label.unwrap_or(""), c.reset, w = gutter);
+    let _ = writeln!(
+        out,
+        "{:>w$} {}|{} {}{}{}{} {}{}",
+        "",
+        c.blue,
+        c.reset,
+        prefix,
+        c.bold,
+        kc,
+        "^".repeat(width),
+        label.unwrap_or(""),
+        c.reset,
+        w = gutter
+    );
 }
 
 pub struct Colors {
@@ -215,7 +236,7 @@ pub fn suggest<'a, I: IntoIterator<Item = &'a str>>(name: &str, candidates: I) -
             3..=5 => 2,
             _ => 3,
         };
-        if d <= limit && best.map_or(true, |(bd, bc)| d < bd || (d == bd && cand < bc)) {
+        if d <= limit && best.is_none_or(|(bd, bc)| d < bd || (d == bd && cand < bc)) {
             best = Some((d, cand));
         }
     }

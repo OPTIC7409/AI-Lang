@@ -136,12 +136,7 @@ impl Interp {
             ctx.builtins.values.insert(Rc::from(b.name), slot);
             globals.push(Some(Value::Builtin(i as u16)));
         }
-        for (name, v) in [
-            ("pi", std::f64::consts::PI),
-            ("tau", std::f64::consts::TAU),
-            ("e", std::f64::consts::E),
-            ("inf", f64::INFINITY),
-        ] {
+        for (name, v) in [("pi", std::f64::consts::PI), ("tau", std::f64::consts::TAU), ("e", std::f64::consts::E), ("inf", f64::INFINITY)] {
             let slot = ctx.add_global(Rc::from(name), GlobalKind::Const, Span::default());
             ctx.builtins.values.insert(Rc::from(name), slot);
             globals.push(Some(Value::Float(v)));
@@ -350,9 +345,10 @@ impl Interp {
 
     fn same_sig(a: &FnDef, b: &FnDef) -> bool {
         a.params.len() == b.params.len()
-            && a.params.iter().zip(&b.params).all(|(x, y)| {
-                x.ty.as_ref().map(|t| &t.ty).unwrap_or(&Ty::Any) == y.ty.as_ref().map(|t| &t.ty).unwrap_or(&Ty::Any)
-            })
+            && a.params
+                .iter()
+                .zip(&b.params)
+                .all(|(x, y)| x.ty.as_ref().map(|t| &t.ty).unwrap_or(&Ty::Any) == y.ty.as_ref().map(|t| &t.ty).unwrap_or(&Ty::Any))
     }
 
     fn install_fn(&mut self, def: &Rc<FnDef>) {
@@ -434,7 +430,9 @@ impl Interp {
                 if let Some(t) = ty {
                     let kw = if *mutable { "var" } else { "let" };
                     v = self.conform(v, &t.ty).map_err(|m| {
-                        self.fail(self.diag(value.span, "E0200", format!("type mismatch in `{}`: {}", kw, m)).note(format!("the annotation is `{}`", t.ty)))
+                        self.fail(
+                            self.diag(value.span, "E0200", format!("type mismatch in `{}`: {}", kw, m)).note(format!("the annotation is `{}`", t.ty)),
+                        )
                     })?;
                 }
                 if let PatKind::Bind { res, sub: None, .. } = &pat.kind {
@@ -482,7 +480,8 @@ impl Interp {
                 }
                 other => {
                     return Err(self.fail(
-                        self.diag(cond.span, "E0209", format!("`assert` needs a Bool, got {}", describe(&other))).help("write a comparison, like `assert x == 3`"),
+                        self.diag(cond.span, "E0209", format!("`assert` needs a Bool, got {}", describe(&other)))
+                            .help("write a comparison, like `assert x == 3`"),
                     ))
                 }
             },
@@ -854,7 +853,9 @@ impl Interp {
             ExprKind::Unary { op, expr } => {
                 let v = self.eval(expr, env)?;
                 match (op, v) {
-                    (UnOp::Neg, Value::Int(i)) => i.checked_neg().map(Value::Int).ok_or_else(|| self.err(e.span, "E0207", "integer overflow in negation")),
+                    (UnOp::Neg, Value::Int(i)) => {
+                        i.checked_neg().map(Value::Int).ok_or_else(|| self.err(e.span, "E0207", "integer overflow in negation"))
+                    }
                     (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
                     (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
                     (UnOp::Not, other) => Err(self.fail(self.not_bool(expr.span, "the operand of `not`", &other))),
@@ -1167,7 +1168,11 @@ impl Interp {
                 Some(i) => Ok(xs[i].clone()),
                 None => Err(self.fail(
                     self.diag(span, "E0204", format!("index {} is out of bounds for a list of length {}", i, xs.len()))
-                        .label(if xs.is_empty() { "the list is empty".to_string() } else { format!("valid indexes are 0..{} (or -{}..-1)", xs.len() - 1, xs.len()) })
+                        .label(if xs.is_empty() {
+                            "the list is empty".to_string()
+                        } else {
+                            format!("valid indexes are 0..{} (or -{}..-1)", xs.len() - 1, xs.len())
+                        })
                         .help("use `xs.get(i)`, which returns an Option, if the index may be missing"),
                 )),
             },
@@ -1200,7 +1205,7 @@ impl Interp {
             },
             (Value::Range(r), Value::Int(i)) => {
                 let len = r.len();
-                let ok = *i >= 0 && len.map_or(true, |n| (*i as usize) < n);
+                let ok = *i >= 0 && len.is_none_or(|n| (*i as usize) < n);
                 if ok {
                     Ok(Value::Int(r.start + i))
                 } else {
@@ -1217,7 +1222,9 @@ impl Interp {
         let mut d = self.diag(span, "E0211", format!("cannot apply `{}` to {} and {}", op.symbol(), describe(a), describe(b)));
         let (ta, tb) = (type_name(a), type_name(b));
         let help = match (op, a, b) {
-            (BinOp::Add, Value::Str(_), _) | (BinOp::Add, _, Value::Str(_)) => Some("convert with `str(x)`, or use interpolation: \"text {x}\"".to_string()),
+            (BinOp::Add, Value::Str(_), _) | (BinOp::Add, _, Value::Str(_)) => {
+                Some("convert with `str(x)`, or use interpolation: \"text {x}\"".to_string())
+            }
             (BinOp::Add, Value::List(_), _) => Some("to add one element, use `xs.push(x)` or `xs + [x]`".to_string()),
             (_, Value::Variant(v), _) | (_, _, Value::Variant(v)) if v.ty.id == OPTION_ID => {
                 Some("this is an Option; get the value out first with `match`, `?`, or `.unwrap_or(default)`".to_string())
@@ -1351,7 +1358,8 @@ impl Interp {
                 (Int(x), Int(y)) => {
                     if y < 0 {
                         return Err(self.fail(
-                            self.diag(span, "E0216", format!("negative exponent {} for an Int base", y)).help("use a Float base for fractional results: `2.0 ** -1`"),
+                            self.diag(span, "E0216", format!("negative exponent {} for an Int base", y))
+                                .help("use a Float base for fractional results: `2.0 ** -1`"),
                         ));
                     }
                     if y > u32::MAX as i64 {
@@ -1568,7 +1576,9 @@ impl Interp {
             (Ty::Float, Value::Int(_)) => coerce,
             (Ty::Unit, Value::Unit) | (Ty::Range, Value::Range(_)) => true,
             (Ty::List(t), Value::List(xs)) => t.is_any() || xs.iter().all(|x| self.has_type(x, t, coerce)),
-            (Ty::Map(k, t), Value::Map(m)) => (k.is_any() && t.is_any()) || m.entries.iter().all(|(a, b)| self.has_type(a, k, coerce) && self.has_type(b, t, coerce)),
+            (Ty::Map(k, t), Value::Map(m)) => {
+                (k.is_any() && t.is_any()) || m.entries.iter().all(|(a, b)| self.has_type(a, k, coerce) && self.has_type(b, t, coerce))
+            }
             (Ty::Tuple(ts), Value::Tuple(xs)) => ts.len() == xs.len() && ts.iter().zip(xs.iter()).all(|(t, x)| self.has_type(x, t, coerce)),
             (Ty::Record(fs), Value::Record(r)) => fs.iter().all(|(n, t)| r.get(n).is_some_and(|x| self.has_type(x, t, coerce))),
             (Ty::Fn(..), v) => v.is_callable(),
@@ -1611,7 +1621,9 @@ impl Interp {
                 let mut out = MapVal::with_capacity(m.len());
                 for (k, x) in m.entries.iter() {
                     let k2 = self.conform(k.clone(), kt).map_err(|e| format!("expected {}, but a key is wrong: {}", ty, e))?;
-                    let x2 = self.conform(x.clone(), vt).map_err(|e| format!("expected {}, but the value for key {} is wrong: {}", ty, short_repr(k), e))?;
+                    let x2 = self
+                        .conform(x.clone(), vt)
+                        .map_err(|e| format!("expected {}, but the value for key {} is wrong: {}", ty, short_repr(k), e))?;
                     out.insert(k2, x2);
                 }
                 return Ok(Value::Map(Rc::new(out)));
@@ -1628,7 +1640,8 @@ impl Interp {
                 for (n, t) in fs {
                     match r.names.iter().position(|x| x == n) {
                         Some(i) => {
-                            r2.values[i] = self.conform(r.values[i].clone(), t).map_err(|e| format!("expected {}, but field `{}` is wrong: {}", ty, n, e))?;
+                            r2.values[i] =
+                                self.conform(r.values[i].clone(), t).map_err(|e| format!("expected {}, but field `{}` is wrong: {}", ty, n, e))?;
                         }
                         None => return Err(format!("expected {}, but the record has no field `{}`", ty, n)),
                     }
@@ -1674,7 +1687,11 @@ impl Interp {
                 self.check_builtin_arity(*idx, args.len(), span)?;
                 match b.f {
                     BFn::Pure(fp) => fp(self, args, span),
-                    BFn::Mut(_) => Err(self.err(span, "E0111", format!("`{}` changes its first argument, so it must be called on a variable: `x.{}(...)`", b.name, b.name))),
+                    BFn::Mut(_) => Err(self.err(
+                        span,
+                        "E0111",
+                        format!("`{}` changes its first argument, so it must be called on a variable: `x.{}(...)`", b.name, b.name),
+                    )),
                 }
             }
             Value::Overload(cands) => {
@@ -1688,7 +1705,8 @@ impl Interp {
             }
             Value::Ctor(td, tag) => self.construct(td, *tag, args, named, span),
             Value::Variant(vv) => Err(self.fail(
-                self.diag(span, "E0202", format!("`{}` is a value, not a function", vv.name())).help(format!("write just `{}` without parentheses", vv.name())),
+                self.diag(span, "E0202", format!("`{}` is a value, not a function", vv.name()))
+                    .help(format!("write just `{}` without parentheses", vv.name())),
             )),
             other => Err(self.err(span, "E0202", format!("{} is not callable", describe(other)))),
         }
@@ -1730,14 +1748,18 @@ impl Interp {
         if n < b.min as usize || n > b.max as usize {
             let expect = if b.min == b.max {
                 format!("{}", b.min)
-            } else if b.max >= crate::builtins::VARIADIC {
+            } else if b.max == crate::builtins::VARIADIC {
                 format!("at least {}", b.min)
             } else {
                 format!("{} to {}", b.min, b.max)
             };
             return Err(self.fail(
-                self.diag(span, "E0201", format!("`{}` takes {} argument{}, but {} were given", b.name, expect, if expect == "1" { "" } else { "s" }, n))
-                    .note(format!("usage: {}", b.doc.lines().next().unwrap_or(""))),
+                self.diag(
+                    span,
+                    "E0201",
+                    format!("`{}` takes {} argument{}, but {} were given", b.name, expect, if expect == "1" { "" } else { "s" }, n),
+                )
+                .note(format!("usage: {}", b.doc.lines().next().unwrap_or(""))),
             ));
         }
         Ok(())
@@ -1785,7 +1807,11 @@ impl Interp {
         let cname = td.ctor_name(tag);
         let n = fields.len();
         if args.len() > n {
-            return Err(self.err(span, "E0201", format!("`{}` has {} field{}, but {} arguments were given", cname, n, if n == 1 { "" } else { "s" }, args.len())));
+            return Err(self.err(
+                span,
+                "E0201",
+                format!("`{}` has {} field{}, but {} arguments were given", cname, n, if n == 1 { "" } else { "s" }, args.len()),
+            ));
         }
         let mut vals: Vec<Option<Value>> = vec![None; n];
         for (i, a) in args.into_iter().enumerate() {
@@ -1816,9 +1842,9 @@ impl Interp {
             match v {
                 None => return Err(self.err(span, "E0201", format!("missing field `{}` when building `{}`", fields[i], cname))),
                 Some(v) => {
-                    let v = self.conform(v, &tys[i]).map_err(|m| {
-                        self.fail(self.diag(span, "E0200", format!("type mismatch for field `{}` of `{}`: {}", fields[i], cname, m)))
-                    })?;
+                    let v = self
+                        .conform(v, &tys[i])
+                        .map_err(|m| self.fail(self.diag(span, "E0200", format!("type mismatch for field `{}` of `{}`: {}", fields[i], cname, m))))?;
                     values.push(v);
                 }
             }
@@ -1836,7 +1862,14 @@ impl Interp {
 
     /// Call a closure. When `want_first` is set, also return the final value
     /// of the first parameter (used by mutating `!` functions).
-    pub fn call_closure_full(&mut self, c: &Rc<Closure>, args: Vec<Value>, named: Vec<(Name, Value)>, span: Span, want_first: bool) -> R<(Value, Value)> {
+    pub fn call_closure_full(
+        &mut self,
+        c: &Rc<Closure>,
+        args: Vec<Value>,
+        named: Vec<(Name, Value)>,
+        span: Span,
+        want_first: bool,
+    ) -> R<(Value, Value)> {
         let def = c.def.clone();
         self.tick(span)?;
         if self.stack.len() >= self.max_depth {
@@ -1848,8 +1881,18 @@ impl Interp {
         let nparams = def.params.len();
         if args.len() > nparams {
             return Err(self.fail(
-                self.diag(span, "E0201", format!("`{}` takes {} argument{}, but {} were given", def.display_name(), nparams, if nparams == 1 { "" } else { "s" }, args.len()))
-                    .note(format!("`{}` is defined at {}", def.display_name(), self.location(def.name_span))),
+                self.diag(
+                    span,
+                    "E0201",
+                    format!(
+                        "`{}` takes {} argument{}, but {} were given",
+                        def.display_name(),
+                        nparams,
+                        if nparams == 1 { "" } else { "s" },
+                        args.len()
+                    ),
+                )
+                .note(format!("`{}` is defined at {}", def.display_name(), self.location(def.name_span))),
             ));
         }
         let mut env = Env { locals: vec![Value::Unit; def.num_slots as usize], closure: Some(c.clone()) };
@@ -1906,7 +1949,12 @@ impl Interp {
                         return Err(self.fail({
                             let mut d = Diagnostic::error(
                                 "E0201",
-                                format!("`{}` is missing argument{} {}", def.display_name(), if missing.len() == 1 { "" } else { "s" }, missing.join(", ")),
+                                format!(
+                                    "`{}` is missing argument{} {}",
+                                    def.display_name(),
+                                    if missing.len() == 1 { "" } else { "s" },
+                                    missing.join(", ")
+                                ),
                             )
                             .at(span)
                             .note(format!("`{}` is defined at {}", def.display_name(), self.location(def.name_span)));
@@ -1922,10 +1970,11 @@ impl Interp {
                     match self.conform(v, &t.ty) {
                         Ok(v) => env.locals[p.slot as usize] = v,
                         Err(m) => {
-                            let mut d = Diagnostic::error("E0200", format!("type mismatch for parameter `{}` of `{}`: {}", p.name, def.display_name(), m))
-                                .at(span)
-                                .label(format!("`{}` expects {} here", def.display_name(), t.ty))
-                                .note(format!("`{}` is declared as `{}: {}` at {}", p.name, p.name, t.ty, self.location(p.span)));
+                            let mut d =
+                                Diagnostic::error("E0200", format!("type mismatch for parameter `{}` of `{}`: {}", p.name, def.display_name(), m))
+                                    .at(span)
+                                    .label(format!("`{}` expects {} here", def.display_name(), t.ty))
+                                    .note(format!("`{}` is declared as `{}: {}` at {}", p.name, p.name, t.ty, self.location(p.span)));
                             d.trace = self.trace(span, true);
                             return Err(self.fail(d));
                         }
@@ -1939,10 +1988,11 @@ impl Interp {
                     Value::Bool(true) => {}
                     Value::Bool(false) => {
                         let wh = self.where_values(r, env);
-                        let mut d = Diagnostic::error("E0301", format!("precondition of `{}` violated: `{}`", def.display_name(), self.snippet(r.span)))
-                            .at(span)
-                            .label(format!("this call breaks a precondition of `{}`", def.display_name()))
-                            .note(format!("`{}` requires `{}` (at {})", def.display_name(), self.snippet(r.span), self.location(r.span)));
+                        let mut d =
+                            Diagnostic::error("E0301", format!("precondition of `{}` violated: `{}`", def.display_name(), self.snippet(r.span)))
+                                .at(span)
+                                .label(format!("this call breaks a precondition of `{}`", def.display_name()))
+                                .note(format!("`{}` requires `{}` (at {})", def.display_name(), self.snippet(r.span), self.location(r.span)));
                         if !wh.is_empty() {
                             d = d.note(format!("where {}", wh.join(", ")));
                         }

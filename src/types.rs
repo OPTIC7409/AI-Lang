@@ -21,7 +21,11 @@ pub enum Ty {
     Record(Vec<(Name, Ty)>),
     Fn(Vec<Ty>, Box<Ty>),
     /// A user-declared (or built-in Option/Result) type.
-    Named { id: u32, name: Name, args: Vec<Ty> },
+    Named {
+        id: u32,
+        name: Name,
+        args: Vec<Ty>,
+    },
     /// The i-th type parameter of the enclosing type declaration.
     Param(u32, Name),
     /// A function-level generic parameter: accepts anything.

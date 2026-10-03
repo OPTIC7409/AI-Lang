@@ -56,7 +56,7 @@ fn mk(kind: ExprKind, span: Span) -> Expr {
 }
 
 fn new_fn(name: Option<Name>, name_span: Span, span: Span, params: Vec<Param>, body: Expr) -> FnDef {
-    let mutating = name.as_ref().map_or(false, |n| n.ends_with('!'));
+    let mutating = name.as_ref().is_some_and(|n| n.ends_with('!'));
     FnDef {
         name,
         name_span,
@@ -160,9 +160,8 @@ impl<'s> Parser<'s> {
 
     fn unexpected(&self, expected: &str) -> Diagnostic {
         let found = self.peek().describe();
-        let mut d = Diagnostic::error("E0010", format!("expected {}, found {}", expected, found))
-            .at(self.span())
-            .label(format!("expected {}", expected));
+        let mut d =
+            Diagnostic::error("E0010", format!("expected {}, found {}", expected, found)).at(self.span()).label(format!("expected {}", expected));
         if let Tok::Eof = self.peek() {
             d = d.label("the file ended here").help("check for a missing closing bracket or brace");
         }
@@ -238,12 +237,11 @@ impl<'s> Parser<'s> {
                     .label("uppercase names are reserved for types and constructors")
                     .help(format!("rename it to `{}`", lower)))
             }
-            t if crate::lexer::KEYWORDS.contains(&t.text()) => Err(Diagnostic::error(
-                "E0010",
-                format!("`{}` is a keyword and cannot be used as a {}", t.text(), what),
-            )
-            .at(self.span())
-            .help(format!("choose a different name, e.g. `{}_`", t.text()))),
+            t if crate::lexer::KEYWORDS.contains(&t.text()) => {
+                Err(Diagnostic::error("E0010", format!("`{}` is a keyword and cannot be used as a {}", t.text(), what))
+                    .at(self.span())
+                    .help(format!("choose a different name, e.g. `{}_`", t.text())))
+            }
             _ => Err(self.unexpected(what)),
         }
     }
@@ -357,10 +355,7 @@ impl<'s> Parser<'s> {
                 self.skip_newlines();
                 self.expr()
             }
-            Tok::Assign => Err(self.unexpected("function body").help(format!(
-                "single-expression functions use `=>`: `fn {}(x) => x * 2`",
-                name
-            ))),
+            Tok::Assign => Err(self.unexpected("function body").help(format!("single-expression functions use `=>`: `fn {}(x) => x * 2`", name))),
             _ => Err(self.unexpected("function body `{ ... }` or `=> expression`")),
         }
     }
@@ -496,9 +491,7 @@ impl<'s> Parser<'s> {
                 for p in parts {
                     match p {
                         StrPart::Lit(l) => s.push_str(&l),
-                        StrPart::Expr { .. } => {
-                            return Err(Diagnostic::error("E0010", format!("{} cannot contain interpolation", what)).at(sp))
-                        }
+                        StrPart::Expr { .. } => return Err(Diagnostic::error("E0010", format!("{} cannot contain interpolation", what)).at(sp)),
                     }
                 }
                 Ok((s, sp))
@@ -524,9 +517,7 @@ impl<'s> Parser<'s> {
         let start = self.expect(&Tok::Property, "`property`")?;
         let (name, _) = self.plain_string("property name (a string)")?;
         if !self.at(&Tok::LParen) {
-            return Err(self
-                .unexpected("`(` with the property's inputs")
-                .help("write `property \"name\" (x: Int, xs: List[Int]) { ... }`"));
+            return Err(self.unexpected("`(` with the property's inputs").help("write `property \"name\" (x: Int, xs: List[Int]) { ... }`"));
         }
         let params = self.params()?;
         let mut requires = Vec::new();
@@ -587,11 +578,10 @@ impl<'s> Parser<'s> {
                 let span = def.span;
                 Ok(Stmt { kind: StmtKind::Fn { def: Rc::new(def), res: VarRes::Unresolved }, span })
             }
-            Tok::Type | Tok::Test | Tok::Property | Tok::Import => Err(Diagnostic::error(
-                "E0116",
-                format!("`{}` declarations are only allowed at the top level of a file", self.peek().text()),
-            )
-            .at(self.span())),
+            Tok::Type | Tok::Test | Tok::Property | Tok::Import => {
+                Err(Diagnostic::error("E0116", format!("`{}` declarations are only allowed at the top level of a file", self.peek().text()))
+                    .at(self.span()))
+            }
             Tok::Assert => {
                 self.bump();
                 let cond = self.expr()?;
@@ -611,8 +601,8 @@ impl<'s> Parser<'s> {
                     _ => None,
                 };
                 if let Some(op) = op {
-                    let op_span = self.bump().span;
-                    check_place(&e, op_span)?;
+                    self.bump();
+                    check_place(&e)?;
                     self.skip_newlines();
                     let value = self.expr()?;
                     let span = e.span.to(value.span);
@@ -633,10 +623,7 @@ impl<'s> Parser<'s> {
                 break;
             }
             if self.at(&Tok::Eof) {
-                return Err(Diagnostic::error("E0010", "unclosed `{`")
-                    .at(open)
-                    .label("this block is never closed")
-                    .help("add a matching `}`"));
+                return Err(Diagnostic::error("E0010", "unclosed `{`").at(open).label("this block is never closed").help("add a matching `}`"));
             }
             stmts.push(self.stmt()?);
             self.expect_terminator()?;
@@ -709,9 +696,11 @@ impl<'s> Parser<'s> {
         self.skip_newlines();
         let rhs = self.pipe_expr()?;
         if let Some((op2, _)) = self.cmp_op() {
-            return Err(Diagnostic::error("E0011", "comparison operators cannot be chained")
-                .at(op_span.to(self.span()))
-                .help(format!("write `a {} b and b {} c` instead", op.symbol(), op2.symbol())));
+            return Err(Diagnostic::error("E0011", "comparison operators cannot be chained").at(op_span.to(self.span())).help(format!(
+                "write `a {} b and b {} c` instead",
+                op.symbol(),
+                op2.symbol()
+            )));
         }
         let span = lhs.span.to(rhs.span);
         Ok(mk(ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }, span))
@@ -898,20 +887,14 @@ impl<'s> Parser<'s> {
                     if let ExprKind::Var(v) = &e.kind {
                         if v.name.ends_with('!') {
                             if args.is_empty() || args[0].name.is_some() {
-                                return Err(Diagnostic::error(
-                                    "E0111",
-                                    format!("`{}` mutates its first argument, so it needs one", v.name),
-                                )
-                                .at(span)
-                                .help(format!("call it as `variable.{}(...)`", v.name)));
+                                return Err(Diagnostic::error("E0111", format!("`{}` mutates its first argument, so it needs one", v.name))
+                                    .at(span)
+                                    .help(format!("call it as `variable.{}(...)`", v.name)));
                             }
                             let receiver = args.remove(0).value;
                             let method = Var::new(v.name.clone());
                             let method_span = e.span;
-                            e = mk(
-                                ExprKind::MethodCall { receiver: Box::new(receiver), method, method_span, args, mutating: true },
-                                span,
-                            );
+                            e = mk(ExprKind::MethodCall { receiver: Box::new(receiver), method, method_span, args, mutating: true }, span);
                             continue;
                         }
                     }
@@ -942,13 +925,7 @@ impl<'s> Parser<'s> {
                                 let span = e.span.to(aspan);
                                 let mutating = name.ends_with('!');
                                 e = mk(
-                                    ExprKind::MethodCall {
-                                        receiver: Box::new(e),
-                                        method: Var::new(name),
-                                        method_span: name_span,
-                                        args,
-                                        mutating,
-                                    },
+                                    ExprKind::MethodCall { receiver: Box::new(e), method: Var::new(name), method_span: name_span, args, mutating },
                                     span,
                                 );
                             } else if name.ends_with('!') {
@@ -1677,10 +1654,10 @@ impl<'s> Parser<'s> {
     }
 }
 
-fn check_place(e: &Expr, op_span: Span) -> PResult<()> {
+fn check_place(e: &Expr) -> PResult<()> {
     match &e.kind {
         ExprKind::Var(_) => Ok(()),
-        ExprKind::Field { target, .. } | ExprKind::Index { target, .. } => check_place(target, op_span),
+        ExprKind::Field { target, .. } | ExprKind::Index { target, .. } => check_place(target),
         _ => Err(Diagnostic::error("E0012", "invalid assignment target")
             .at(e.span)
             .label("cannot assign to this")

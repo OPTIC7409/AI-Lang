@@ -1,0 +1,27 @@
+{
+  "name": "cogito-lang",
+  "displayName": "Cogito",
+  "description": "Syntax highlighting for the Cogito programming language",
+  "version": "0.1.0",
+  "publisher": "cogito-lang",
+  "license": "MIT",
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "cogito",
+        "aliases": ["Cogito", "cogito"],
+        "extensions": [".cog"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "cogito",
+        "scopeName": "source.cogito",
+        "path": "./syntaxes/cogito.tmLanguage.json"
+      }
+    ]
+  }
+}

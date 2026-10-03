@@ -44,8 +44,9 @@ impl<'a> Gen<'a> {
             }
             Ty::Float => {
                 let r = self.rng.below(100);
-                if r < 10 {
-                    Value::Float([0.0, 1.0, -1.0, 0.5][self.rng.below(4)])
+                if r < 20 {
+                    const SPECIAL: [f64; 12] = [0.0, 1.0, -1.0, 0.5, 0.1, 0.2, 0.3, -0.1, 1e-9, 1e9, 2.5, 1.0 / 3.0];
+                    Value::Float(SPECIAL[self.rng.below(SPECIAL.len())])
                 } else if r < 85 {
                     let whole = self.rng.range(-size, size) as f64;
                     let frac = (self.rng.below(1000) as f64) / 1000.0;
@@ -78,8 +79,22 @@ impl<'a> Gen<'a> {
                 let n = self.rng.below(size as usize + 1);
                 let inner = (size as u32 / 2).max(2);
                 let mut xs = Vec::with_capacity(n);
-                for _ in 0..n {
-                    xs.push(self.value(t, inner, depth + 1)?);
+                // Bugs cluster around duplicates, so sometimes draw the
+                // elements from a small pool of values.
+                let mode = self.rng.below(100);
+                if mode < 25 && n > 1 {
+                    let pool_size = if mode < 10 { 1 } else { 2 + self.rng.below(2) };
+                    let mut pool = Vec::with_capacity(pool_size);
+                    for _ in 0..pool_size {
+                        pool.push(self.value(t, inner, depth + 1)?);
+                    }
+                    for _ in 0..n {
+                        xs.push(pool[self.rng.below(pool.len())].clone());
+                    }
+                } else {
+                    for _ in 0..n {
+                        xs.push(self.value(t, inner, depth + 1)?);
+                    }
                 }
                 Value::list(xs)
             }
@@ -133,7 +148,11 @@ impl<'a> Gen<'a> {
             }
             TypeKind::Enum { variants } => {
                 let simple: Vec<usize> = (0..variants.len()).filter(|i| !variants[*i].tys.iter().any(|t| mentions(t, td.id))).collect();
-                let tag = if (depth >= 4 || size <= 1) && !simple.is_empty() { simple[self.rng.below(simple.len())] } else { self.rng.below(variants.len()) };
+                let tag = if (depth >= 4 || size <= 1) && !simple.is_empty() {
+                    simple[self.rng.below(simple.len())]
+                } else {
+                    self.rng.below(variants.len())
+                };
                 let v = &variants[tag];
                 let mut vals = Vec::new();
                 for t in &v.tys {
@@ -169,6 +188,11 @@ pub fn shrink(v: &Value) -> Vec<Value> {
             let f = *f;
             if f != 0.0 {
                 out.push(Value::Float(0.0));
+                for nice in [1.0, 0.5, 0.1] {
+                    if nice < f.abs() {
+                        out.push(Value::Float(nice * f.signum()));
+                    }
+                }
                 if f < 0.0 {
                     out.push(Value::Float(-f));
                 }
