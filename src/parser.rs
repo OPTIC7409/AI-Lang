@@ -735,6 +735,11 @@ impl<'s> Parser<'s> {
 
     fn cmp_expr(&mut self) -> PResult<Expr> {
         let lhs = self.pipe_expr()?;
+        if self.eat(&Tok::Is) {
+            let pat = self.pattern()?;
+            let span = lhs.span.to(pat.span);
+            return Ok(mk(ExprKind::Is { expr: Box::new(lhs), pat }, span));
+        }
         let Some((op, n)) = self.cmp_op() else { return Ok(lhs) };
         let op_span = self.span();
         for _ in 0..n {

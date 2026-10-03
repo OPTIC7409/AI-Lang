@@ -26,7 +26,7 @@ program's `args()`.
   first argument (see Mutation).
 - Keywords (not usable as names or field names): `let var fn return if else
   while for in loop break continue match type test property requires ensures
-  and or not true false import as assert where`.
+  and or not true false import as assert where is`.
 - Numbers: `42`, `1_000`, `0xff`, `0b1010`, `0o17`, `3.14`, `1e-9`. Int is
   64-bit signed; overflow is an error (never wraps).
 - Strings: `"..."` with escapes `\n \t \r \\ \" \0 \{ \} \u{1F600}`.
@@ -211,6 +211,10 @@ match value {
 }
 ```
 
+`value is Pattern` tests a value against a pattern without binding
+anything: `slots.count(fn(s) => s is Full(_))`, `if r is Err(_) { ... }`.
+It cannot bind names (use `match` for that).
+
 Arms are separated by newlines or commas. A `match` must be exhaustive (or
 have `_`). This is checked before the program runs, for enums, Bools,
 tuples, records, list lengths and literals (a literal never covers all
@@ -351,15 +355,17 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   Output to a pipe or file is buffered until it is large, the program ends,
   or `flush()` is called.
 - **Core**: `type_of(x)` `str(x)` `repr(x)` `int(x)` `float(x)`
-  `parse_int(s) -> Option` (decimal only; surrounding spaces allowed)
+  `parse_int(s, base = 10) -> Option` (surrounding spaces allowed; base 2–36,
+  with an optional matching `0x`/`0o`/`0b` prefix) `hash(x) -> Int`
   `parse_float(s) -> Option` `ord(c)` `chr(n)`
   `panic(msg)` `todo()` `dbg(x)` (prints and returns x) `catch(f)` `compare(a, b)`
   `min(xs) -> Option` / `min(a, b, ...)`, `max` likewise
 - **Math**: `abs sqrt pow exp ln log(x, base) log2 log10 sin cos tan asin acos
   atan atan2 hypot floor ceil trunc` (floor/ceil/trunc/round return Int),
   `round(x, digits) -> Float`, `sign clamp(x, lo, hi) gcd lcm is_nan fixed(x, digits) -> Str`,
-  `bit_and bit_or bit_xor bit_not shl shr` (no wrapping arithmetic: overflow
-  is always an error), constants `pi tau e inf max_int min_int`,
+  `bit_and bit_or bit_xor bit_not shl shr`, `wrapping_add wrapping_sub
+  wrapping_mul` (wrap around instead of failing, for hashes and checksums;
+  the operators always fail on overflow), constants `pi tau e inf max_int min_int`,
   `seed(n) random() random_int(lo, hi) shuffle(xs) choice(xs) -> Option`
 - **Collections** (lists; most also accept ranges, strings, tuples, maps):
   `len is_empty range(end) range(start, end, step) first last get(i) -> Option
@@ -379,8 +385,10 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   map_values(f) get(k) get_or(k, d) insert(k, v) remove(k)`. On a map,
   `filter each count any all find partition` pass the key and value to a
   two-parameter function (a one-parameter function gets a `(k, v)` tuple);
-  `map` is an error (use `map_values`, or `entries().map(...)`). There is no
-  default-insert: `m[k] = m.get_or(k, []) + [x]`.
+  `map` is an error (use `map_values`, or `entries().map(...)`).
+  `m.update!(k, default, f)` sets `m[k]` to `f(m[k])`, starting from the
+  default when `k` is missing (`counts.update!(w, 0, fn(n) => n + 1)`);
+  `update(m, k, default, f)` returns a new map.
 - **Strings**: `split(sep, limit)` (no sep: whitespace, with no limit) `split_once(sep) -> Option[(Str, Str)]`
   `lines words chars trim trim_start trim_end upper lower capitalize` (uppercases
   only the first character) `starts_with ends_with strip_prefix(p) -> Option

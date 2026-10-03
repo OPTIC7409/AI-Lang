@@ -29,6 +29,7 @@ pub enum Tok {
     While,
     For,
     In,
+    Is,
     Loop,
     Break,
     Continue,
@@ -117,6 +118,7 @@ pub fn keyword(s: &str) -> Option<Tok> {
         "while" => Tok::While,
         "for" => Tok::For,
         "in" => Tok::In,
+        "is" => Tok::Is,
         "loop" => Tok::Loop,
         "break" => Tok::Break,
         "continue" => Tok::Continue,
@@ -141,7 +143,7 @@ pub fn keyword(s: &str) -> Option<Tok> {
 
 pub const KEYWORDS: &[&str] = &[
     "let", "var", "fn", "return", "if", "else", "while", "for", "in", "loop", "break", "continue", "match", "type", "test", "property", "requires",
-    "ensures", "and", "or", "not", "true", "false", "import", "as", "assert", "where",
+    "ensures", "and", "or", "not", "true", "false", "import", "as", "assert", "where", "is",
 ];
 
 impl Tok {
@@ -168,6 +170,7 @@ impl Tok {
             Tok::While => "while",
             Tok::For => "for",
             Tok::In => "in",
+            Tok::Is => "is",
             Tok::Loop => "loop",
             Tok::Break => "break",
             Tok::Continue => "continue",

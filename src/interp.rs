@@ -1180,6 +1180,10 @@ impl Interp {
                 };
                 Ok(Value::Range(Rc::new(RangeVal { start: s, end })))
             }
+            ExprKind::Is { expr, pat } => {
+                let v = self.eval(expr, env)?;
+                Ok(Value::Bool(self.match_pattern(pat, &v, env)))
+            }
             ExprKind::Try(inner) => {
                 let v = self.eval(inner, env)?;
                 match &v {
@@ -2552,6 +2556,7 @@ impl Interp {
                 (Ty::List(_), "extend!") => vec![(0, t.clone())],
                 (Ty::List(et), "insert!") => vec![(1, (**et).clone())],
                 (Ty::Map(kt, vt), "insert!") => vec![(0, (**kt).clone()), (1, (**vt).clone())],
+                (Ty::Map(kt, vt), "update!") => vec![(0, (**kt).clone()), (1, (**vt).clone())],
                 _ => vec![],
             };
             for (k, want) in checks {
@@ -2594,6 +2599,15 @@ impl Interp {
             (Some(t), Value::Func(c)) if c.def.params.first().and_then(|p| p.ty.as_ref()).map(|pt| &pt.ty) != Some(t) => Some(target.clone()),
             _ => None,
         };
+        // update! changes one entry: remember which, to check only that one.
+        let updated_key = match &f {
+            Value::Builtin(i) if BUILTINS[*i as usize].name == "update!" => pos.first().cloned(),
+            _ => None,
+        };
+        let old_entry = match (&updated_key, &target) {
+            (Some(k), Value::Map(m)) => Some(m.get(k).cloned()),
+            _ => None,
+        };
         let result = self.call_mutating(&f, &mut target, pos, named, span);
         let mut type_error = None;
         if let (Ok(_), Some(t)) = (&result, &expected) {
@@ -2610,6 +2624,13 @@ impl Interp {
                 {
                     xs.set_checked(t.fingerprint());
                     true
+                }
+                (Some((true, _)), Value::Map(m), Ty::Map(_, vt)) if builtin == "update!" => {
+                    let ok = updated_key.as_ref().and_then(|k| m.get(k)).is_some_and(|v| self.has_type(v, vt, false));
+                    if ok {
+                        m.set_checked(t.fingerprint());
+                    }
+                    ok
                 }
                 (Some((true, _)), Value::Map(m), _) if matches!(builtin, "remove!" | "clear!") => {
                     m.set_checked(t.fingerprint());
@@ -2628,12 +2649,20 @@ impl Interp {
                 match self.conform(target.clone(), t) {
                     Ok(v) => target = v,
                     Err(m) => {
-                        let restored = match backup {
-                            Some(old) => {
+                        let restored = match (backup, &updated_key, &old_entry, &mut target) {
+                            (Some(old), ..) => {
                                 target = old;
                                 "; the change was undone"
                             }
-                            None => "",
+                            (None, Some(k), Some(prev), Value::Map(m)) => {
+                                let m = Rc::make_mut(m);
+                                match prev {
+                                    Some(v) => m.insert(k.clone(), v.clone()),
+                                    None => m.remove(k),
+                                };
+                                "; the change was undone"
+                            }
+                            _ => "",
                         };
                         type_error = Some(
                             self.fail(

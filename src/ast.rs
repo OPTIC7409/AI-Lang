@@ -408,6 +408,11 @@ pub enum ExprKind {
         inclusive: bool,
     },
     Try(Box<Expr>),
+    /// `value is Pattern`: whether the value matches the pattern.
+    Is {
+        expr: Box<Expr>,
+        pat: Pattern,
+    },
     If {
         cond: Box<Expr>,
         then: Box<Expr>,
@@ -537,7 +542,7 @@ pub fn for_each_child_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
             f(receiver);
             args.iter_mut().for_each(|a| f(&mut a.value));
         }
-        ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => f(expr),
+        ExprKind::Unary { expr, .. } | ExprKind::Try(expr) | ExprKind::Is { expr, .. } => f(expr),
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::And(lhs, rhs) | ExprKind::Or(lhs, rhs) => {
             f(lhs);
             f(rhs);

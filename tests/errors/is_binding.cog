@@ -1,0 +1,5 @@
+# expect: E0120
+let r = Some(3)
+if r is Some(v) {
+  print("found")
+}

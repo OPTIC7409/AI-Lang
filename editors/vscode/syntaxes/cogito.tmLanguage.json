@@ -41,7 +41,7 @@
         { "match": "\\b(if|else|while|for|in|loop|break|continue|match|return)\\b", "name": "keyword.control.cogito" },
         { "match": "\\b(requires|ensures|where|assert)\\b", "name": "keyword.other.contract.cogito" },
         { "match": "\\b(let|var|fn|type|import|as)\\b", "name": "storage.type.cogito" },
-        { "match": "\\b(and|or|not)\\b", "name": "keyword.operator.logical.cogito" },
+        { "match": "\\b(and|or|not|is)\\b", "name": "keyword.operator.logical.cogito" },
         { "match": "\\bresult\\b", "name": "variable.language.result.cogito" }
       ]
     },

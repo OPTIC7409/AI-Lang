@@ -371,7 +371,7 @@ details.stdin textarea {
 
   // ---------------------------------------------------------------- editor
 
-  const KEYWORDS = new Set("let var fn return if else while for in loop break continue match type test property requires ensures and or not true false import as assert where".split(" "));
+  const KEYWORDS = new Set("let var fn return if else while for in loop break continue match type test property requires ensures and or not true false import as assert where is".split(" "));
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 
   function highlight(code) {

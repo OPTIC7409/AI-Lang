@@ -317,6 +317,13 @@ impl Hash for HKey {
     }
 }
 
+/// A hash of any value; equal values have equal hashes.
+pub fn hash_of(v: &Value) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    hash_value(v, &mut h);
+    h.finish()
+}
+
 fn hash_value<H: Hasher>(v: &Value, h: &mut H) {
     hash_inner(v, h, &mut None)
 }

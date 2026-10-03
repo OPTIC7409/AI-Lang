@@ -1227,7 +1227,7 @@ impl<'a> Resolver<'a> {
                         .at(span)
                         .label("captured variable")
                         .note("closures capture a snapshot of the values they use, not the variables themselves")
-                        .help("return the new value from the closure instead, or use a loop");
+                        .help("return the new value from the closure instead, or use a loop; to keep state between calls (a memo table, a counter), pass it to a `!` function as its first argument");
                 } else if let VarRes::Global(slot) = found.res {
                     let kind = self.ctx.globals[slot as usize].kind.clone();
                     d = Diagnostic::error(code, format!("cannot change `{}`", name)).at(span);
@@ -1818,6 +1818,19 @@ impl<'a> Resolver<'a> {
                 if let Some(e) = end {
                     self.expr(e);
                 }
+            }
+            ExprKind::Is { expr, pat } => {
+                self.expr(expr);
+                if let Some(b) = first_binding(pat) {
+                    let d = Diagnostic::error("E0120", "an `is` pattern cannot bind names")
+                        .at(b)
+                        .label("this name would be bound")
+                        .help("`is` only tests the shape of a value: use `_` here, or use `match` to take the value apart");
+                    self.error(d);
+                }
+                self.push_scope();
+                self.pattern(pat, BindMode::Local);
+                self.pop_scope();
             }
             ExprKind::Try(inner) => {
                 self.expr(inner);
@@ -2449,6 +2462,22 @@ fn extract_olds(e: &mut Expr, out: &mut Vec<Expr>) {
         }
     }
     for_each_child_mut(e, &mut |c| extract_olds(c, out));
+}
+
+/// The first name a pattern binds, if any (`_` binds nothing).
+fn first_binding(p: &Pattern) -> Option<Span> {
+    match &p.kind {
+        PatKind::Bind { .. } => Some(p.span),
+        PatKind::Wild | PatKind::Lit(_) | PatKind::Range { .. } => None,
+        PatKind::Tuple(ps) | PatKind::Or(ps) => ps.iter().find_map(first_binding),
+        PatKind::List { before, rest, after } => before
+            .iter()
+            .chain(after.iter())
+            .find_map(first_binding)
+            .or_else(|| rest.as_ref().and_then(|r| r.as_ref()).and_then(|r| first_binding(r))),
+        PatKind::Ctor { args, .. } => args.iter().find_map(|(_, p)| first_binding(p)),
+        PatKind::Record { fields, .. } => fields.iter().find_map(|(_, p)| first_binding(p)),
+    }
 }
 
 /// The part of a pattern that can never match a value of type `ty`, if any.

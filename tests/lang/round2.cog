@@ -230,3 +230,42 @@ test "built-ins take named arguments in each of their forms" {
 property "a minimum string length steers generation" (s: Str) where s.len() > 30 {
   assert s.len() > 30
 }
+
+type Slot = Empty | Full(Int)
+
+test "is tests a value against a pattern" {
+  let slots = [Full(1), Empty, Full(3)]
+  assert slots.count(fn(s) => s is Full(_)) == 2
+  assert Some(3) is Some(1..=5)
+  assert not (None is Some(_))
+  assert [1, 2] is [_, _]
+  assert [s for s in slots if s is Empty | Full(1)] == [Full(1), Empty]
+}
+
+test "parse_int takes a base" {
+  assert parse_int("ff", 16) == Some(255)
+  assert parse_int("0xff", 16) == Some(255)
+  assert parse_int("-101", 2) == Some(-5)
+  assert parse_int("12", 2) == None
+  assert parse_int("-9223372036854775808") == Some(min_int)
+  assert parse_int("9223372036854775808") == None
+}
+
+test "wrapping arithmetic and hashing" {
+  assert wrapping_add(max_int, 1) == min_int
+  assert wrapping_sub(min_int, 1) == max_int
+  assert wrapping_mul(shl(1, 62), 4) == 0
+  assert hash([1, 2]) == hash([1.0, 2])
+}
+
+var word_counts: Map[Str, Int] = [:]
+
+test "update! changes one map entry" {
+  for w in "a b a c a b".words() {
+    word_counts.update!(w, 0, fn(n) => n + 1)
+  }
+  assert word_counts == ["a": 3, "b": 2, "c": 1]
+  assert catch(fn() => word_counts.update!("z", 0, fn(n) => "bad")).is_err()
+  assert not word_counts.has("z")
+  assert ["x": 1].update("y", 5, fn(n) => n + 1) == ["x": 1, "y": 6]
+}

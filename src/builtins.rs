@@ -79,7 +79,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("convert", "repr", 1, 1, b_repr, "repr(x) -> Str\nThe source-code form of a value (strings are quoted)."),
     b!("convert", "int", 1, 1, b_int, "int(x: Float | Str | Bool) -> Int\nConvert to Int (truncating Floats). Errors on invalid strings; see parse_int."),
     b!("convert", "float", 1, 1, b_float, "float(x: Int | Str) -> Float\nConvert to Float. Errors on invalid strings; see parse_float."),
-    b!("convert", "parse_int", 1, 1, b_parse_int, "parse_int(s: Str) -> Option[Int]\nParse an integer, or None."),
+    b!("convert", "parse_int", 1, 2, b_parse_int, "parse_int(s: Str, base: Int = 10) -> Option[Int]\nParse an integer in the given base (2 to 36; a matching 0x, 0o or 0b prefix is allowed), or None."),
     b!("convert", "parse_float", 1, 1, b_parse_float, "parse_float(s: Str) -> Option[Float]\nParse a number, or None."),
     b!("convert", "ord", 1, 1, b_ord, "ord(c: Str) -> Int\nThe Unicode code point of a one-character string."),
     b!("convert", "chr", 1, 1, b_chr, "chr(n: Int) -> Str\nThe one-character string for a Unicode code point."),
@@ -112,6 +112,10 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("math", "lcm", 2, 2, b_lcm, "lcm(a: Int, b: Int) -> Int\nLeast common multiple."),
     b!("math", "is_nan", 1, 1, b_is_nan, "is_nan(x: Float) -> Bool\nWhether x is not-a-number."),
     b!("math", "fixed", 2, 2, b_fixed, "fixed(x: Float, digits: Int) -> Str\nFormat a number with exactly `digits` decimals."),
+    b!("math", "wrapping_add", 2, 2, b_wrapping_add, "wrapping_add(a: Int, b: Int) -> Int\nAddition that wraps around on overflow instead of failing (for hashing and checksums)."),
+    b!("math", "wrapping_sub", 2, 2, b_wrapping_sub, "wrapping_sub(a: Int, b: Int) -> Int\nSubtraction that wraps around on overflow."),
+    b!("math", "wrapping_mul", 2, 2, b_wrapping_mul, "wrapping_mul(a: Int, b: Int) -> Int\nMultiplication that wraps around on overflow."),
+    b!("core", "hash", 1, 1, b_hash, "hash(x) -> Int\nA hash of any value: equal values have equal hashes. Stable within one version of Cogito."),
     b!("math", "bit_and", 2, 2, b_bit_and, "bit_and(a: Int, b: Int) -> Int\nBitwise and."),
     b!("math", "bit_or", 2, 2, b_bit_or, "bit_or(a: Int, b: Int) -> Int\nBitwise or."),
     b!("math", "bit_xor", 2, 2, b_bit_xor, "bit_xor(a: Int, b: Int) -> Int\nBitwise exclusive or."),
@@ -143,6 +147,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     m!("collections", "clear!", 1, 1, m_clear, "xs.clear!()\nRemove all elements from a list or map variable."),
     m!("collections", "swap!", 3, 3, m_swap, "xs.swap!(i, j)\nSwap two elements of the list variable xs."),
     b!("collections", "get", 2, 2, b_get, "get(xs, i) -> Option[T]   |   get(m, k) -> Option[V]\nThe element at index i (or key k), or None."),
+    b!("collections", "update", 4, 4, b_update, "update(m: Map[K, V], k: K, default: V, f: fn(V) -> V) -> Map[K, V]\nA copy with m[k] replaced by f(m[k]), using the default when k is missing."),
+    m!("collections", "update!", 4, 4, m_update, "m.update!(k, default, f)\nSet m[k] to f(m[k]) in the map variable, using the default when k is missing: `counts.update!(w, 0, fn(n) => n + 1)`."),
     b!("collections", "get_or", 3, 3, b_get_or, "get_or(xs_or_map, key, default)\nThe element at the index or key, or the default."),
     b!("collections", "first", 1, 1, b_first, "first(xs) -> Option[T]\nThe first element, or None."),
     b!("collections", "last", 1, 1, b_last, "last(xs) -> Option[T]\nThe last element, or None."),
@@ -866,8 +872,44 @@ fn b_float(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 }
 
 fn b_parse_int(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
-    let s = str_arg(it, &a, 0, "parse_int", sp)?;
-    Ok(it.option(s.trim().parse::<i64>().ok().map(Value::Int)))
+    let s = str_arg(it, &a, 0, "parse_int", sp)?.trim();
+    let base = if a.len() == 2 { int_arg(it, &a, 1, "parse_int", sp)? } else { 10 };
+    if !(2..=36).contains(&base) {
+        return Err(it.err(sp, "E0216", format!("`parse_int` base must be between 2 and 36, got {}", base)));
+    }
+    let (neg, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let prefix = match base {
+        16 => ["0x", "0X"],
+        8 => ["0o", "0O"],
+        2 => ["0b", "0B"],
+        _ => ["", ""],
+    };
+    let digits = prefix.iter().filter(|p| !p.is_empty()).find_map(|p| digits.strip_prefix(p)).unwrap_or(digits);
+    if digits.is_empty() || digits.starts_with(['+', '-']) {
+        return Ok(it.none());
+    }
+    // Parse the magnitude as u64 so that min_int is representable.
+    let n = u64::from_str_radix(digits, base as u32).ok().and_then(|m| if neg { 0i64.checked_sub_unsigned(m) } else { i64::try_from(m).ok() });
+    Ok(it.option(n.map(Value::Int)))
+}
+
+fn b_wrapping_add(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    Ok(Value::Int(int_arg(it, &a, 0, "wrapping_add", sp)?.wrapping_add(int_arg(it, &a, 1, "wrapping_add", sp)?)))
+}
+
+fn b_wrapping_sub(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    Ok(Value::Int(int_arg(it, &a, 0, "wrapping_sub", sp)?.wrapping_sub(int_arg(it, &a, 1, "wrapping_sub", sp)?)))
+}
+
+fn b_wrapping_mul(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    Ok(Value::Int(int_arg(it, &a, 0, "wrapping_mul", sp)?.wrapping_mul(int_arg(it, &a, 1, "wrapping_mul", sp)?)))
+}
+
+fn b_hash(_: &mut Interp, a: Vec<Value>, _: Span) -> R {
+    Ok(Value::Int(hash_of(&a[0]) as i64))
 }
 
 fn b_parse_float(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -1312,6 +1354,37 @@ fn b_insert(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
         }
         v => Err(type_err(it, "insert", 0, "a List or Map", &v, sp)),
     }
+}
+
+fn b_update(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
+    let f = fn_arg(it, &a, 3, "update", sp)?;
+    let default = take_arg(&mut a, 2);
+    let k = take_arg(&mut a, 1);
+    match take_arg(&mut a, 0) {
+        Value::Map(mut m) => {
+            let cur = m.get(&k).cloned().unwrap_or(default);
+            let new = it.call(&f, vec![cur], sp)?;
+            Rc::make_mut(&mut m).insert(k, new);
+            Ok(Value::Map(m))
+        }
+        v => Err(type_err(it, "update", 0, "a Map", &v, sp)),
+    }
+}
+
+fn m_update(it: &mut Interp, t: &mut Value, mut a: Vec<Value>, sp: Span) -> R {
+    let f = fn_arg(it, &a, 2, "update!", sp)?;
+    let default = take_arg(&mut a, 1);
+    let k = take_arg(&mut a, 0);
+    let cur = match &*t {
+        Value::Map(m) => m.get(&k).cloned().unwrap_or(default),
+        v => return Err(type_err(it, "update!", 0, "a Map", v, sp)),
+    };
+    // Compute first, so that an error leaves the map unchanged.
+    let new = it.call(&f, vec![cur], sp)?;
+    if let Value::Map(m) = t {
+        Rc::make_mut(m).insert(k, new);
+    }
+    Ok(Value::Unit)
 }
 
 fn m_insert(it: &mut Interp, t: &mut Value, mut a: Vec<Value>, sp: Span) -> R {
