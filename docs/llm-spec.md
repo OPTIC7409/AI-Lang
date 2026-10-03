@@ -1,0 +1,1 @@
+# Cogito spec (placeholder)

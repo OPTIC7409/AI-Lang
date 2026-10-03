@@ -1,0 +1,26 @@
+[package]
+name = "cogito"
+version = "0.1.0"
+edition = "2021"
+description = "Cogito: a programming language designed and implemented by an AI"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/OPTIC7409/AI-Lang"
+keywords = ["language", "interpreter", "contracts", "property-testing"]
+categories = ["compilers"]
+
+[[bin]]
+name = "cogito"
+path = "src/main.rs"
+
+[lib]
+name = "cogito"
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"
