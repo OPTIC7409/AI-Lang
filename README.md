@@ -184,7 +184,7 @@ Hello, world!
 | `cogito verify FILE.cog` | check contracts against random inputs |
 | `cogito check [PATHS]` | report errors and warnings without running |
 | `cogito fmt [--check] [PATHS]` | format files in the one canonical layout |
-| `cogito lsp` | language server for editors (errors as you type, format, hover, go to definition) |
+| `cogito lsp` | language server for editors (errors as you type, format, hover, completion, go to definition) |
 | `cogito eval "CODE"` | run a snippet |
 | `cogito explain E0101` | explain an error code |
 | `cogito doc [NAME]` | built-in function reference |
@@ -192,7 +192,7 @@ Hello, world!
 | `cogito spec` | print the compact language specification |
 
 Editor support: `cogito lsp` is a language server (errors and warnings as
-you type, formatting, hover documentation, outline, go to definition) that
+you type, formatting, hover documentation, completion, outline, go to definition) that
 works with any editor that speaks LSP. [editors/vscode](editors/vscode) is a
 VS Code extension that uses it, with setup notes for Neovim and Helix.
 

@@ -5,7 +5,7 @@
 //! It speaks the Language Server Protocol (JSON-RPC over standard input and
 //! output) and supports: diagnostics on open and change, formatting
 //! (`cogito fmt`), hover for built-ins, keywords and the file's own
-//! functions and types, document symbols, and go to definition.
+//! functions and types, completion, document symbols, and go to definition.
 
 use crate::ast::{Item, Namespace, PatKind, Program, StmtKind, TypeBody};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -20,7 +20,7 @@ pub fn run_stdio() -> i32 {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let stdout = std::io::stdout();
-    let mut server = Server { docs: HashMap::new(), shutdown: false };
+    let mut server = Server { docs: HashMap::new(), parsed: HashMap::new(), shutdown: false };
     loop {
         let Some(msg) = read_message(&mut input) else { return if server.shutdown { 0 } else { 1 } };
         let Ok(msg) = Json::parse(&msg) else { continue };
@@ -79,6 +79,9 @@ fn notification(method: &str, params: Json) -> Json {
 
 struct Server {
     docs: HashMap<String, String>,
+    /// For each document, the last version of its text that parsed: while
+    /// a line is half typed, completion still knows the declarations.
+    parsed: HashMap<String, String>,
     shutdown: bool,
 }
 
@@ -97,6 +100,7 @@ impl Server {
                             ("hoverProvider", Json::Bool(true)),
                             ("documentSymbolProvider", Json::Bool(true)),
                             ("definitionProvider", Json::Bool(true)),
+                            ("completionProvider", Json::obj(vec![("triggerCharacters", Json::Arr(vec![Json::str(".")]))])),
                         ]),
                     ),
                     ("serverInfo", Json::obj(vec![("name", Json::str("cogito")), ("version", Json::str(crate::VERSION))])),
@@ -129,6 +133,7 @@ impl Server {
             "textDocument/hover" => vec![reply(id, self.hover(&uri, params.get("position")))],
             "textDocument/documentSymbol" => vec![reply(id, self.symbols(&uri))],
             "textDocument/definition" => vec![reply(id, self.definition(&uri, params.get("position")))],
+            "textDocument/completion" => vec![reply(id, self.completion(&uri, params.get("position")))],
             _ if !id.is_null() => vec![error_reply(id, -32601, &format!("method not supported: {}", method))],
             _ => vec![],
         }
@@ -136,6 +141,77 @@ impl Server {
 
     fn text(&self, uri: &str) -> &str {
         self.docs.get(uri).map_or("", |s| s.as_str())
+    }
+
+    /// The document's declarations: from its current text if that parses,
+    /// else without the line being typed at `offset`, else from the last
+    /// version that parsed.
+    fn program(&mut self, uri: &str, offset: usize) -> Option<(String, Program)> {
+        let text = self.text(uri).to_string();
+        if let Ok(p) = crate::parser::parse_program(&text, 0) {
+            self.parsed.insert(uri.to_string(), text.clone());
+            return Some((text, p));
+        }
+        let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = text[offset..].find('\n').map_or(text.len(), |i| offset + i);
+        let without = format!("{}{}", &text[..line_start], &text[line_end..]);
+        if let Ok(p) = crate::parser::parse_program(&without, 0) {
+            return Some((without, p));
+        }
+        let old = self.parsed.get(uri)?.clone();
+        let p = crate::parser::parse_program(&old, 0).ok()?;
+        Some((old, p))
+    }
+
+    fn completion(&mut self, uri: &str, pos: &Json) -> Json {
+        let text = self.text(uri).to_string();
+        let lines = LineIndex::new(&text);
+        let Some(offset) = lines.offset(pos) else { return Json::Arr(vec![]) };
+        let before = &text[..offset];
+        let start = before.char_indices().rev().take_while(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '!').last().map_or(offset, |(i, _)| i);
+        let prefix = &before[start..];
+        let receiver = before[..start].strip_suffix('.').map(|r| {
+            let rs = r.char_indices().rev().take_while(|(_, c)| c.is_alphanumeric() || *c == '_').last().map_or(r.len(), |(i, _)| i);
+            &r[rs..]
+        });
+        let mut items = Completions::default();
+        let prog = self.program(uri, offset);
+        // `geometry.` on an imported module: its declarations.
+        if let (Some(m), Some((_, p))) = (receiver, &prog) {
+            if let Some(path) = import_path(p, m) {
+                let file = uri_to_path(uri).parent().map(|d| d.join(&path)).unwrap_or_else(|| PathBuf::from(&path));
+                if let Ok(src) = std::fs::read_to_string(&file) {
+                    if let Ok(mp) = crate::parser::parse_program(&src, 0) {
+                        items.declarations(&src, &mp, false);
+                    }
+                }
+                return items.json(prefix);
+            }
+        }
+        if let Some((t, p)) = &prog {
+            items.declarations(t, p, receiver.is_some());
+        }
+        for b in crate::builtins::BUILTINS.iter() {
+            let mut doc = b.doc.lines();
+            let sig = doc.next().unwrap_or("").to_string();
+            items.add(b.name, KIND_FUNCTION, sig, doc.collect::<Vec<_>>().join("\n"));
+        }
+        if receiver.is_none() {
+            for k in crate::lexer::KEYWORDS {
+                items.add(k, KIND_KEYWORD, String::new(), keyword_doc(k).unwrap_or("").to_string());
+            }
+            for c in ["pi", "tau", "e", "inf", "max_int", "min_int"] {
+                items.add(c, KIND_CONSTANT, String::new(), String::new());
+            }
+            for t in ["Int", "Float", "Str", "Bool", "Unit", "List", "Map", "Option", "Result", "Range", "Any", "Some", "None", "Ok", "Err"] {
+                items.add(t, KIND_STRUCT, String::new(), String::new());
+            }
+            // Any other name in the file (parameters, local variables).
+            for w in words(&text) {
+                items.add(&w, KIND_VARIABLE, String::new(), String::new());
+            }
+        }
+        items.json(prefix)
     }
 
     /// Check the document (syntax, names, types) and publish what was found.
@@ -245,6 +321,134 @@ impl Server {
             None => Json::Null,
         }
     }
+}
+
+const KIND_FUNCTION: u64 = 3;
+const KIND_FIELD: u64 = 5;
+const KIND_VARIABLE: u64 = 6;
+const KIND_MODULE: u64 = 9;
+const KIND_KEYWORD: u64 = 14;
+const KIND_ENUM_MEMBER: u64 = 20;
+const KIND_CONSTANT: u64 = 21;
+const KIND_STRUCT: u64 = 22;
+
+/// Completion candidates: the first entry for a name wins.
+#[derive(Default)]
+struct Completions {
+    items: Vec<(String, u64, String, String)>,
+    seen: std::collections::HashSet<String>,
+}
+
+impl Completions {
+    fn add(&mut self, name: &str, kind: u64, detail: String, doc: String) {
+        if self.seen.insert(name.to_string()) {
+            self.items.push((name.to_string(), kind, detail, doc));
+        }
+    }
+
+    /// The top-level declarations of a program (after `x.`, only what
+    /// method syntax can call or read: functions and fields).
+    fn declarations(&mut self, text: &str, prog: &Program, after_dot: bool) {
+        let docs = crate::docgen::declarations(text, prog);
+        let doc_of = |name: &str| docs.iter().find(|d| d.name == name).map(|d| (d.signature.clone(), d.comment.clone())).unwrap_or_default();
+        for item in &prog.items {
+            match item {
+                Item::Fn(def) => {
+                    let name = def.display_name();
+                    let (sig, comment) = doc_of(&name);
+                    self.add(&name, KIND_FUNCTION, sig, comment);
+                }
+                Item::Type(td) => {
+                    if let TypeBody::Record(fields) = &td.body {
+                        for f in fields {
+                            if let Some(n) = &f.name {
+                                self.add(n, KIND_FIELD, format!("{}.{}", td.name, n), String::new());
+                            }
+                        }
+                    }
+                    if after_dot {
+                        continue;
+                    }
+                    let (sig, comment) = doc_of(&td.name);
+                    self.add(&td.name, KIND_STRUCT, sig, comment);
+                    if let TypeBody::Enum(vs) = &td.body {
+                        for v in vs {
+                            self.add(&v.name, KIND_ENUM_MEMBER, format!("variant of {}", td.name), String::new());
+                        }
+                    }
+                }
+                Item::Import(imp) if !after_dot => self.add(&import_alias(imp), KIND_MODULE, imp.path.clone(), String::new()),
+                Item::Stmt(s) if !after_dot => {
+                    if let StmtKind::Let { pat, .. } = &s.kind {
+                        if let PatKind::Bind { name, .. } = &pat.kind {
+                            self.add(name, KIND_VARIABLE, String::new(), String::new());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn json(self, prefix: &str) -> Json {
+        Json::Arr(
+            self.items
+                .into_iter()
+                .filter(|(n, ..)| n.starts_with(prefix) && n != prefix)
+                .map(|(n, kind, detail, doc)| {
+                    let mut fields = vec![("label", Json::str(n)), ("kind", Json::num(kind as f64))];
+                    if !detail.is_empty() {
+                        fields.push(("detail", Json::str(detail)));
+                    }
+                    if !doc.is_empty() {
+                        fields.push(("documentation", Json::obj(vec![("kind", Json::str("markdown")), ("value", Json::str(doc))])));
+                    }
+                    Json::obj(fields)
+                })
+                .collect(),
+        )
+    }
+}
+
+/// The name an import is known by: its `as` alias, or the file's name.
+fn import_alias(imp: &crate::ast::ImportDecl) -> String {
+    match &imp.alias {
+        Some(a) => a.to_string(),
+        None => Path::new(&imp.path).file_stem().map_or(String::new(), |s| s.to_string_lossy().to_string()),
+    }
+}
+
+/// The file imported under `alias`, if any.
+fn import_path(prog: &Program, alias: &str) -> Option<String> {
+    prog.items.iter().find_map(|i| match i {
+        Item::Import(imp) if import_alias(imp) == alias => Some(imp.path.clone()),
+        _ => None,
+    })
+}
+
+/// The lowercase names used in a text (outside strings and comments, as
+/// far as a quick scan can tell).
+fn words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let code = line.split('#').next().unwrap_or("");
+        let mut in_str = false;
+        let mut cur = String::new();
+        for c in code.chars().chain(std::iter::once(' ')) {
+            if c == '"' {
+                in_str = !in_str;
+            }
+            if !in_str && (c.is_alphanumeric() || c == '_' || (c == '!' && !cur.is_empty())) {
+                cur.push(c);
+            } else {
+                if cur.len() > 1 && cur.starts_with(|f: char| f.is_lowercase() || f == '_') && !crate::lexer::KEYWORDS.contains(&cur.as_str()) {
+                    out.push(std::mem::take(&mut cur));
+                }
+                cur.clear();
+            }
+        }
+    }
+    out
 }
 
 fn find_declaration(prog: &Program, word: &str) -> Option<crate::span::Span> {

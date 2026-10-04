@@ -410,7 +410,7 @@ reports every problem it can find without running anything.
 
 `cogito lsp` is a language server: in an editor that supports the Language
 Server Protocol you get these errors and warnings as you type, formatting,
-documentation on hover, an outline, and go to definition.
+documentation on hover, completion, an outline, and go to definition.
 [editors/vscode](../editors/vscode) has a VS Code extension and setup notes
 for other editors.
 

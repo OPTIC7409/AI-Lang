@@ -194,6 +194,23 @@ fn language_server_reports_diagnostics() {
     );
     let diags = recv();
     assert!(diags.contains("publishDiagnostics") && diags.contains("E0121"), "{}", diags);
+    // Completion: names in scope after a prefix, functions and fields after `.`.
+    let src = "type Point = { x: Int, y: Int }\nfn norm(p: Point) -> Int => p.x + p.y\nlet pt = Point(1, 2)\nprint(pt.no";
+    send(&format!(
+        r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"file:///tmp/x.cog","version":2}},"contentChanges":[{{"text":{}}}]}}}}"#,
+        cogito::json::Json::str(src)
+    ));
+    recv();
+    send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"position":{"line":3,"character":11}}}"#,
+    );
+    let items = recv();
+    assert!(items.contains("\"label\":\"norm\"") && !items.contains("\"label\":\"print\""), "{}", items);
+    send(
+        r#"{"jsonrpc":"2.0","id":4,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"position":{"line":3,"character":1}}}"#,
+    );
+    let items = recv();
+    assert!(items.contains("\"label\":\"print\"") && items.contains("\"label\":\"pt\""), "{}", items);
     send(r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#);
     assert!(recv().contains("\"id\":2"));
     send(r#"{"jsonrpc":"2.0","method":"exit"}"#);
