@@ -124,6 +124,16 @@ fn parse_port(s: Str) -> Result[Int, Str] {
 
 # String interpolation with format specs
 print("{"name":<10}|{3.14159:>8.2}|{255:x}")
+
+# Types can carry invariants, checked whenever a value is built or changed
+type Span = { lo: Int, hi: Int } where lo <= hi
+var s = Span(2, 5)
+s.hi = 9              # fine; `s.hi = 1` would stop with error E0303
+
+# Sets, maps and lists, all with value semantics
+let seen = to_set([3, 1, 3])
+let counts = ["a": 1, "b": 2]
+print(seen.has(3), counts["b"], seen.len())
 ```
 
 Errors look like this:
@@ -158,7 +168,7 @@ fn average(xs: List[Float]) -> Float
 $ cogito verify stats.cog
 stats.cog
   ✗ average  postcondition violated
-      counterexample (after 64 cases, shrunk 2 times):
+      counterexample (after 28 cases, shrunk 1 time):
         xs = [0.1, 0.1, 0.1]
       error[E0302]: postcondition of `average` violated: `xs.min().unwrap() <= result and result <= xs.max().unwrap()`
         = note: where xs = [0.1, 0.1, 0.1], result = 0.10000000000000002
