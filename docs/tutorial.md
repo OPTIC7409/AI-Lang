@@ -74,6 +74,16 @@ print(greet("Ada", greeting: "Welcome"))
 Type annotations are optional, but when present they are checked every time
 the function is called and every time it returns. `area(2, 3)` works (Int is
 converted to Float); `area("2", 3)` is an error that names the parameter.
+Where the types are already clear from the code, as here, that error is
+reported before the program even starts:
+
+```
+error[E0121]: `area` expects `width` to be Float, but this argument is a Str
+```
+
+Where they are not (a value read from a file, a parameter without an
+annotation), the check happens when the line runs. Either way, a value of
+the wrong type never gets past an annotation.
 
 Any function can be called with method syntax: `x.f(y)` means `f(x, y)`.
 That is how built-ins like `len` and `split` read naturally:
@@ -119,6 +129,17 @@ Comprehensions build lists:
 ```cogito
 let squares = [n * n for n in 1..=10 if n % 2 == 0]
 let grid = [(r, c) for r in 0..2 for c in 0..3]
+```
+
+To count or group things in a map, `update!` changes one entry, starting
+from a default when the key is new:
+
+```cogito
+var counts: Map[Str, Int] = [:]
+for word in "the cat and the hat".words() {
+  counts.update!(word, 0, fn(n) => n + 1)
+}
+print(counts)    # ["the": 2, "cat": 1, "and": 1, "hat": 1]
 ```
 
 ## 6. Value semantics and mutation
@@ -203,11 +224,20 @@ fn describe(xs: List[Int]) -> Str => match xs {
 }
 ```
 
-If you forget a variant of an enum, Cogito tells you before the program
-runs:
+If you forget a case, whether an enum variant, a list length or a value of
+a tuple, Cogito tells you before the program runs:
 
 ```
-error[E0109]: non-exhaustive match on `Shape`: `Rect(..)` not handled
+error[E0109]: non-exhaustive match: `Rect(..)` is not handled
+```
+
+To ask only *whether* a value has a shape, use `is`:
+
+```cogito
+type Slot = Empty | Full(Int)
+
+let slots = [Full(3), Empty, Full(5)]
+print(slots.count(fn(s) => s is Full(_)))    # 2
 ```
 
 ## 9. When things can fail: Option and Result
@@ -334,7 +364,20 @@ print(geometry.length(v))   # 5.0
 print(v.length())           # methods are found in the type's module
 ```
 
-## 13. Where next
+## 13. Tools
+
+`cogito fmt` lays out your files in the one canonical style (two-space
+indentation, standard spacing; your line breaks and comments are kept), and
+`cogito fmt --check` tells you whether anything would change. `cogito check`
+reports every problem it can find without running anything.
+
+`cogito lsp` is a language server: in an editor that supports the Language
+Server Protocol you get these errors and warnings as you type, formatting,
+documentation on hover, an outline, and go to definition.
+[editors/vscode](../editors/vscode) has a VS Code extension and setup notes
+for other editors.
+
+## 14. Where next
 
 - Browse [the examples](../examples): a calculator interpreter, Conway's
   Game of Life, a contract-checked bank, N-queens, and more.
