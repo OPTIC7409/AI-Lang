@@ -379,12 +379,13 @@ fn shrink_failure(it: &mut Interp, c: &Rc<Closure>, mut cur: Vec<Value>, mut dia
     let mut steps = 0u32;
     let mut tries = 0u32;
     // Every attempt at shrinking a "took too long" failure runs to the full
-    // budget, so only try a few.
+    // budget, so only try a few, for a few seconds at most.
     let max_tries = if code == "E0219" { 24 } else { 20_000 };
+    let deadline = crate::platform::monotonic_seconds() + if code == "E0219" { 3.0 } else { 30.0 };
     'outer: while steps < 1000 && tries < max_tries {
         for i in 0..cur.len() {
             for cand in shrink(&cur[i]) {
-                if tries >= max_tries {
+                if tries >= max_tries || crate::platform::monotonic_seconds() > deadline {
                     break 'outer;
                 }
                 tries += 1;

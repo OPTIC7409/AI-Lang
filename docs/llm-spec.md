@@ -136,7 +136,7 @@ accept the arguments is called. A user function named like a built-in (e.g.
 `len`) adds an overload and falls back to the built-in. Parameters with
 default values come last; defaults are evaluated on each call. If a top-level
 `fn main()` exists, it runs after the top-level statements; if `main` returns
-`Err(e)`, the program prints the error and exits with status 1.
+`Err(e)`, the program prints `error: e` and exits with status 1.
 
 ## Scope and closures
 

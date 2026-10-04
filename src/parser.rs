@@ -33,21 +33,29 @@ pub struct Parser<'s> {
     pos: usize,
     /// Current nesting depth of expressions, blocks, patterns and types.
     depth: u32,
+    /// Where each block that is still open began.
+    open_blocks: Vec<Span>,
 }
 
 /// Deeper nesting than this is rejected, rather than risking a native stack overflow.
 const MAX_NESTING: u32 = 256;
 
 pub fn parse_program(src: &str, file: u32) -> PResult<Program> {
-    let toks = lex(src, file, 0, src.len())?;
-    let mut p = Parser { src, file, toks, pos: 0, depth: 0 };
-    p.program()
+    parse_program_all(src, file).map_err(|mut ds| ds.swap_remove(0))
+}
+
+/// Like [`parse_program`], but when the program does not lex, reports every
+/// error the lexer found (several bad strings, say) rather than the first.
+pub fn parse_program_all(src: &str, file: u32) -> Result<Program, Vec<Diagnostic>> {
+    let toks = crate::lexer::lex_all(src, file, 0, src.len())?;
+    let mut p = Parser { src, file, toks, pos: 0, depth: 0, open_blocks: Vec::new() };
+    p.program().map_err(|d| vec![d])
 }
 
 /// Parse an expression from a sub-range of the source (used for string interpolation).
 pub fn parse_expr_range(src: &str, file: u32, start: usize, end: usize) -> PResult<Expr> {
     let toks = lex(src, file, start, end)?;
-    let mut p = Parser { src, file, toks, pos: 0, depth: 0 };
+    let mut p = Parser { src, file, toks, pos: 0, depth: 0, open_blocks: Vec::new() };
     p.skip_newlines();
     let e = p.expr()?;
     p.skip_newlines();
@@ -230,17 +238,10 @@ impl<'s> Parser<'s> {
             }
             Tok::Upper(n) => {
                 let sp = self.span();
-                let lower: String = {
-                    let mut c = n.chars();
-                    match c.next() {
-                        Some(f) => f.to_lowercase().collect::<String>() + c.as_str(),
-                        None => String::new(),
-                    }
-                };
                 Err(Diagnostic::error("E0013", format!("{} `{}` must start with a lowercase letter", what, n))
                     .at(sp)
                     .label("uppercase names are reserved for types and constructors")
-                    .help(format!("rename it to `{}`", lower)))
+                    .help(format!("rename it to `{}`", snake_case(&n))))
             }
             t if crate::lexer::KEYWORDS.contains(&t.text()) => {
                 Err(Diagnostic::error("E0010", format!("`{}` is a keyword and cannot be used as a {}", t.text(), what))
@@ -358,7 +359,8 @@ impl<'s> Parser<'s> {
                 self.skip_newlines();
                 self.bump();
                 self.skip_newlines();
-                self.expr()
+                // Like a match arm, the body may be one assignment.
+                self.arm_body()
             }
             Tok::Assign => Err(self.unexpected("function body").help(format!("single-expression functions use `=>`: `fn {}(x) => x * 2`", name))),
             _ => Err(self.unexpected("function body `{ ... }` or `=> expression`")),
@@ -573,12 +575,14 @@ impl<'s> Parser<'s> {
                 let kw = if mutable { "var" } else { "let" };
                 if let Tok::Upper(n) = self.peek().clone() {
                     if !matches!(self.peek_at(1), Tok::LParen) {
-                        let mut c = n.chars();
-                        let lower = c.next().map(|f| f.to_lowercase().collect::<String>() + c.as_str()).unwrap_or_default();
-                        return Err(Diagnostic::error("E0013", format!("variable `{}` must start with a lowercase letter", n))
+                        let mut d = Diagnostic::error("E0013", format!("variable `{}` must start with a lowercase letter", n))
                             .at(self.span())
                             .label("uppercase names are reserved for types and constructors")
-                            .help(format!("rename it to `{}`", lower)));
+                            .help(format!("rename it to `{}`", snake_case(&n)));
+                        if n.chars().all(|c| !c.is_lowercase()) {
+                            d = d.note("Cogito has no separate constant syntax: a `let` never changes");
+                        }
+                        return Err(d);
                     }
                 }
                 let pat = self.pattern()?;
@@ -603,8 +607,17 @@ impl<'s> Parser<'s> {
                 Ok(Stmt { kind: StmtKind::Fn { def: Rc::new(def), res: VarRes::Unresolved }, span })
             }
             Tok::Type | Tok::Test | Tok::Property | Tok::Import => {
-                Err(Diagnostic::error("E0116", format!("`{}` declarations are only allowed at the top level of a file", self.peek().text()))
-                    .at(self.span()))
+                let mut d = Diagnostic::error("E0116", format!("`{}` declarations are only allowed at the top level of a file", self.peek().text()))
+                    .at(self.span());
+                // At the start of a line, it was probably meant to be at the
+                // top level, after a block that was never closed.
+                let sp = self.span().start as usize;
+                let at_line_start = self.src.get(..sp).is_some_and(|b| b.ends_with('\n') || b.is_empty());
+                if let (true, Some(open)) = (at_line_start, self.open_blocks.first()) {
+                    let line = self.src.get(..open.start as usize).map_or(0, |b| b.matches('\n').count() + 1);
+                    d = d.note(format!("the block opened by the `{{` on line {} is still open here", line)).help("is a `}` missing above?");
+                }
+                Err(d)
             }
             Tok::Assert => {
                 self.bump();
@@ -647,6 +660,7 @@ impl<'s> Parser<'s> {
 
     fn block_inner(&mut self) -> PResult<Expr> {
         let open = self.expect(&Tok::LBrace, "`{`")?;
+        self.open_blocks.push(open);
         let mut stmts = Vec::new();
         loop {
             self.skip_terminators();
@@ -660,6 +674,7 @@ impl<'s> Parser<'s> {
             self.expect_terminator()?;
         }
         let close = self.bump().span;
+        self.open_blocks.pop();
         Ok(mk(ExprKind::Block(stmts), open.to(close)))
     }
 
@@ -921,6 +936,11 @@ impl<'s> Parser<'s> {
             } else {
                 None
             };
+            if self.at(&Tok::DotDot) && name.is_none() {
+                return Err(Diagnostic::error("E0010", "a spread `..xs` cannot be a function argument")
+                    .at(self.span())
+                    .help("spreads work in list literals, records and patterns: to pass the elements as one list, write `f([a, ..xs])`"));
+            }
             let value = self.expr()?;
             if name.is_none() && args.iter().any(|a: &Arg| a.name.is_some()) {
                 return Err(Diagnostic::error("E0108", "positional arguments must come before named arguments")
@@ -1153,7 +1173,7 @@ impl<'s> Parser<'s> {
                 let body = if self.at(&Tok::FatArrow) {
                     self.bump();
                     self.skip_newlines();
-                    self.expr()?
+                    self.arm_body()?
                 } else if self.at(&Tok::LBrace) {
                     self.block()?
                 } else {
@@ -1863,4 +1883,25 @@ pub fn parse_fmt_spec(s: &str) -> Result<FmtSpec, String> {
         return Err("unexpected characters at the end".into());
     }
     Ok(spec)
+}
+
+/// A lowercase spelling of an uppercase name, for suggestions: `MAX_N` is
+/// `max_n`, `MaxValue` is `max_value`, `HTTPCode` is `http_code`.
+fn snake_case(n: &str) -> String {
+    let cs: Vec<char> = n.chars().collect();
+    let mut out = String::new();
+    for (i, &c) in cs.iter().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            let prev = cs[i - 1];
+            let next_lower = cs.get(i + 1).is_some_and(|x| x.is_lowercase());
+            if prev.is_lowercase() || prev.is_ascii_digit() || (prev.is_uppercase() && next_lower) {
+                out.push('_');
+            }
+        }
+        out.extend(c.to_lowercase());
+    }
+    if crate::lexer::KEYWORDS.contains(&out.as_str()) {
+        out.push('_');
+    }
+    out
 }

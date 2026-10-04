@@ -88,6 +88,12 @@ impl Diagnostic {
             Severity::Error => ("error", c.red),
             Severity::Warning => ("warning", c.yellow),
         };
+        // The error a program's `main` returned is the program's own message,
+        // not a problem with the code: show it plainly.
+        if self.code == "E0221" {
+            let _ = writeln!(out, "{}{}error{}: {}", c.bold, kc, c.reset, self.message);
+            return out;
+        }
         let _ = writeln!(out, "{}{}{}[{}]{}: {}{}{}", c.bold, kc, kind, self.code, c.reset, c.bold, self.message, c.reset);
         if let Some(span) = self.span {
             if (span.file as usize) < sm.files.len() {

@@ -1,0 +1,7 @@
+# expect: E0110
+fn total(xs: List[Int]) -> Int {
+  var t = 0
+  xs.each(fn(x) => t += x)
+  t
+}
+print(total([1, 2]))

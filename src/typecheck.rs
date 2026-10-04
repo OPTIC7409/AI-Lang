@@ -36,7 +36,8 @@ pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
         }
     }
     let reassigned_globals = reassigned.into_iter().filter_map(|r| if let VarRes::Global(s) = r { Some(s) } else { None }).collect();
-    let mut c = Checker { ctx, diags: Vec::new(), globals: HashMap::new(), frames: vec![Frame::default()], reassigned_globals };
+    let mut c =
+        Checker { ctx, diags: Vec::new(), globals: HashMap::new(), frames: vec![Frame::default()], reassigned_globals, divisions: HashSet::new() };
     // Top-level statements first (in order), so that functions see the
     // types of the globals they use.
     for item in &prog.items {
@@ -74,6 +75,8 @@ struct Checker<'a> {
     frames: Vec<Frame>,
     /// Globals assigned as a whole somewhere in the program.
     reassigned_globals: HashSet<u32>,
+    /// Where `/` was used (its result is a Float even for Ints).
+    divisions: HashSet<Span>,
 }
 
 /// Record the variables that are assigned as a whole (`x = ...`), or passed
@@ -205,6 +208,17 @@ impl<'a> Checker<'a> {
         compatible(self.ctx, a, e)
     }
 
+    /// An error for a value of the wrong type where `expected` was needed,
+    /// with a hint when the value is a `/` and an Int was expected.
+    fn mismatch(&mut self, span: Span, msg: String, label: &str, expected: &Ty) -> &mut Diagnostic {
+        let hint = matches!(expected, Ty::Int) && self.divisions.contains(&span);
+        let d = self.error(span, msg, label);
+        if hint {
+            d.help = Some("`/` always gives a Float; for an Int, use floor division `//`".into());
+        }
+        d
+    }
+
     /// How to show an actual and an expected type in a message; when two
     /// different types print the same (a `Dir` here and one in a module),
     /// say where each is declared.
@@ -271,7 +285,12 @@ impl<'a> Checker<'a> {
         if let Some(ret) = def.ret.as_ref().map(|t| t.ty.clone()) {
             if !self.compatible(&body, &ret) && !matches!(ret, Ty::Unit) {
                 let span = tail_span(&def.body);
-                self.error(span, format!("`{}` is declared to return {}, but this is {}", def.display_name(), ret, a(&body)), "returned here");
+                self.mismatch(
+                    span,
+                    format!("`{}` is declared to return {}, but this is {}", def.display_name(), ret, a(&body)),
+                    "returned here",
+                    &ret,
+                );
             }
             self.frame().locals.insert(def.result_slot, ret);
         }
@@ -316,7 +335,7 @@ impl<'a> Checker<'a> {
                             _ => "this pattern".into(),
                         };
                         let (shown_t, shown_d) = self.pair(&t, d);
-                        self.error(value.span, format!("{} is declared as {}, but the value is {}", what, shown_d, shown_t), "wrong type");
+                        self.mismatch(value.span, format!("{} is declared as {}, but the value is {}", what, shown_d, shown_t), "wrong type", d);
                     }
                 }
                 // A `var` without an annotation may later hold anything, unless
@@ -342,7 +361,12 @@ impl<'a> Checker<'a> {
                     match (&target.kind, ty) {
                         (ExprKind::Var(v), Some(decl)) => {
                             if !self.compatible(&vt, decl) {
-                                self.error(value.span, format!("`{}` is declared as {}, but the value is {}", v.name, decl, a(&vt)), "wrong type");
+                                self.mismatch(
+                                    value.span,
+                                    format!("`{}` is declared as {}, but the value is {}", v.name, decl, a(&vt)),
+                                    "wrong type",
+                                    decl,
+                                );
                             }
                         }
                         // A field or element: its type is known from the record
@@ -350,7 +374,7 @@ impl<'a> Checker<'a> {
                         (ExprKind::Field { .. } | ExprKind::Index { .. }, _) if !self.compatible(&vt, &tt) => {
                             let place = self.ctx.sm.snippet(target.span).to_string();
                             let (shown_v, shown_t) = self.pair(&vt, &tt);
-                            self.error(value.span, format!("`{}` is {}, but the value is {}", place, shown_t, shown_v), "wrong type");
+                            self.mismatch(value.span, format!("`{}` is {}, but the value is {}", place, shown_t, shown_v), "wrong type", &tt);
                         }
                         _ => {}
                     }
@@ -742,7 +766,7 @@ impl<'a> Checker<'a> {
                 if let (Some(ret), Some(v)) = (ret, v) {
                     if !self.compatible(&t, &ret) {
                         let name = name.map_or("this function".to_string(), |n| format!("`{}`", n));
-                        self.error(v.span, format!("{} is declared to return {}, but this is {}", name, ret, a(&t)), "returned here");
+                        self.mismatch(v.span, format!("{} is declared to return {}, but this is {}", name, ret, a(&t)), "returned here", &ret);
                     }
                 }
                 Ty::Any
@@ -852,7 +876,12 @@ impl<'a> Checker<'a> {
                 let (shown_t, shown_p) = self.pair(t, pty);
                 let shown = if pname.starts_with("__arg") { "this parameter".to_string() } else { format!("`{}`", pname) };
                 let at = if (sig.span.file as usize) < self.ctx.sm.files.len() { Some(self.ctx.sm.location(sig.span)) } else { None };
-                let d = self.error(*sp, format!("`{}` expects {} to be {}, but this argument is {}", name, shown, shown_p, shown_t), "wrong type");
+                let d = self.mismatch(
+                    *sp,
+                    format!("`{}` expects {} to be {}, but this argument is {}", name, shown, shown_p, shown_t),
+                    "wrong type",
+                    pty,
+                );
                 if let Some(at) = at {
                     d.notes.push(format!("`{}` is declared at {}", name, at));
                 }
@@ -888,7 +917,7 @@ impl<'a> Checker<'a> {
             if !self.compatible(t, &ft) {
                 let ctor = td.ctor_name(if c.is_record { 0 } else { c.tag });
                 let field = if fields[i].parse::<usize>().is_ok() { format!("field {}", i + 1) } else { format!("field `{}`", fields[i]) };
-                self.error(*sp, format!("{} of `{}` is {}, but this is {}", field, ctor, ft, a(t)), "wrong type");
+                self.mismatch(*sp, format!("{} of `{}` is {}, but this is {}", field, ctor, ft, a(t)), "wrong type", &ft);
             }
         }
         let args = if generic && inferred.iter().all(|t| t.is_some()) {
@@ -903,6 +932,9 @@ impl<'a> Checker<'a> {
 
     fn binary(&mut self, op: BinOp, l: &Ty, r: &Ty, span: Span) -> Ty {
         use BinOp::*;
+        if op == Div {
+            self.divisions.insert(span);
+        }
         let num = |t: &Ty| matches!(t, Ty::Int | Ty::Float);
         let unknown = |t: &Ty| t.is_any();
         let bad = |me: &mut Self, what: String| {

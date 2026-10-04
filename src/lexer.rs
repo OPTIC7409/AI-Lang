@@ -242,15 +242,32 @@ pub struct Lexer<'a> {
     toks: Vec<Token>,
     delims: Vec<u8>,
     nesting: u32,
+    /// Errors inside one-line strings: lexing continues on the next line,
+    /// so that one run reports all of them.
+    soft: Vec<Diagnostic>,
 }
 
 /// Lex `src[start..end]`. Spans are absolute offsets into `src`.
 pub fn lex(src: &str, file: u32, start: usize, end: usize) -> Result<Vec<Token>, Diagnostic> {
+    lex_all(src, file, start, end).map_err(|mut ds| ds.swap_remove(0))
+}
+
+/// Like [`lex`], but reports every error in a one-line string, not just the
+/// first error.
+pub fn lex_all(src: &str, file: u32, start: usize, end: usize) -> Result<Vec<Token>, Vec<Diagnostic>> {
     // A UTF-8 byte-order mark at the start of a file is ignored.
     let start = if start == 0 && src.starts_with('\u{feff}') { 3 } else { start };
-    let mut lx = Lexer { src, b: src.as_bytes(), pos: start, end, file, toks: Vec::new(), delims: Vec::new(), nesting: 0 };
-    lx.run()?;
-    Ok(lx.toks)
+    let mut lx = Lexer { src, b: src.as_bytes(), pos: start, end, file, toks: Vec::new(), delims: Vec::new(), nesting: 0, soft: Vec::new() };
+    let r = lx.run();
+    let mut errors = std::mem::take(&mut lx.soft);
+    if let Err(d) = r {
+        errors.push(d);
+    }
+    if errors.is_empty() {
+        Ok(lx.toks)
+    } else {
+        Err(errors)
+    }
 }
 
 fn is_ident_start(c: u8) -> bool {
@@ -378,7 +395,19 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             if c == b'"' {
-                self.string()?;
+                let one_line = !self.b[self.pos..self.end].starts_with(b"\"\"\"");
+                if let Err(d) = self.string() {
+                    if !one_line || self.soft.len() >= 20 {
+                        return Err(d);
+                    }
+                    // Skip the rest of the line (a one-line string ends on it)
+                    // and look for more errors.
+                    self.soft.push(d);
+                    self.nesting = 0;
+                    while self.pos < self.end && self.b[self.pos] != b'\n' {
+                        self.pos += 1;
+                    }
+                }
                 continue;
             }
             self.punct()?;

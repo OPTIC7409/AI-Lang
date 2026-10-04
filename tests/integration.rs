@@ -2,7 +2,7 @@
 //!
 //! * `tests/lang/*.cog`   — the language's own test suite, written in Cogito.
 //! * `tests/errors/*.cog` — programs that must fail; the first line says which
-//!   error code (`# expect: E0101`).
+//!   error code (`# expect: E0101`), or the exact message (`# expect: error: ...`).
 //! * `examples/*.cog`     — example programs; when `examples/NAME.out` exists,
 //!   the program's output must match it exactly.
 
@@ -49,7 +49,10 @@ fn error_codes() {
             src.lines().next().and_then(|l| l.strip_prefix("# expect: ")).unwrap_or_else(|| panic!("{} has no `# expect:` line", f.display()));
         let out = cogito(&["run", f.to_str().unwrap()]);
         let stderr = text(&out.stderr);
-        if out.status.success() || !stderr.contains(&format!("error[{}]", expect.trim())) {
+        // `# expect: error: text` is an exact message (as `main` returning
+        // `Err` prints); otherwise the line names an error code.
+        let wanted = if expect.starts_with("error: ") { expect.to_string() } else { format!("error[{}]", expect.trim()) };
+        if out.status.success() || !stderr.contains(&wanted) {
             failures.push(format!("{}: expected error {}, got:\n{}", f.display(), expect, stderr));
         }
     }
@@ -108,6 +111,9 @@ fn explain_knows_every_code_used() {
     for f in files("tests/errors", "cog") {
         let src = std::fs::read_to_string(&f).unwrap();
         let code = src.lines().next().unwrap().trim_start_matches("# expect: ").trim().to_string();
+        if code.starts_with("error: ") {
+            continue;
+        }
         let out = cogito(&["explain", &code]);
         assert!(out.status.success(), "`cogito explain {}` failed", code);
     }

@@ -86,7 +86,7 @@ pub fn load_source(
     repl: bool,
 ) -> Result<(Program, Vec<Diagnostic>), Vec<Diagnostic>> {
     let file = it.ctx.sm.add(name, src);
-    let mut prog = parser::parse_program(src, file).map_err(|d| vec![d])?;
+    let mut prog = parser::parse_program_all(src, file)?;
     let mut diags = resolver::resolve_program(&mut it.ctx, &mut prog, ns, dir, repl);
     if !diags.iter().any(|d| d.is_error()) {
         diags.extend(typecheck::check_program(&it.ctx, &prog));
@@ -136,10 +136,7 @@ pub fn run_with_value(it: &mut Interp, prog: &Program, ns: &Namespace) -> Result
                 if let value::Value::Variant(v) = &r {
                     if v.ty.id == types::RESULT_ID && v.tag == 1 {
                         let msg = value::display(&v.values[0]);
-                        return Err(interp::Ctrl::Error(Box::new(
-                            Diagnostic::error("E0221", format!("`main` returned an error: {}", msg))
-                                .help("the program exits with status 1; handle the error inside `main` to choose another outcome"),
-                        )));
+                        return Err(interp::Ctrl::Error(Box::new(Diagnostic::error("E0221", msg))));
                     }
                 }
             }

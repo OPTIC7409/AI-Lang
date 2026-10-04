@@ -193,6 +193,8 @@ fn confusion_hint(name: &str) -> Option<&'static str> {
         "del" | "delete" | "erase" | "discard" => "use `remove(key_or_index)` (a new value) or `remove!` (in place)",
         "assert_eq" | "assertEqual" | "assert_equal" | "expect_eq" => "use `assert a == b`; a failure shows both sides",
         "isEmpty" | "empty" => "use `is_empty`",
+        "drop_last" | "but_last" | "init" | "dropLast" => "slice off the end: `xs[..-1]` is all but the last element (`xs[..-n]` all but the last n)",
+        "take_last" | "takeLast" => "slice from the end: `xs[-n..]` is the last n elements",
         "charAt" | "char_at" | "nth" => "index with `s[i]` (or `xs.get(i)`, which returns an Option)",
         "format" | "sprintf" | "fmt" => "use string interpolation with a format spec: `\"{x:.2} {name:>10}\"`",
         "filter_map" | "filterMap" | "compact_map" => "use a comprehension: `[f(x) for x in xs if keep(x)]`, or `collect_some`",
@@ -256,6 +258,14 @@ impl<'a> Resolver<'a> {
 
     fn at_global_scope(&self) -> bool {
         self.fns.len() == 1 && self.fns[0].kind == FnKind::TopLevel && self.fns[0].scopes.len() == 1
+    }
+
+    /// Whether `name` is a parameter of the current function (and not
+    /// shadowed by a local).
+    fn is_param(&self, name: &str) -> bool {
+        let f = self.fns.last().unwrap();
+        let local = f.scopes.iter().rev().flat_map(|s| s.locals.iter().rev()).find(|l| &*l.name == name);
+        local.is_some_and(|l| l.kind == LocalKind::Param)
     }
 
     fn lookup_level(&mut self, level: usize, name: &str) -> Option<Found> {
@@ -1247,7 +1257,14 @@ impl<'a> Resolver<'a> {
                     if found.span != Span::default() {
                         d = d.note(format!("`{}` is declared at {}", name, self.line_of(found.span)));
                     }
-                    d = d.help(format!("declare it with `var {}` to allow changes", name));
+                    d = if self.is_param(&name) {
+                        d.help(format!(
+                            "parameters cannot change: copy it into a variable first (`var {0} = {0}`), or, to change the caller's variable, make `{0}` the first parameter of a `!` function",
+                            name
+                        ))
+                    } else {
+                        d.help(format!("declare it with `var {}` to allow changes", name))
+                    };
                 }
                 if code == "E0111" {
                     d.message = if found.captured {

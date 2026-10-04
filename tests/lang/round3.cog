@@ -53,3 +53,24 @@ test "nan cannot be ordered" {
   assert catch(fn() => 1.0 >= n).is_err()
   assert n != n
 }
+
+type Counter = { n: Int }
+
+fn bump!(c: Counter) => c.n += 1
+
+var hits = 0
+
+test "an assignment can be the body of a `=>` function" {
+  var c = Counter(n: 0)
+  c.bump!()
+  c.bump!()
+  assert c.n == 2
+  [1, 2, 3].each(fn(x) => hits += x)
+  assert hits == 6
+}
+
+test "slices drop from either end" {
+  let xs = [1, 2, 3, 4]
+  assert xs[..-1] == [1, 2, 3] and xs[-2..] == [3, 4]
+  assert "abc"[..-1] == "ab"
+}

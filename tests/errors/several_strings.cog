@@ -1,0 +1,5 @@
+# expect: E0004
+let a = "\{ok\}"
+let b = "{"
+let c = "\q"
+print(a, b, c)
