@@ -227,7 +227,8 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
             }
         }
         if let Some((diag, v)) = gen.crashed.take() {
-            break PropOutcome::Failed(Failure { args: vec![], generated: Some(v), diag, shrinks: 0, after: passed + 1 });
+            let (v, diag, shrinks) = shrink_crash(it, v, diag);
+            break PropOutcome::Failed(Failure { args: vec![], generated: Some(v), diag, shrinks, after: passed + 1 });
         }
         if let Some(m) = gen_err {
             // A record whose invariant random values rarely satisfy: skip
@@ -235,9 +236,6 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
             match gen.missed.take() {
                 Some((ty, clause)) => {
                     let n = missed.as_ref().map_or(0, |m| m.0) + 1;
-                    if passed == 0 && n >= 5 {
-                        break PropOutcome::CannotGenerate(m);
-                    }
                     let what = if clause.is_empty() {
                         format!("`{}` satisfying its invariant", ty)
                     } else {
@@ -245,6 +243,11 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
                     };
                     missed = Some((n, what));
                     discarded += 1;
+                    // Each miss is costly (many tries): stop early when
+                    // misses clearly outnumber valid inputs.
+                    if n >= 100 && passed * 10 < n {
+                        break PropOutcome::GaveUp { cases: passed, discarded, missed };
+                    }
                     continue;
                 }
                 None => break PropOutcome::CannotGenerate(m),
@@ -261,6 +264,27 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
     };
     it.silent = was_silent;
     result
+}
+
+/// A smaller value whose invariant check still fails with an error.
+fn shrink_crash(it: &mut Interp, mut v: Value, mut diag: Box<Diagnostic>) -> (Value, Box<Diagnostic>, u32) {
+    let mut shrinks = 0;
+    'outer: while shrinks < 500 {
+        for c in crate::proptest::shrink(&v) {
+            it.ticks = 0;
+            let depth = it.stack.len();
+            let r = it.broken_invariant(&c, Span::default());
+            it.stack.truncate(depth);
+            if let Err(Ctrl::Error(d)) = r {
+                v = c;
+                diag = d;
+                shrinks += 1;
+                continue 'outer;
+            }
+        }
+        break;
+    }
+    (v, diag, shrinks)
 }
 
 /// How to generate each record type that has an invariant: bounds on its
@@ -535,7 +559,7 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
     let what = if f.after == 1 { "on the first case".to_string() } else { format!("after {} cases", f.after) };
     let shr = if f.shrinks > 0 { format!(", shrunk {} time{}", f.shrinks, if f.shrinks == 1 { "" } else { "s" }) } else { String::new() };
     if let Some(v) = &f.generated {
-        out.push_str(&format!("      checking the invariant of a generated value failed ({}):\n        {}\n", what, repr(v)));
+        out.push_str(&format!("      checking the invariant of a generated value failed ({}{}):\n        {}\n", what, shr, repr(v)));
     } else {
         out.push_str(&format!("      counterexample ({}{}):\n", what, shr));
     }
@@ -633,17 +657,24 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                         let disc = if discarded > 0 { format!(", {} discarded", discarded) } else { String::new() };
                         out.push_str(&format!("  {}✓{} {} {}({} cases{}){}\n", c.green, c.reset, p.name, c.dim, cases, disc, c.reset));
                     }
-                    PropOutcome::GaveUp { cases, discarded, .. } => {
+                    PropOutcome::GaveUp { cases, discarded, missed } => {
                         sum.gave_up += 1;
                         sum.cases += cases as u64;
+                        let why = match &missed {
+                            Some((n, ty)) if *n * 2 > discarded => {
+                                format!("contained {} {}; build such values in the property", crate::diagnostic::a_an(ty), ty)
+                            }
+                            _ => "satisfied the `where` clause; narrow the input types or the clause".to_string(),
+                        };
                         out.push_str(&format!(
-                            "  {}?{} {} {}(gave up: only {} of {} generated inputs satisfied the `where` clause; narrow the input types or the clause){}\n",
+                            "  {}?{} {} {}(gave up: only {} of {} generated inputs {}){}\n",
                             c.yellow,
                             c.reset,
                             p.name,
                             c.dim,
                             cases,
                             cases + discarded,
+                            why,
                             c.reset
                         ));
                     }

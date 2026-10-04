@@ -351,8 +351,13 @@ pub fn explain(code: &str) -> Option<(&'static str, &'static str)> {
 
 /// "a" or "an", whichever reads right before `word` (a type name).
 pub fn a_an(word: &str) -> &'static str {
-    match word.trim_start_matches('`').chars().next() {
-        Some(c) if "AEIOUaeiou".contains(c) => "an",
+    let w = word.trim_start_matches('`').to_lowercase();
+    // Vowels that sound like consonants: a `UnionFind`, a `User`, a `OneOf`.
+    if ["uni", "use", "usa", "usu", "uti", "eu", "one", "once"].iter().any(|p| w.starts_with(p)) {
+        return "a";
+    }
+    match w.chars().next() {
+        Some(c) if "aeiou".contains(c) => "an",
         _ => "a",
     }
 }

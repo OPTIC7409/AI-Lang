@@ -432,7 +432,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   the operators always fail on overflow), constants `pi tau e inf max_int min_int`,
   `seed(n) random() random_int(lo, hi) shuffle(xs) choice(xs) -> Option`
 - **Collections** (lists; most also accept ranges, strings, tuples, maps):
-  `len is_empty range(end) range(start, end, step) first last get(i) -> Option
+  `len is_empty range(end) range(start, end, step) first -> Option last -> Option get(i) -> Option
   get_or(k, default) push insert(i, x) remove(i) set(i, x) map filter
   reduce(f) fold(init, f) sum product min_by(key) max_by(key) sort sort_by(key)
   sort_with(cmp) reverse contains index_of -> Option find -> Option
@@ -446,7 +446,8 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   drop slice take_while drop_while filter sort unique reverse`, and the
   pieces of `chunks`/`windows`); `map` gives a List.
 - **Mutating**: `push! pop! -> Option insert! remove! extend! clear! swap!(i, j)
-  sort! sort_by! reverse!`
+  sort! sort_by! reverse!`. On a list, `remove!(i)` returns the removed
+  element; on a map, `remove!(k)` returns the removed value as an Option.
 - **Sets**: `to_set(xs)` (from a list, range, string or set) `insert(x)`
   `insert!(x) -> Bool` (false if already there) `remove(x)` `remove!(x) -> Bool` `has(x)` (or
   `x in s`) `union intersection difference is_subset`, and `len is_empty

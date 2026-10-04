@@ -115,3 +115,10 @@ property "generated graphs have edges within range" (g: Graph) {
     }
   }
 }
+
+type Trie = { end: Bool, kids: Map[Str, Trie] }
+  where kids.keys().all(fn(k) => k.len() == 1)
+
+property "recursive types with invariants are generated, and quickly" (t: Trie) {
+  assert t.kids.keys().all(fn(k) => k.len() == 1)
+}

@@ -54,6 +54,9 @@ pub struct Gen<'a> {
     /// Set when checking the invariant of a generated value failed with an
     /// error (a bug in the invariant): the error and the value.
     pub crashed: Option<(Box<Diagnostic>, Value)>,
+    /// How many more candidate records with invariants this case may try:
+    /// for recursive types, retries at each level would multiply.
+    pub inv_tries: u32,
 }
 
 /// Extreme Int values, likely to expose overflow.
@@ -76,7 +79,7 @@ fn mentions(ty: &Ty, id: u32) -> bool {
 
 impl<'a> Gen<'a> {
     pub fn new(it: &'a mut Interp, rng: &'a mut Rng, extremes: bool, plans: Rc<HashMap<u32, InvPlan>>) -> Gen<'a> {
-        Gen { it, rng, extremes, pool: Vec::new(), plans, missed: None, crashed: None }
+        Gen { it, rng, extremes, pool: Vec::new(), plans, missed: None, crashed: None, inv_tries: 1000 }
     }
 
     /// A value of type `t` within the bounds `b`.
@@ -84,7 +87,9 @@ impl<'a> Gen<'a> {
         match (t, b) {
             (Ty::Int, Bound { int: Some((lo, hi)), .. }) => {
                 let v = self.int_in(*lo, *hi, size);
-                self.pool.push(v.clone());
+                if self.pool.len() < 256 {
+                    self.pool.push(v.clone());
+                }
                 Ok(v)
             }
             (Ty::Float, Bound { float: Some((lo, hi)), .. }) => Ok(self.float_in(*lo, *hi, size)),
@@ -113,26 +118,71 @@ impl<'a> Gen<'a> {
         self.bounded(t, b, size, depth + 1)
     }
 
+    /// A valid value obtained by shrinking `v` (which breaks an invariant):
+    /// at each step, the largest shrunk candidate that is valid, or else a
+    /// step down to the smallest candidate.
+    fn shrink_to_valid(&mut self, mut v: Value) -> Option<Value> {
+        let plans = self.plans.clone();
+        for _ in 0..20 {
+            let cands: Vec<Value> = shrink(&v).into_iter().take(64).collect();
+            for c in cands.iter().rev() {
+                if self.inv_tries == 0 {
+                    return None;
+                }
+                self.inv_tries -= 1;
+                self.it.ticks = 0;
+                let depth = self.it.stack.len();
+                let r = repair(self.it, &plans, c);
+                self.it.stack.truncate(depth);
+                if r.is_some() {
+                    return r;
+                }
+            }
+            v = cands.into_iter().next()?;
+        }
+        None
+    }
+
     /// A record of a type with an invariant: generated within the bounds the
     /// invariant states, with fields it defines computed, and retried until
     /// the invariant holds.
     fn valid_record(&mut self, td: &Rc<TypeDef>, plan: &InvPlan, tys: &[Ty], size: u32, depth: u32) -> Result<Value, String> {
         let TypeKind::Record { fields, .. } = &td.kind else { unreachable!() };
         let mut broken: Vec<(String, u32)> = Vec::new();
-        for attempt in 0..100 {
+        // A record inside another gets fewer tries: the outer one retries too.
+        let attempts = if depth == 0 { 100 } else { 10 };
+        // A recursive type (a trie, a tree) nested in itself gets much
+        // smaller, or it would hold thousands of nodes.
+        let size = if depth > 0 && tys.iter().any(|t| mentions(t, td.id)) { (size / 4).max(1) } else { size };
+        'attempt: for attempt in 0..attempts {
+            // (Only failed tries count against the budget.)
+            if self.inv_tries == 0 {
+                break;
+            }
             // Smaller values satisfy more invariants (an empty edge list is
-            // always in range), so retries shrink.
-            let size = (size * (100 - attempt) / 100).max(1);
+            // always in range), so retries shrink: steadily at the top, by
+            // half each time inside another record (which is retried too).
+            let size = if depth == 0 { (size * (attempts - attempt) / attempts).max(1) } else { (size >> attempt.min(31)).max(1) };
             // Checking a candidate gets the step budget of a whole case.
             self.it.ticks = 0;
             let mut vals = Vec::with_capacity(tys.len());
             for (i, t) in tys.iter().enumerate() {
                 vals.push(match plan.derived[i] {
                     Some(_) => Value::Unit,
-                    None => self.field(t, &plan.bounds[i], size, depth)?,
+                    None => match self.field(t, &plan.bounds[i], size, depth) {
+                        Ok(v) => v,
+                        // No valid record nested in this one: try again.
+                        Err(_) if self.missed.is_some() && self.crashed.is_none() => {
+                            self.missed = None;
+                            self.inv_tries = self.inv_tries.saturating_sub(1);
+                            continue 'attempt;
+                        }
+                        Err(e) => return Err(e),
+                    },
                 });
             }
             if !compute_derived(self.it, plan, tys, &mut vals) {
+                self.inv_tries = self.inv_tries.saturating_sub(1);
                 continue;
             }
             let v = Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values: vals }));
@@ -141,10 +191,21 @@ impl<'a> Gen<'a> {
             self.it.stack.truncate(depth_before);
             match r {
                 Ok(None) => return Ok(v),
-                Ok(Some(b)) => match broken.iter_mut().find(|(c, _)| *c == b.clause) {
-                    Some((_, n)) => *n += 1,
-                    None => broken.push((b.clause, 1)),
-                },
+                Ok(Some(b)) => {
+                    self.inv_tries = self.inv_tries.saturating_sub(1);
+                    match broken.iter_mut().find(|(c, _)| *c == b.clause) {
+                        Some((_, n)) => *n += 1,
+                        None => broken.push((b.clause, 1)),
+                    }
+                    // As a last resort, look for a valid value among the
+                    // smaller versions of this one (a map without its bad
+                    // entries, a shorter list).
+                    if attempt + 1 == attempts {
+                        if let Some(ok) = self.shrink_to_valid(v) {
+                            return Ok(ok);
+                        }
+                    }
+                }
                 Err(Ctrl::Error(d)) => {
                     self.crashed = Some((d, v));
                     return Err(format!("checking the invariant of `{}` failed", td.name));
@@ -162,7 +223,7 @@ impl<'a> Gen<'a> {
         } else {
             format!(
                 "cannot generate {} `{}` that satisfies its invariant: random values rarely satisfy `where {}`;\n      \
-                 write a field the clause defines as `field == expr` so it is computed, or test with a `property` that builds valid values",
+                 test functions on it with a `property` that builds valid values",
                 crate::diagnostic::a_an(&td.name),
                 td.name,
                 clause
@@ -188,11 +249,17 @@ impl<'a> Gen<'a> {
 
     /// Sometimes (30% of the time) a value from the pool that `ok` accepts.
     fn reuse(&mut self, ok: impl Fn(&Value) -> bool) -> Option<Value> {
-        let same: Vec<usize> = (0..self.pool.len()).filter(|&i| ok(&self.pool[i])).collect();
-        if same.is_empty() || self.rng.below(100) >= 30 {
+        if self.pool.is_empty() || self.rng.below(100) >= 30 {
             return None;
         }
-        Some(self.pool[same[self.rng.below(same.len())]].clone())
+        // A few random picks rather than a scan of the whole pool.
+        for _ in 0..8 {
+            let v = &self.pool[self.rng.below(self.pool.len())];
+            if ok(v) {
+                return Some(v.clone());
+            }
+        }
+        None
     }
 
     fn fresh(&mut self, ty: &Ty, size: u32, depth: u32) -> Result<Value, String> {
@@ -416,11 +483,18 @@ impl<'a> Gen<'a> {
         }
         let v = match (lo, hi) {
             (Some(l), Some(h)) if l <= h => {
+                // A wide range (`n <= 1_000_000`, a safety bound) is not worth
+                // its upper edge: values that large mostly make cases slow.
+                let wide = h.saturating_sub(l) > 100_000;
                 if r < 10 {
-                    let edges = [l, l.saturating_add(1).min(h), h.saturating_sub(1).max(l), h];
+                    let edges = if wide {
+                        [l, l.saturating_add(1), l, l.saturating_add(2)]
+                    } else {
+                        [l, l.saturating_add(1).min(h), h.saturating_sub(1).max(l), h]
+                    };
                     edges[self.rng.below(4)]
                 } else if r < 25 {
-                    self.rng.range(l, h)
+                    self.rng.range(l, if wide { l.saturating_add(10_000) } else { h })
                 } else {
                     // Mostly values of a size that grows during the run, measured
                     // from whichever bound is closer to zero.
@@ -464,6 +538,7 @@ impl<'a> Gen<'a> {
                 if let Some(plan) = plans.get(&td.id) {
                     return self.valid_record(td, plan, &tys, size, depth);
                 }
+                let size = if depth > 0 && tys.iter().any(|t| mentions(t, td.id)) { (size / 4).max(1) } else { size };
                 let mut vals = Vec::new();
                 for t in &tys {
                     vals.push(self.field(t, &Bound::default(), size, depth)?);
