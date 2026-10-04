@@ -107,6 +107,9 @@ enum BindMode {
 
 pub struct Resolver<'a> {
     ctx: &'a mut Ctx,
+    /// Names of built-in types a declaration tried to redefine (E0102):
+    /// patterns written for that declaration are not reported again.
+    clashing_types: HashSet<Name>,
     /// The type alias whose definition is being resolved.
     resolving_alias: Option<Name>,
     /// Steps left for the current exhaustiveness check (which is exponential
@@ -137,6 +140,7 @@ pub struct Resolver<'a> {
 /// (errors and warnings).
 pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, dir: &Path, repl: bool) -> Vec<Diagnostic> {
     let mut r = Resolver {
+        clashing_types: HashSet::new(),
         ctx,
         ns: std::mem::take(ns),
         fns: vec![],
@@ -674,6 +678,7 @@ impl<'a> Resolver<'a> {
                     }
                     if self.ctx.builtins.types.contains_key(&td.name) || is_primitive_type(&td.name) {
                         let d = Diagnostic::error("E0102", format!("`{}` is a built-in type and cannot be redefined", td.name)).at(td.name_span);
+                        self.clashing_types.insert(td.name.clone());
                         self.error(d);
                     }
                     self.ns.types.remove(&td.name);
@@ -696,6 +701,7 @@ impl<'a> Resolver<'a> {
                     }
                     if self.ctx.builtins.types.contains_key(&td.name) || is_primitive_type(&td.name) {
                         let d = Diagnostic::error("E0102", format!("`{}` is a built-in type and cannot be redefined", td.name)).at(td.name_span);
+                        self.clashing_types.insert(td.name.clone());
                         self.error(d);
                     }
                     self.ns.types.insert(td.name.clone(), id);
@@ -2123,7 +2129,7 @@ impl<'a> Resolver<'a> {
                     self.pop_scope();
                 }
                 let head = Span { end: scrutinee.span.end, ..span };
-                if let Some(t) = self.declared_type_of(scrutinee) {
+                if let Some(t) = self.declared_type_of(scrutinee).filter(|t| !self.clashing_types.contains(t.to_string().as_str())) {
                     let what = self.snippet_text(scrutinee.span);
                     for arm in arms.iter() {
                         if let Some(bad) = pattern_mismatch(&arm.pat, &t) {

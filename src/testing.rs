@@ -207,7 +207,9 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
         if passed >= cases {
             break PropOutcome::Passed { cases: passed, discarded, missed };
         }
-        if discarded > cases.max(10) * 20 {
+        // Give up when inputs are rejected far more often than not: after
+        // 20 times the cases, or sooner when fewer than 1 in 20 passes.
+        if discarded > cases.max(10) * 20 || (discarded >= 1000 && passed * 20 < discarded) {
             break PropOutcome::GaveUp { cases: passed, discarded, missed };
         }
         // Inputs grow during the run. Discarded attempts count too, so that a
@@ -570,6 +572,19 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
     out.push('\n');
     // Overflow with an extreme input: say how to rule such inputs out, in
     // case they cannot happen.
+    // An extreme Float input (1e308, 5e-324): say how to rule such inputs out.
+    let extreme = |v: &Value| matches!(v, Value::Float(x) if x.abs() >= 1e150 || (*x != 0.0 && x.abs() <= 1e-150));
+    if let Some((p, a)) = def.params.iter().zip(&f.args).find(|(_, a)| extreme(a)) {
+        let name = param_label(it, p);
+        let (size, bound) = match a {
+            Value::Float(x) if x.abs() >= 1e150 => ("large", format!("abs({}) <= 1e12", name)),
+            _ => ("close to zero", format!("{} == 0.0 or abs({}) >= 1e-12", name, name)),
+        };
+        out.push_str(&format!(
+            "      {}verify also tries extreme Floats such as 1e308 and 5e-324; if inputs this {} cannot happen, say so: `requires {}`{}\n",
+            c.dim, size, bound, c.reset
+        ));
+    }
     if f.diag.code == "E0207" {
         let huge = def.params.iter().zip(&f.args).find(|(_, a)| matches!(a, Value::Int(n) if n.unsigned_abs() >= 1 << 31));
         let is_huge = |v: &Value| matches!(v, Value::Int(n) if n.unsigned_abs() >= 1 << 31);
@@ -753,7 +768,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
                 let rejected = discarded - missed.as_ref().map_or(0, |m| m.0);
                 let mut disc = if rejected > 0 { format!(", {} inputs rejected by `requires`", rejected) } else { String::new() };
                 if let Some((n, ty)) = &missed {
-                    disc.push_str(&format!(", {} attempts found no {}", n, ty));
+                    disc.push_str(&format!(", {} attempt{} found no {}", n, if *n == 1 { "" } else { "s" }, ty));
                 }
                 out.push_str(&format!("  {}✓{} {:w$}  {}{} cases, {}{}{}\n", c.green, c.reset, name, c.dim, cases, what, disc, c.reset, w = width));
             }

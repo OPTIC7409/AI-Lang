@@ -59,6 +59,10 @@ pub struct Gen<'a> {
     pub inv_tries: u32,
 }
 
+/// Extreme Float values, likely to expose overflow to infinity (`a + b`,
+/// `x * x`) and underflow to zero.
+const EXTREME_FLOATS: [f64; 10] = [1e308, -1e308, f64::MAX, f64::MIN, 1e154, -1e154, 1e-308, 5e-324, -5e-324, 1e-160];
+
 /// Extreme Int values, likely to expose overflow.
 const EXTREME_INTS: [i64; 9] = [i64::MAX, i64::MIN, i64::MAX - 1, i64::MIN + 1, 1 << 31, -(1 << 31), 1 << 32, 1 << 53, -(1 << 53)];
 
@@ -112,8 +116,12 @@ impl<'a> Gen<'a> {
     /// (or of a record in one) is now and then extreme, as parameters are:
     /// an account's balance near max_int finds overflow in a deposit.
     fn field(&mut self, t: &Ty, b: &Bound, size: u32, depth: u32) -> Result<Value, String> {
-        if self.extremes && depth <= 1 && b.int.is_none() && matches!(t, Ty::Int) && self.rng.below(100) < 3 {
-            return Ok(Value::Int(self.extreme()));
+        if self.extremes && depth <= 1 && self.rng.below(100) < 3 {
+            match t {
+                Ty::Int if b.int.is_none() => return Ok(Value::Int(self.extreme())),
+                Ty::Float if b.float.is_none() => return Ok(Value::Float(EXTREME_FLOATS[self.rng.below(EXTREME_FLOATS.len())])),
+                _ => {}
+            }
         }
         self.bounded(t, b, size, depth + 1)
     }
@@ -288,7 +296,9 @@ impl<'a> Gen<'a> {
             }
             Ty::Float => {
                 let r = self.rng.below(100);
-                if r < 20 {
+                if self.extremes && depth == 0 && r < 6 {
+                    Value::Float(EXTREME_FLOATS[self.rng.below(EXTREME_FLOATS.len())])
+                } else if r < 20 {
                     const SPECIAL: [f64; 12] = [0.0, 1.0, -1.0, 0.5, 0.1, 0.2, 0.3, -0.1, 1e-9, 1e9, 2.5, 1.0 / 3.0];
                     Value::Float(SPECIAL[self.rng.below(SPECIAL.len())])
                 } else if r < 85 {
@@ -433,6 +443,12 @@ impl<'a> Gen<'a> {
             _ => 0.0,
         };
         let r = self.rng.below(100);
+        if self.extremes && r < 4 {
+            let ok: Vec<f64> = EXTREME_FLOATS.iter().copied().filter(|x| lo.is_none_or(|l| *x >= l) && hi.is_none_or(|h| *x <= h)).collect();
+            if !ok.is_empty() {
+                return Value::Float(ok[self.rng.below(ok.len())]);
+            }
+        }
         let f = match (lo, hi) {
             (Some(l), Some(h)) if l <= h => {
                 if r < 10 {

@@ -45,8 +45,9 @@ program's `args()`.
   A precision on a string truncates it (`{s:.3}`).
   Width ≤ 1000, precision ≤ 100; for a computed width
   use `pad_left`/`pad_right`. Rounding to a precision rounds halves away from
-  zero, like `round` (`"{2.5:.0}" == "3"`). An interpolation must fit on one
-  line.
+  zero, like `round` (`"{2.5:.0}" == "3"`), using the Float's exact value
+  (`2.675` is stored just below it, so `"{2.675:.2}" == "2.67"`). An
+  interpolation must fit on one line.
 - `"""..."""` strings span lines: a newline right after the opening quotes is
   dropped, a final line holding only whitespace is dropped (so there is no
   trailing newline), and the common indentation of the lines is removed.
@@ -82,7 +83,9 @@ the end (`xs[..-1]` is all but the last element, `xs[-2..]` the last two).
 Division by zero is an error for Floats too (`1.0 / 0` is not `inf`), but
 Float arithmetic can overflow to `inf` (`1e308 * 10.0`); NaN appears only
 from operations like `inf - inf` (test with `is_nan`), and ordering it with
-`<` is an error. A list, range or repetition built in one step is limited to
+`<` is an error. `Int ** Int` is an Int (a negative exponent is an error);
+with a Float it is a Float; a negative base with a fractional exponent
+(`pow(-8.0, 1.0 / 3.0)`) is an error, as `sqrt(-1)` is. A list, range or repetition built in one step is limited to
 100 million elements.
 
 **Value semantics**: every value behaves like an independent copy.
@@ -341,7 +344,8 @@ not `self`. Only record types have invariants.
 
 `cogito verify FILE` treats each function with contracts as a property: it
 generates arguments from the parameter types (including extreme Ints such as
-`max_int`), discards those that fail `requires`, and reports shrunk
+`max_int` and extreme Floats such as `1e308` and `5e-324`; functions taking
+function parameters are skipped), discards those that fail `requires`, and reports shrunk
 counterexamples that break `ensures`, crash, or exceed the step budget.
 Functions whose `requires` random inputs almost never satisfy (a well-formed
 tree, say) are reported as not checked, which is not a failure: test them
@@ -419,14 +423,14 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   "Tuple" "Record" "Range" "Option" "Result" "Fn" "Ordering"`, or a declared
   type's name) `str(x)` `repr(x)` `int(x)` `float(x)`
   `parse_int(s, base = 10) -> Option` (surrounding spaces allowed; base 2–36,
-  with an optional matching `0x`/`0o`/`0b` prefix) `hash(x) -> Int` (equal values hash equal; the numbers may change between versions, so do not store them)
+  with an optional matching `0x`/`0o`/`0b` prefix; `_` only between digits, as in `1_000`) `hash(x) -> Int` (equal values hash equal; the numbers may change between versions, so do not store them)
   `parse_float(s) -> Option` (`None` for NaN or numbers too large; `"inf"`
-  is accepted) `ord(c)` `chr(n)`
+  is accepted; `_` only between digits) `ord(c)` `chr(n)`
   `panic(msg)` `todo()` `dbg(x)` (prints and returns x) `catch(f)` `compare(a, b)`
   `min(xs) -> Option` / `min(a, b, ...)`, `max` likewise
 - **Math**: `abs sqrt pow exp ln log(x, base) log2 log10 sin cos tan asin acos
   atan atan2 hypot floor ceil trunc` (floor/ceil/trunc/round return Int),
-  `round(x, digits) -> Float`, `sign clamp(x, lo, hi) gcd lcm is_nan fixed(x, digits) -> Str` (gcd and lcm are never negative),
+  `round(x, digits) -> Float`, `sign -> Int clamp(x, lo, hi) gcd lcm is_nan fixed(x, digits) -> Str` (gcd and lcm are never negative),
   `bit_and bit_or bit_xor bit_not shl shr`, `wrapping_add wrapping_sub
   wrapping_mul` (wrap around instead of failing, for hashes and checksums;
   the operators always fail on overflow), constants `pi tau e inf max_int min_int`,
@@ -434,7 +438,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
 - **Collections** (lists; most also accept ranges, strings, tuples, maps):
   `len is_empty range(end) range(start, end, step) first -> Option last -> Option get(i) -> Option
   get_or(k, default) push insert(i, x) remove(i) set(i, x) map filter
-  reduce(f) fold(init, f) sum product min_by(key) max_by(key) sort sort_by(key)
+  reduce(f) fold(init, f) sum product min_by(key) max_by(key) (the first on ties) sort sort_by(key)
   sort_with(cmp) reverse contains index_of -> Option find -> Option
   find_index -> Option any(pred) all(pred) count(pred_or_value) take drop
   take_while drop_while slice(a, b) zip enumerate flat_map flatten join(sep)

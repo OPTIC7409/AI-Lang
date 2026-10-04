@@ -1,0 +1,3 @@
+# expect: E0121
+let words = ["a", "b"]
+print(words.map(fn(x: Int) => x * 2))

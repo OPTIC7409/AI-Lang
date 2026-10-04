@@ -1,0 +1,24 @@
+# Rounding, parsing and powers of Floats.
+
+test "rounding uses the exact value of a Float; true halves go away from zero" {
+  assert round(2.675, 2) == 2.67
+  assert round(1.005, 2) == 1.0
+  assert round(0.125, 2) == 0.13
+  assert round(2.5, 0) == 3.0 and round(-2.5, 0) == -3.0
+  assert fixed(2.675, 2) == "2.67" and fixed(999.995, 2) == "1000.00"
+  assert "{2.675:.2}" == "2.67" and "{0.125:.2}" == "0.13"
+  assert round(123.456, -1) == 120.0
+}
+
+test "underscores are accepted only between digits" {
+  assert parse_int("1_000") == Some(1000) and parse_float("1_000.5") == Some(1000.5)
+  assert parse_int("_1") == None and parse_int("1__0") == None
+  assert parse_float("1_") == None and parse_float("1_e5") == None
+  assert parse_int("ff_ff", 16) == Some(65535)
+}
+
+test "a negative base needs a whole-number exponent" {
+  assert pow(-2.0, 3.0) == -8.0 and (-2.0) ** 2.0 == 4.0
+  assert catch(fn() => pow(-8.0, 1.0 / 3.0)).is_err()
+  assert catch(fn() => (-8.0) ** 0.5).is_err()
+}

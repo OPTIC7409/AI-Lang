@@ -905,6 +905,8 @@ fn b_parse_int(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     if digits.is_empty() || digits.starts_with(['+', '-']) {
         return Ok(it.none());
     }
+    let Some(digits) = without_digit_underscores(digits, |c| c.is_ascii_alphanumeric()) else { return Ok(it.none()) };
+    let digits = digits.as_str();
     // Parse the magnitude as u64 so that min_int is representable.
     let n = u64::from_str_radix(digits, base as u32).ok().and_then(|m| if neg { 0i64.checked_sub_unsigned(m) } else { i64::try_from(m).ok() });
     Ok(it.option(n.map(Value::Int)))
@@ -928,6 +930,18 @@ fn b_hash(_: &mut Interp, a: Vec<Value>, _: Span) -> R {
 
 /// A Float from text: `inf` and `-inf` (as `str` prints them) are allowed,
 /// but not NaN, or a number too large for a Float (`1e999`).
+/// `t` without its digit-group underscores (`1_000`), or None if an
+/// underscore is anywhere but between two digits (`_1`, `1_`, `1__0`).
+fn without_digit_underscores(t: &str, digit: fn(char) -> bool) -> Option<String> {
+    let cs: Vec<char> = t.chars().collect();
+    for (i, c) in cs.iter().enumerate() {
+        if *c == '_' && !(i > 0 && i + 1 < cs.len() && digit(cs[i - 1]) && digit(cs[i + 1])) {
+            return None;
+        }
+    }
+    Some(cs.into_iter().filter(|c| *c != '_').collect())
+}
+
 fn parse_float_text(t: &str) -> Option<f64> {
     let f = t.parse::<f64>().ok()?;
     let word = t.trim_start_matches(['+', '-']);
@@ -936,8 +950,8 @@ fn parse_float_text(t: &str) -> Option<f64> {
 
 fn b_parse_float(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = str_arg(it, &a, 0, "parse_float", sp)?;
-    let t = s.trim().replace('_', "");
-    Ok(it.option(parse_float_text(&t).map(Value::Float)))
+    let t = without_digit_underscores(s.trim(), |c| c.is_ascii_digit());
+    Ok(it.option(t.and_then(|t| parse_float_text(&t)).map(Value::Float)))
 }
 
 fn b_ord(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -1026,7 +1040,20 @@ fn b_hypot(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 fn b_pow(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let x = num_arg(it, &a, 0, "pow", sp)?;
     let y = num_arg(it, &a, 1, "pow", sp)?;
+    if x < 0.0 && y.is_finite() && y.fract() != 0.0 {
+        return Err(it.err(sp, "E0216", negative_power(x, y)));
+    }
     Ok(Value::Float(x.powf(y)))
+}
+
+/// The message for a negative number raised to a fractional power, which
+/// has no real value (rather than a silent NaN).
+pub fn negative_power(x: f64, y: f64) -> String {
+    format!(
+        "{} to the power {} is not a real number: a negative base needs a whole-number exponent (for a cube root of a negative x, use -pow(-x, 1.0 / 3.0))",
+        format_float(x),
+        format_float(y)
+    )
 }
 
 fn b_log(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -1073,6 +1100,10 @@ fn b_round(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     if a.len() == 2 {
         let x = num_arg(it, &a, 0, "round", sp)?;
         let d = int_arg(it, &a, 1, "round", sp)?;
+        if (0..=340).contains(&d) && x.is_finite() {
+            // Decimal rounding of the exact value, as `fixed` does.
+            return Ok(Value::Float(crate::value::format_fixed(x, d as usize).parse().unwrap_or(x)));
+        }
         let m = 10f64.powi(d.clamp(-300, 300) as i32);
         return Ok(Value::Float((x * m).round() / m));
     }

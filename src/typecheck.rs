@@ -145,7 +145,7 @@ struct Checker<'a> {
     divisions: HashSet<Span>,
     /// For an anonymous function passed to a built-in such as `map`: the
     /// types its unannotated parameters will be called with.
-    lambda_hint: Option<Vec<Ty>>,
+    lambda_hint: Option<(Vec<Ty>, &'static str)>,
     /// Unannotated `var`s (by the span of their name) assumed to keep the
     /// type of their first value (see `check_program`).
     assumed: HashMap<Span, Ty>,
@@ -379,11 +379,24 @@ impl<'a> Checker<'a> {
             name: def.name.clone(),
             ..Frame::default()
         };
-        let hint = self.lambda_hint.take().filter(|h| h.len() == def.params.len());
+        let hint = self.lambda_hint.take().filter(|(h, _)| h.len() == def.params.len());
         for (i, p) in def.params.iter().enumerate() {
             let t = match (&p.ty, &hint) {
-                (Some(t), _) => t.ty.clone(),
-                (None, Some(h)) => h[i].clone(),
+                (Some(t), Some((h, f))) => {
+                    // `["a"].map(fn(x: Int) => ...)`: every call fails.
+                    if !h[i].is_any() && !self.compatible(&h[i], &t.ty) {
+                        let d = Diagnostic::error(
+                            "E0121",
+                            format!("`{}` calls this function with {}, but `{}` is declared as {}", f, a(&h[i]), p.name, t.ty),
+                        )
+                        .at(t.span)
+                        .label("wrong type");
+                        self.diags.push(d);
+                    }
+                    t.ty.clone()
+                }
+                (Some(t), None) => t.ty.clone(),
+                (None, Some((h, _))) => h[i].clone(),
                 (None, None) => Ty::Any,
             };
             frame.locals.insert(p.slot, t);
@@ -406,7 +419,7 @@ impl<'a> Checker<'a> {
                 let i = def.params.iter().position(|q| std::ptr::eq(q, p)).unwrap_or(0);
                 let t = match (&p.ty, &hint) {
                     (Some(t), _) => t.ty.clone(),
-                    (None, Some(h)) => h[i].clone(),
+                    (None, Some((h, _))) => h[i].clone(),
                     (None, None) => Ty::Any,
                 };
                 self.bind(pat, &t, false);
@@ -851,7 +864,7 @@ impl<'a> Checker<'a> {
                 let mut arg_tys: Vec<(Option<Name>, Ty, Span)> = Vec::with_capacity(args.len());
                 for (i, a) in args.iter().enumerate() {
                     if let (Some(b), Some(first), ExprKind::Lambda(_)) = (builtin, arg_tys.first(), &a.value.kind) {
-                        self.lambda_hint = callback_params(b, &first.1, i);
+                        self.lambda_hint = callback_params(b, &first.1, i).map(|h| (h, b));
                     }
                     let t = self.expr(&a.value);
                     self.lambda_hint = None;
@@ -878,7 +891,7 @@ impl<'a> Checker<'a> {
                 let mut arg_tys: Vec<(Option<Name>, Ty, Span)> = Vec::with_capacity(args.len());
                 for (i, a) in args.iter().enumerate() {
                     if let (Some(b), ExprKind::Lambda(_)) = (builtin, &a.value.kind) {
-                        self.lambda_hint = callback_params(b, &rt, i + 1);
+                        self.lambda_hint = callback_params(b, &rt, i + 1).map(|h| (h, b));
                     }
                     let t = self.expr(&a.value);
                     self.lambda_hint = None;

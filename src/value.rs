@@ -752,19 +752,45 @@ fn cmp_inner(a: &Value, b: &Value, memo: &mut EqMemo) -> Option<Ordering> {
 
 /// Format with exactly `p` digits after the decimal point, rounding halves
 /// away from zero, the same way as `round(x, p)` (so `fixed(0.125, 2)` and
-/// `"{0.125:.2}"` give `0.13`, like `round(0.125, 2)`).
+/// `"{0.125:.2}"` give `0.13`, like `round(0.125, 2)`). Rounding uses the
+/// exact value of the Float: 2.675 is stored as 2.67499999..., so it gives
+/// 2.67, as decimal arithmetic on that value would.
 pub fn format_fixed(x: f64, p: usize) -> String {
     if !x.is_finite() {
         return format_float(x);
     }
-    if p <= 15 {
-        let m = 10f64.powi(p as i32);
-        let y = x * m;
-        if y.abs() < 4.0e15 {
-            return format!("{:.*}", p, y.round() / m);
+    // The exact digits (Rust prints a Float's exact value to any precision),
+    // far enough past position `p` to tell a tie from a near tie.
+    let long = format!("{:.*}", p + 40, x.abs());
+    let (int_part, frac) = long.split_once('.').unwrap_or((&long, ""));
+    let mut digits: Vec<u8> = int_part.bytes().chain(frac.bytes().take(p)).collect();
+    if frac.as_bytes().get(p).is_some_and(|d| *d >= b'5') {
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, b'1');
+                break;
+            }
+            i -= 1;
+            if digits[i] == b'9' {
+                digits[i] = b'0';
+            } else {
+                digits[i] += 1;
+                break;
+            }
         }
     }
-    format!("{:.*}", p, x)
+    let int_len = digits.len() - p;
+    let mut out = String::with_capacity(digits.len() + 2);
+    if x.is_sign_negative() {
+        out.push('-');
+    }
+    out.push_str(std::str::from_utf8(&digits[..int_len]).unwrap_or("0"));
+    if p > 0 {
+        out.push('.');
+        out.push_str(std::str::from_utf8(&digits[int_len..]).unwrap_or(""));
+    }
+    out
 }
 
 pub fn format_float(f: f64) -> String {

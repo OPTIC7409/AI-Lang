@@ -1922,6 +1922,10 @@ fn check_place(e: &Expr) -> PResult<()> {
     match &e.kind {
         ExprKind::Var(_) => Ok(()),
         ExprKind::Field { target, .. } | ExprKind::Index { target, .. } => check_place(target),
+        ExprKind::Tuple(_) => Err(Diagnostic::error("E0012", "a tuple cannot be assigned to")
+            .at(e.span)
+            .label("cannot assign to this")
+            .help("assign each variable on its own line; to swap, use a temporary (`let t = a`, `a = b`, `b = t`), or bind new names with `let (x, y) = (b, a)`")),
         _ => Err(Diagnostic::error("E0012", "invalid assignment target")
             .at(e.span)
             .label("cannot assign to this")

@@ -2143,6 +2143,9 @@ impl Interp {
                     let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) else {
                         return Err(self.bad_binop(op, &a, &b, span));
                     };
+                    if x < 0.0 && y.is_finite() && y.fract() != 0.0 {
+                        return Err(self.err(span, "E0216", crate::builtins::negative_power(x, y)));
+                    }
                     Ok(Float(x.powf(y)))
                 }
             },
