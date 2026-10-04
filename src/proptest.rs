@@ -13,10 +13,18 @@ pub struct Gen<'a> {
     pub rng: &'a mut Rng,
     /// Occasionally produce extreme Ints (such as max_int) for top-level parameters.
     pub extremes: bool,
+    /// The Ints, Floats and Strs generated so far for this case. A later
+    /// parameter sometimes reuses one, so that a generated key is often in a
+    /// generated map, and an element in a generated list.
+    pub pool: Vec<Value>,
 }
 
 /// Extreme Int values, likely to expose overflow.
 const EXTREME_INTS: [i64; 9] = [i64::MAX, i64::MIN, i64::MAX - 1, i64::MIN + 1, 1 << 31, -(1 << 31), 1 << 32, 1 << 53, -(1 << 53)];
+
+fn same_kind(ty: &Ty, v: &Value) -> bool {
+    matches!((ty, v), (Ty::Int, Value::Int(_)) | (Ty::Float, Value::Float(_)) | (Ty::Str, Value::Str(_)))
+}
 
 fn mentions(ty: &Ty, id: u32) -> bool {
     match ty {
@@ -30,7 +38,34 @@ fn mentions(ty: &Ty, id: u32) -> bool {
 }
 
 impl<'a> Gen<'a> {
+    pub fn new(it: &'a Interp, rng: &'a mut Rng, extremes: bool) -> Gen<'a> {
+        Gen { it, rng, extremes, pool: Vec::new() }
+    }
+
     pub fn value(&mut self, ty: &Ty, size: u32, depth: u32) -> Result<Value, String> {
+        let scalar = matches!(ty, Ty::Int | Ty::Float | Ty::Str);
+        if scalar && depth == 0 {
+            if let Some(v) = self.reuse(|v| same_kind(ty, v)) {
+                return Ok(v);
+            }
+        }
+        let v = self.fresh(ty, size, depth)?;
+        if scalar && self.pool.len() < 256 {
+            self.pool.push(v.clone());
+        }
+        Ok(v)
+    }
+
+    /// Sometimes (30% of the time) a value from the pool that `ok` accepts.
+    fn reuse(&mut self, ok: impl Fn(&Value) -> bool) -> Option<Value> {
+        let same: Vec<usize> = (0..self.pool.len()).filter(|&i| ok(&self.pool[i])).collect();
+        if same.is_empty() || self.rng.below(100) >= 30 {
+            return None;
+        }
+        Some(self.pool[same[self.rng.below(same.len())]].clone())
+    }
+
+    fn fresh(&mut self, ty: &Ty, size: u32, depth: u32) -> Result<Value, String> {
         if depth > 48 {
             return Err(format!("cannot generate a finite value of type `{}`: it contains itself with no non-recursive alternative", ty));
         }
@@ -223,6 +258,10 @@ impl<'a> Gen<'a> {
 
     /// An Int within optional inclusive bounds, favouring the boundaries.
     pub fn int_in(&mut self, lo: Option<i64>, hi: Option<i64>, size: u32) -> Value {
+        let fits = |x: i64| lo.is_none_or(|l| x >= l) && hi.is_none_or(|h| x <= h);
+        if let Some(v) = self.reuse(|v| matches!(v, Value::Int(x) if fits(*x))) {
+            return v;
+        }
         let natural = match self.value(&Ty::Int, size, 1) {
             Ok(Value::Int(n)) => n,
             _ => 0,

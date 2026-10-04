@@ -9,7 +9,7 @@ type TxError =
   | InvalidAmount(amount: Int)
 
 fn deposit(acct: Account, amount: Int) -> Account
-  requires amount > 0
+  requires amount > 0 and amount <= 1_000_000_000
   ensures result.balance == acct.balance + amount
 => { ..acct, balance: acct.balance + amount }
 

@@ -38,7 +38,10 @@ program's `args()`.
   follow `:` — `{x:.2}` (2 decimals), `{s:>8}` `{s:<8}` `{s:^8}` (align in
   width 8), `{n:05}` (zero pad), `{n:+}`, `{n:,}` (thousands separators),
   `{n:x}` `{n:b}` `{n:o}` (hex/binary/octal), `{f:e}` (`1.500000e+03`; `{f:.1e}` gives `1.5e+03`), `{f:.1%}`,
-  `{s:*>6}` (fill char). Width ≤ 1000, precision ≤ 100; for a computed width
+  `{n:X}` (upper-case hex), `{s:*>6}` (fill char). Parts combine in the
+  order fill+align, `+`, `0`, width, `,`, `.precision`, type: `{x:>15,.2}`
+  is `   1,234,567.89`, `{n:+08}` is `+0000042`, `{10:04x}` is `000a`.
+  Width ≤ 1000, precision ≤ 100; for a computed width
   use `pad_left`/`pad_right`. Rounding to a precision rounds halves away from
   zero, like `round` (`"{2.5:.0}" == "3"`). An interpolation must fit on one
   line.
@@ -71,9 +74,13 @@ program's `args()`.
 | `Any` | | annotation that accepts anything |
 
 Indexing out of range is an error (use `get` for an Option); slices clamp
-silently (`[1, 2, 3][1..10] == [2, 3]`). Division by zero is an error for
-Floats too (`1.0 / 0` is not `inf`). A list, range or repetition built in one
-step is limited to 100 million elements.
+silently (`[1, 2, 3][1..10] == [2, 3]`), and negative slice bounds count from
+the end (`xs[..-1]` is all but the last element, `xs[-2..]` the last two).
+Division by zero is an error for Floats too (`1.0 / 0` is not `inf`), but
+Float arithmetic can overflow to `inf` (`1e308 * 10.0`); NaN appears only
+from operations like `inf - inf` (test with `is_nan`), and ordering it with
+`<` is an error. A list, range or repetition built in one step is limited to
+100 million elements.
 
 **Value semantics**: every value behaves like an independent copy.
 `let b = a` then changing `a` never changes `b`. (Implemented with
@@ -81,7 +88,8 @@ copy-on-write, so copies are cheap.)
 
 **Equality** `==` is structural (deep). `1 == 1.0` is true (Int/Float
 comparisons are exact). Comparison `< <= > >=` works on numbers, strings,
-lists/tuples (lexicographic), and values of the same enum/record type.
+Bools (`false < true`), lists/tuples (lexicographic), and values of the same
+enum/record type.
 Enum values compare by variant in declaration order, then by fields:
 `Some(_) < None`, `Ok(_) < Err(_)`, `Less < Equal < Greater`.
 Comparing different kinds is an error.
@@ -122,10 +130,16 @@ type Shape =                                  # enum (sum type)
   | Rect(Point, Point)                        # positional fields: r.0, r.1
   | Empty                                     # no fields
 type Tree[T] = Leaf | Node(Tree[T], T, Tree[T])
+type Stack[T] = { items: List[T], size: Int } # generic record
 type Grid = List[List[Int]]                   # alias
 
 let p = Point(x: 1.0, y: 2.0)   # or Point(1.0, 2.0); fields are type-checked
 let c = Circle(center: p, radius: 3.0)
+[1.0, 2.0].map(Some)            # constructors are functions too
+
+fn(x) => x * 2                  # anonymous functions: an expression body,
+fn(x) { let y = x * 2; y + 1 }  # or a block body
+fn bump!(c: Counter) => c.n += 1   # a `=>` body may be one assignment
 ```
 
 Variant names must be unique within a module. Top-level functions and types
@@ -165,17 +179,23 @@ while cond { ... }
 for x in xs { ... }             # lists, ranges, strings (chars), maps ((k, v) tuples)
 for (i, x) in xs.enumerate() { ... }
 let found = loop { if done() { break value } }   # only `loop` can break with a value
-break  continue  return value
+break  continue  return value                   # also as match arm bodies: `None => break`
 [x * x for x in 1..=10 if x % 2 == 0]           # comprehension (several `for`/`if` allowed)
 ```
+
+`else` may start a new line after the `}`. `{}` is an empty block (its value
+is `()`), not an empty record. A spread `..xs` works in list literals,
+record literals and patterns, but not as a function argument: write
+`f([a, ..xs])`.
 
 There is no `if let`, `while let`, `let ... else`, ternary `?:`, `switch`,
 `try`/`catch`, `null`, class or `self`: use `match`, `if`, `Option`/`Result`,
 and plain functions called with method syntax.
 
 Operators by precedence (loosest first): `or`; `and`; `not`;
-`== != < <= > >= in` (`not in`) — **cannot be chained** (`a < b < c` is an
+`== != < <= > >= in is` (`not in`) — **cannot be chained** (`a < b < c` is an
 error); `|>`; `..` `..=`; `+ -`; `* / // %`; unary `-`; `**` (right-assoc).
+`x in s` on a Str tests for a substring; on a Map, for a key.
 `+` concatenates strings and lists; `str * n` and `list * n` repeat.
 No implicit conversions: `"a" + 1` is an error; use `"a{1}"` or `str(1)`.
 There are no bitwise operators; use `bit_and`, `bit_or`, `bit_xor`, `shl`, `shr`.
@@ -183,7 +203,8 @@ There are no bitwise operators; use `bit_and`, `bit_or`, `bit_xor`, `shl`, `shr`
 **Method syntax**: `x.f(a, b)` calls `f(x, a, b)` — any function, including
 built-ins (`xs.len()`, `"a,b".split(",")`). If `x` is a record with a field
 `f`, the field is called instead. A variable named like a function (say
-`let lines = ...`) does not hide the function from method syntax. For a
+`let lines = ...`, or even `let get = fn(k) => m.get(k)`, whose body still
+calls the built-in) does not hide the function from method syntax. For a
 value whose type comes from an imported module, method syntax looks in that
 module first (for `!` functions too), so `q.push!(x)` (or `push!(q, x)`,
 which means the same) calls the module's `push!`; a plain call `f(x)` only
@@ -349,7 +370,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
 
 - **I/O**: `print(..)` `write(..)` (no newline; both join several arguments
   with a space) `eprint(..)` `input(prompt) -> Str` (`""` at end of input)
-  `read_line() -> Option[Str]` (`None` at end of input) `read_stdin() -> Str`
+  `read_line() -> Option[Str]` (without the `\n` or `\r\n`; `None` at end of input) `read_stdin() -> Str`
   `read_file(path) -> Result[Str, Str]`
   `write_file(path, text) -> Result[Unit, Str]` `append_file(path, text) -> Result[Unit, Str]`
   `file_exists(path) -> Bool` `list_dir(path) -> Result[List[Str], Str]`
@@ -357,10 +378,13 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   `exit(code)` (0–255) `time()` `clock()` `sleep(seconds)` `flush()`.
   Output to a pipe or file is buffered until it is large, the program ends,
   or `flush()` is called.
-- **Core**: `type_of(x)` `str(x)` `repr(x)` `int(x)` `float(x)`
+- **Core**: `type_of(x)` (`"Int" "Float" "Str" "Bool" "Unit" "List" "Map"
+  "Tuple" "Record" "Range" "Option" "Result" "Fn" "Ordering"`, or a declared
+  type's name) `str(x)` `repr(x)` `int(x)` `float(x)`
   `parse_int(s, base = 10) -> Option` (surrounding spaces allowed; base 2–36,
   with an optional matching `0x`/`0o`/`0b` prefix) `hash(x) -> Int`
-  `parse_float(s) -> Option` `ord(c)` `chr(n)`
+  `parse_float(s) -> Option` (`None` for NaN or numbers too large; `"inf"`
+  is accepted) `ord(c)` `chr(n)`
   `panic(msg)` `todo()` `dbg(x)` (prints and returns x) `catch(f)` `compare(a, b)`
   `min(xs) -> Option` / `min(a, b, ...)`, `max` likewise
 - **Math**: `abs sqrt pow exp ln log(x, base) log2 log10 sin cos tan asin acos
@@ -379,6 +403,8 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   take_while drop_while slice(a, b) zip enumerate flat_map flatten join(sep)
   unique group_by(key) -> Map tally -> Map[T, Int] partition(pred) -> (List, List)
   chunks(n) windows(n) repeat(x, n) each(f) to_list to_map(pairs)`.
+  Sorting is stable. `sort_with(cmp)` takes a function returning an
+  Ordering, as `compare(a, b)` does.
   On a Str, functions that pick or reorder characters give a Str (`take
   drop slice take_while drop_while filter sort unique reverse`, and the
   pieces of `chunks`/`windows`); `map` gives a List.
@@ -395,9 +421,10 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
 - **Strings**: `split(sep, limit)` (no sep: whitespace, with no limit) `split_once(sep) -> Option[(Str, Str)]`
   `lines words chars trim trim_start trim_end upper lower capitalize` (uppercases
   only the first character) `starts_with ends_with strip_prefix(p) -> Option
-  strip_suffix(s) -> Option replace(a, b) pad_left(width, fill) pad_right(width, fill)
+  strip_suffix(s) -> Option replace(a, b) pad_left(width, fill = " ") pad_right(width, fill = " ")
   is_digit is_alpha is_alnum is_space is_upper is_lower reverse repeat
-  count(sub) index_of(sub)`, slicing `s[1..3]`.
+  count(sub) index_of(sub)`, slicing `s[1..3]`. A fill is one character;
+  `split("")` gives the characters; `replace` with an empty pattern is an error.
 - **Option/Result**: `unwrap expect(msg) unwrap_or(d) unwrap_or_else(f)
   is_some is_none is_ok is_err map(f) and_then(f) map_err(f) ok_or(e) ok err
   unwrap_err collect_ok(list of Results) -> Result[List] collect_some(list of Options) -> Option[List]`

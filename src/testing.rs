@@ -196,11 +196,15 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
         // filter such as `xs.len() >= 5` eventually sees inputs that pass it.
         let size = 2 + (passed + discarded).min(cases) * 40 / cases.max(1);
         let mut args = Vec::with_capacity(tys.len());
-        let mut gen = Gen { it, rng: &mut rng, extremes };
+        let mut gen = Gen::new(it, &mut rng, extremes);
         let mut gen_err = None;
         for (t, b) in tys.iter().zip(&bounds) {
             let v = match (t, b) {
-                (Ty::Int, Bound { int: Some((lo, hi)), .. }) => Ok(gen.int_in(*lo, *hi, size)),
+                (Ty::Int, Bound { int: Some((lo, hi)), .. }) => {
+                    let v = gen.int_in(*lo, *hi, size);
+                    gen.pool.push(v.clone());
+                    Ok(v)
+                }
                 (Ty::Float, Bound { float: Some((lo, hi)), .. }) => Ok(gen.float_in(*lo, *hi, size)),
                 (Ty::Str | Ty::List(_) | Ty::Map(..), Bound { len: Some((lo, hi)), .. }) => gen.sized(t, size, *lo, *hi),
                 _ => gen.value(t, size, 0),
@@ -420,6 +424,19 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
     }
     out.push_str(&indent(&f.diag.render(&it.ctx.sm, !c.red.is_empty()), 6));
     out.push('\n');
+    // Overflow with an extreme input: say how to rule such inputs out, in
+    // case they cannot happen.
+    if f.diag.code == "E0207" {
+        let huge = def.params.iter().zip(&f.args).find(|(_, a)| matches!(a, Value::Int(n) if n.unsigned_abs() >= 1 << 31));
+        if let Some((p, _)) = huge {
+            out.push_str(&format!(
+                "      {}verify also tries extreme Ints such as max_int; if inputs this large cannot happen, say so: `requires {} <= 1_000_000_000`{}\n",
+                c.dim,
+                param_label(it, p),
+                c.reset
+            ));
+        }
+    }
 }
 
 /// Run all `test` and `property` declarations of a program. The program's
