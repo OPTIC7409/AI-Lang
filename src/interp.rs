@@ -3202,6 +3202,22 @@ impl Interp {
         self.call_value(f, args, vec![], span)
     }
 
+    /// Call a function value with one argument (a callback, from a built-in
+    /// such as `map`), with the argument list taken from the pool.
+    pub fn call1(&mut self, f: &Value, x: Value, span: Span) -> R {
+        let mut args = self.take_vec(1);
+        args.push(x);
+        self.call_value(f, args, vec![], span)
+    }
+
+    /// Call a function value with two arguments (as `call1`).
+    pub fn call2(&mut self, f: &Value, x: Value, y: Value, span: Span) -> R {
+        let mut args = self.take_vec(2);
+        args.push(x);
+        args.push(y);
+        self.call_value(f, args, vec![], span)
+    }
+
     pub fn call_bool(&mut self, f: &Value, args: Vec<Value>, span: Span, what: &str) -> R<bool> {
         match self.call(f, args, span)? {
             Value::Bool(b) => Ok(b),

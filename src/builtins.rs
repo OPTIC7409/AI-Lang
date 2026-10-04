@@ -456,7 +456,21 @@ fn take_arg(a: &mut [Value], i: usize) -> Value {
 }
 
 fn bool_result(it: &mut Interp, f: &Value, args: Vec<Value>, sp: Span, name: &str) -> R<bool> {
-    it.call_bool(f, args, sp, &format!("the function passed to `{}`", name))
+    let r = it.call(f, args, sp)?;
+    to_bool(it, r, sp, name)
+}
+
+/// As `bool_result`, for one argument (the common case).
+fn bool_result1(it: &mut Interp, f: &Value, x: Value, sp: Span, name: &str) -> R<bool> {
+    let r = it.call1(f, x, sp)?;
+    to_bool(it, r, sp, name)
+}
+
+fn to_bool(it: &Interp, r: Value, sp: Span, name: &str) -> R<bool> {
+    match r {
+        Value::Bool(b) => Ok(b),
+        other => Err(it.err(sp, "E0209", format!("the function passed to `{}` must return a Bool, but it returned {}", name, describe(&other)))),
+    }
 }
 
 /// Call f with one element; for map entries (k, v) the function may take two arguments.
@@ -468,7 +482,7 @@ fn call_entry(it: &mut Interp, f: &Value, x: Value, two: bool, sp: Span) -> R {
             }
         }
     }
-    it.call(f, vec![x], sp)
+    it.call1(f, x, sp)
 }
 
 /// Call a predicate on one element; for map entries `(k, v)` the predicate
@@ -481,7 +495,7 @@ fn entry_pred(it: &mut Interp, f: &Value, x: Value, two: bool, sp: Span, name: &
             }
         }
     }
-    bool_result(it, f, vec![x], sp, name)
+    bool_result1(it, f, x, sp, name)
 }
 
 /// Functions that pick out or reorder the characters of a Str give a Str.
@@ -506,7 +520,7 @@ fn wants_two(f: &Value) -> bool {
     }
 }
 
-fn merge_sort(v: Vec<Value>, cmp: &mut dyn FnMut(&Value, &Value) -> R<Ordering>) -> R<Vec<Value>> {
+fn merge_sort<T>(v: Vec<T>, cmp: &mut dyn FnMut(&T, &T) -> R<Ordering>) -> R<Vec<T>> {
     let n = v.len();
     if n <= 1 {
         return Ok(v);
@@ -556,23 +570,15 @@ fn sort_values(it: &Interp, xs: Vec<Value>, sp: Span) -> R<Vec<Value>> {
 }
 
 fn sort_by_key(it: &mut Interp, xs: Vec<Value>, key: &Value, sp: Span) -> R<Vec<Value>> {
-    let mut keyed = Vec::with_capacity(xs.len());
-    for x in xs {
-        let k = it.call(key, vec![x.clone()], sp)?;
-        keyed.push(Value::tuple(vec![k, x]));
+    let mut keys = Vec::with_capacity(xs.len());
+    for x in &xs {
+        keys.push(it.call1(key, x.clone(), sp)?);
     }
+    // Sort the positions by key (stable), then pick the elements in order.
     let itr: &Interp = it;
-    let sorted = merge_sort(keyed, &mut |a, b| {
-        let (Value::Tuple(a), Value::Tuple(b)) = (a, b) else { unreachable!() };
-        cmp_values(itr, &a[0], &b[0], sp)
-    })?;
-    Ok(sorted
-        .into_iter()
-        .map(|t| match t {
-            Value::Tuple(t) => t[1].clone(),
-            _ => unreachable!(),
-        })
-        .collect())
+    let order = merge_sort((0..xs.len()).collect(), &mut |a: &usize, b: &usize| cmp_values(itr, &keys[*a], &keys[*b], sp))?;
+    let mut xs: Vec<Option<Value>> = xs.into_iter().map(Some).collect();
+    Ok(order.into_iter().map(|i| xs[i].take().unwrap_or_default()).collect())
 }
 
 fn ordering_of(it: &Interp, v: &Value, sp: Span) -> R<Ordering> {
@@ -1371,7 +1377,7 @@ fn b_update(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     match take_arg(&mut a, 0) {
         Value::Map(mut m) => {
             let cur = m.get(&k).cloned().unwrap_or(default);
-            let new = it.call(&f, vec![cur], sp)?;
+            let new = it.call1(&f, cur, sp)?;
             Rc::make_mut(&mut m).insert(k, new);
             Ok(Value::Map(m))
         }
@@ -1388,7 +1394,7 @@ fn m_update(it: &mut Interp, t: &mut Value, mut a: Vec<Value>, sp: Span) -> R {
         v => return Err(type_err(it, "update!", 0, "a Map", v, sp)),
     };
     // Compute first, so that an error leaves the map unchanged.
-    let new = it.call(&f, vec![cur], sp)?;
+    let new = it.call1(&f, cur, sp)?;
     if let Value::Map(m) = t {
         Rc::make_mut(m).insert(k, new);
     }
@@ -1593,7 +1599,7 @@ fn b_map(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let xs = items(it, v, "map", 0, sp)?;
     let mut out = Vec::with_capacity(xs.len());
     for x in xs {
-        out.push(it.call(&f, vec![x], sp)?);
+        out.push(it.call1(&f, x, sp)?);
     }
     Ok(Value::list(out))
 }
@@ -1620,7 +1626,7 @@ fn b_filter(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let xs = items(it, v, "filter", 0, sp)?;
     let mut out = Vec::new();
     for x in xs {
-        if bool_result(it, &f, vec![x.clone()], sp, "filter")? {
+        if bool_result1(it, &f, x.clone(), sp, "filter")? {
             out.push(x);
         }
     }
@@ -1636,7 +1642,7 @@ fn b_reduce(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
         return Err(it.fail(it.diag(sp, "E0216", "`reduce` of an empty collection").help("use `fold(xs, initial, f)` to handle empty collections")));
     };
     for x in iter {
-        acc = it.call(&f, vec![acc, x], sp)?;
+        acc = it.call2(&f, acc, x, sp)?;
     }
     Ok(acc)
 }
@@ -1647,7 +1653,7 @@ fn b_fold(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let v = take_arg(&mut a, 0);
     let xs = items(it, v, "fold", 0, sp)?;
     for x in xs {
-        acc = it.call(&f, vec![acc, x], sp)?;
+        acc = it.call2(&f, acc, x, sp)?;
     }
     Ok(acc)
 }
@@ -1694,7 +1700,7 @@ fn extreme_by(it: &mut Interp, mut a: Vec<Value>, sp: Span, want: Ordering, name
     let xs = items(it, v, name, 0, sp)?;
     let mut best: Option<(Value, Value)> = None;
     for x in xs {
-        let k = it.call(&f, vec![x.clone()], sp)?;
+        let k = it.call1(&f, x.clone(), sp)?;
         best = Some(match best {
             None => (k, x),
             Some((bk, bx)) => {
@@ -1770,7 +1776,7 @@ fn b_sort_with(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let v = take_arg(&mut a, 0);
     let xs = items(it, v, "sort_with", 0, sp)?;
     let sorted = merge_sort(xs, &mut |x, y| {
-        let r = it.call(&f, vec![x.clone(), y.clone()], sp)?;
+        let r = it.call2(&f, x.clone(), y.clone(), sp)?;
         ordering_of(it, &r, sp)
     })?;
     Ok(Value::list(sorted))
@@ -1834,7 +1840,7 @@ fn b_find_index(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let v = take_arg(&mut a, 0);
     let xs = items(it, v, "find_index", 0, sp)?;
     for (i, x) in xs.into_iter().enumerate() {
-        if bool_result(it, &f, vec![x], sp, "find_index")? {
+        if bool_result1(it, &f, x, sp, "find_index")? {
             return Ok(it.some(Value::Int(i as i64)));
         }
     }
@@ -1948,7 +1954,7 @@ fn b_take_while(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let xs = items(it, v, "take_while", 0, sp)?;
     let mut out = Vec::new();
     for x in xs {
-        if !bool_result(it, &f, vec![x.clone()], sp, "take_while")? {
+        if !bool_result1(it, &f, x.clone(), sp, "take_while")? {
             break;
         }
         out.push(x);
@@ -1998,7 +2004,7 @@ fn b_flat_map(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let xs = items(it, v, "flat_map", 0, sp)?;
     let mut out = Vec::new();
     for x in xs {
-        let r = it.call(&f, vec![x], sp)?;
+        let r = it.call1(&f, x, sp)?;
         match r {
             Value::Variant(vv) if vv.ty.id == OPTION_ID => {
                 if vv.tag == 0 {
@@ -2066,7 +2072,7 @@ fn b_group_by(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let xs = items(it, v, "group_by", 0, sp)?;
     let mut m = MapVal::new();
     for x in xs {
-        let k = it.call(&f, vec![x.clone()], sp)?;
+        let k = it.call1(&f, x.clone(), sp)?;
         match m.get_mut(&k) {
             Some(Value::List(g)) => Rc::make_mut(g).push(x),
             _ => {
@@ -2216,7 +2222,7 @@ fn b_map_values(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let f = fn_arg(it, &a, 1, "map_values", sp)?;
     let mut out = MapVal::with_capacity(m.len());
     for (k, v) in m.entries.iter() {
-        let nv = it.call(&f, vec![v.clone()], sp)?;
+        let nv = it.call1(&f, v.clone(), sp)?;
         out.insert(k.clone(), nv);
     }
     Ok(Value::Map(Rc::new(out)))
@@ -2451,7 +2457,7 @@ fn b_unwrap_or_else(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     if is_opt {
         it.call(&f, vec![], sp)
     } else {
-        it.call(&f, vec![payload.unwrap()], sp)
+        it.call1(&f, payload.unwrap(), sp)
     }
 }
 
@@ -2487,7 +2493,7 @@ fn b_and_then(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let (_, present, payload) = need_opt(it, &a[0], "and_then", sp)?;
     let f = fn_arg(it, &a, 1, "and_then", sp)?;
     if present {
-        it.call(&f, vec![payload.unwrap()], sp)
+        it.call1(&f, payload.unwrap(), sp)
     } else {
         Ok(a[0].clone())
     }
@@ -2498,7 +2504,7 @@ fn b_map_err(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     match a[0].as_variant(RESULT_ID) {
         Some((1, Some(e))) => {
             let e = e.clone();
-            let r = it.call(&f, vec![e], sp)?;
+            let r = it.call1(&f, e, sp)?;
             Ok(it.err_val(r))
         }
         Some(_) => Ok(a[0].clone()),

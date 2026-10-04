@@ -48,11 +48,14 @@ impl Ty {
     }
 
     /// A non-zero fingerprint of this type, used to memoize annotation checks.
+    /// A hash of the type, used to remember that a collection was already
+    /// checked against it. (It is computed on every checked write, so it
+    /// uses a fast hash rather than the default SipHash.)
     pub fn fingerprint(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::Hash;
+        let mut h = FastHasher(0);
         self.hash(&mut h);
-        h.finish() | 1
+        std::hash::Hasher::finish(&h) | 1
     }
 
     pub fn is_any(&self) -> bool {
@@ -227,4 +230,42 @@ pub fn builtin_types() -> Vec<Rc<TypeDef>> {
         span: Span::default(),
     };
     vec![Rc::new(option), Rc::new(result), Rc::new(ordering)]
+}
+
+/// A small, fast, non-cryptographic hasher (the multiply-rotate step of
+/// FxHash, with a final mix so that the low bits depend on every input).
+struct FastHasher(u64);
+
+impl std::hash::Hasher for FastHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut w = [0u8; 8];
+            w[..chunk.len()].copy_from_slice(chunk);
+            self.write_u64(u64::from_le_bytes(w));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(n as u64);
+    }
+
+    fn write_u8(&mut self, n: u8) {
+        self.write_u64(n as u64);
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        x ^= x >> 33;
+        x
+    }
 }
