@@ -745,21 +745,6 @@ impl<'a> Resolver<'a> {
                     if let Some(&b) = self.ctx.builtins.values.get(&name) {
                         if matches!(self.ctx.globals[b as usize].kind, GlobalKind::Builtin(_)) {
                             def.overload_fallback = Some(b);
-                            // With an untyped first parameter this function
-                            // takes every call to the name, so a call on a
-                            // field (`s.items.push!(x)`) runs it again instead
-                            // of the built-in.
-                            if def.params.first().is_some_and(|p| p.ty.is_none() && p.pat.is_none()) {
-                                if let Some(at) = find_field_call(&def.body, &name) {
-                                    let p = def.params[0].name.clone();
-                                    let d = Diagnostic::warning("W0005", format!("this calls your `{}`, not the built-in `{}`", name, name))
-                                        .at(at)
-                                        .label("calls this function again")
-                                        .note(format!("`{}` has an untyped first parameter `{}`, so it takes every call to `{}`, whatever the value", name, p, name))
-                                        .help(format!("give `{}` the type this function is for (`{}: Stack`, say); then calls on other values go to the built-in", p, p));
-                                    self.diags.push(d);
-                                }
-                            }
                         }
                     }
                 }
@@ -854,6 +839,7 @@ impl<'a> Resolver<'a> {
                     // global slot, so that recursion respects overloading.
                     let def = Rc::get_mut(def).unwrap();
                     self.resolve_fn(def, FnKind::Function, false, None);
+                    self.check_hidden_builtin(def);
                 }
                 Item::Test(t) => {
                     let def = Rc::get_mut(&mut t.func).unwrap();
@@ -1423,6 +1409,26 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// W0005: a `!` function named like a built-in, with untyped
+    /// parameters, takes every call to its name that fits its parameters, so
+    /// a call on a field (`s.items.push!(x)`) runs it again instead of the
+    /// built-in.
+    fn check_hidden_builtin(&mut self, def: &FnDef) {
+        let (Some(name), Some(slot)) = (&def.name, def.global_slot) else { return };
+        if !def.mutating || def.overload_fallback.is_none() || def.params.iter().any(|p| p.ty.is_some() || p.pat.is_some()) {
+            return;
+        }
+        let fits = |n: usize| n >= def.required_params() && n <= def.params.len();
+        let Some(at) = find_field_call(&def.body, name, &|res, n| res == VarRes::Global(slot) && fits(n)) else { return };
+        let p = def.params[0].name.clone();
+        let d = Diagnostic::warning("W0005", format!("this calls your `{}`, not the built-in `{}`", name, name))
+            .at(at)
+            .label("calls this function again")
+            .note(format!("`{}` has untyped parameters, so it takes every call to `{}` with this many arguments, whatever the values", name, name))
+            .help(format!("give `{}` the type of the values this function is for; then calls on other values go to the built-in", p));
+        self.diags.push(d);
+    }
+
     /// Resolve an assignment target (or the receiver of a mutating call) and
     /// check that its root is mutable.
     fn place(&mut self, e: &mut Expr, code: &'static str) -> Option<Ty> {
@@ -1655,9 +1661,12 @@ impl<'a> Resolver<'a> {
         };
         let VarRes::Global(slot) = res else { return };
         // A user function that returns a Result: dropping it drops the error.
+        // (Not when the call may go to a built-in of the same name, or to a
+        // record's field: `logger.save(x)`.)
         if matches!(self.ctx.globals[slot as usize].kind, GlobalKind::Fn) {
-            let returns_result =
-                self.ctx.sigs.get(&slot).is_some_and(|sigs| {
+            let other = self.ctx.builtins.values.contains_key(&**name) || self.ctx.known_fields.contains(&**name);
+            let returns_result = !other
+                && self.ctx.sigs.get(&slot).is_some_and(|sigs| {
                     !sigs.is_empty() && sigs.iter().all(|s| matches!(&s.ret, Some(Ty::Named { name, .. }) if &**name == "Result"))
                 });
             if returns_result {
@@ -2915,14 +2924,17 @@ fn has_effects(e: &Expr, effects: &[&str]) -> bool {
 }
 
 /// The first use of a variable with one of these names in an expression.
-/// A call `x.f.name(...)` or `name(x.f, ...)` (on a field) inside `e`.
-fn find_field_call(e: &Expr, name: &str) -> Option<Span> {
+/// A call `x.f.name(...)` or `name(x.f, ...)` (on a field) inside `e` for
+/// which `calls(resolution, argument count)` holds.
+fn find_field_call(e: &Expr, name: &str, calls: &dyn Fn(VarRes, usize) -> bool) -> Option<Span> {
     match &e.kind {
-        ExprKind::MethodCall { receiver, method, method_span, .. } if &*method.name == name && matches!(receiver.kind, ExprKind::Field { .. }) => {
+        ExprKind::MethodCall { receiver, method, method_span, args, .. }
+            if &*method.name == name && matches!(receiver.kind, ExprKind::Field { .. }) && calls(method.res, args.len() + 1) =>
+        {
             return Some(*method_span)
         }
         ExprKind::Call { callee, args }
-            if matches!(&callee.kind, ExprKind::Var(v) if &*v.name == name)
+            if matches!(&callee.kind, ExprKind::Var(v) if &*v.name == name && calls(v.res, args.len()))
                 && args.first().is_some_and(|a| a.name.is_none() && matches!(a.value.kind, ExprKind::Field { .. })) =>
         {
             return Some(callee.span)
@@ -2932,7 +2944,7 @@ fn find_field_call(e: &Expr, name: &str) -> Option<Span> {
     let mut found = None;
     for_each_child(e, &mut |c| {
         if found.is_none() {
-            found = find_field_call(c, name);
+            found = find_field_call(c, name, calls);
         }
     });
     found

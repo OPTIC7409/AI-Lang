@@ -1,0 +1,55 @@
+# Correct programs that the static checker must accept (each was once
+# rejected by mistake).
+
+type P = { x: Int, y: Int }
+type Shape = | I(n: Int) | S(s: Str)
+type Point = { x: Int, y: Int }
+
+fn str(p: Point) -> Int => p.x
+
+fn area(r: { w: Int, h: Int }) -> Int => r.w * r.h
+fn report(r: { w: Int }) -> Int => area(r)
+
+fn shout(r: { name: Str }) -> Str => r.upper()
+
+fn describe(v: Shape) -> Str => match v {
+  I(x) | S(x) => if type_of(x) == "Int" { "int" } else { x }
+}
+
+test "code that is expected to fail may sit inside catch" {
+  assert catch(fn() => "a,b".split(1)).is_err()
+  assert catch(fn() => len(5)).is_err()
+}
+
+test "len of a record counts its fields" {
+  assert len(P(x: 1, y: 2)) == 2 and { a: 1 }.len() == 1
+}
+
+test "range with a step is a list" {
+  let evens: List[Int] = range(0, 10, 2)
+  assert evens + [10] == [0, 2, 4, 6, 8, 10]
+}
+
+test "a user function named like a built-in may still run the built-in" {
+  let labels: List[Str] = [1, 2].map(str)
+  assert labels == ["1", "2"]
+}
+
+test "a fn annotation's result type is not trusted" {
+  let f: fn(Int) -> Float = fn(x) => x
+  assert [65, 66].map(f).map(fn(c) => chr(c)) == ["A", "B"]
+}
+
+test "an or-pattern binds the join of its alternatives' types" {
+  assert describe(I(1)) == "int" and describe(S("b")) == "b"
+}
+
+test "structural record annotations are open" {
+  assert report({ w: 2, h: 3 }) == 6
+  assert shout({ name: "x", upper: fn() => "X!" }) == "X!"
+}
+
+test "union joins the element types" {
+  let none: Set[Int] = to_set()
+  assert none.union(to_set(["a"])).map(fn(x) => x.upper()) == ["A"]
+}

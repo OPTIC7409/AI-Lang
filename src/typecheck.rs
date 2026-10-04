@@ -237,16 +237,23 @@ pub fn compatible(ctx: &Ctx, a: &Ty, e: &Ty) -> bool {
         }
         // An anonymous record is converted to a declared record type with
         // exactly the same fields.
+        // (A record type from a structural annotation, `{ w: Int }`, is open:
+        // the value may have more fields than it lists.)
         (Ty::Record(fs), Ty::Named { id, args, .. }) => match ctx.types.get(*id as usize).map(|t| &t.kind) {
             Some(TypeKind::Record { fields, tys }) => {
+                let exact = fs.iter().any(|(n, _)| n.is_empty());
                 let fs: Vec<&(Name, Ty)> = fs.iter().filter(|(n, _)| !n.is_empty()).collect();
-                fields.len() == fs.len()
+                (!exact || fields.len() == fs.len())
                     && fs.iter().all(|(n, t)| fields.iter().position(|f| f == n).is_some_and(|i| compatible(ctx, t, &tys[i].subst(args))))
             }
             _ => false,
         },
         (Ty::Record(f1), Ty::Record(f2)) => {
-            f2.iter().filter(|(n, _)| !n.is_empty()).all(|(n, t)| f1.iter().find(|(m, _)| m == n).is_some_and(|(_, u)| compatible(ctx, u, t)))
+            let exact = f1.iter().any(|(n, _)| n.is_empty());
+            f2.iter().filter(|(n, _)| !n.is_empty()).all(|(n, t)| match f1.iter().find(|(m, _)| m == n) {
+                Some((_, u)) => compatible(ctx, u, t),
+                None => !exact,
+            })
         }
         // A declared record is checked field by field against a structural annotation.
         (Ty::Named { .. }, Ty::Record(_)) => true,
@@ -677,8 +684,35 @@ impl<'a> Checker<'a> {
                 }
             }
             PatKind::Or(alts) => {
+                // A name gets the join of its types in the alternatives
+                // (`I(x) | S(x)`: x is an Int or a Str).
+                let mut joined: Vec<(VarRes, Ty)> = Vec::new();
                 for p in alts {
                     self.bind(p, &t, false);
+                    let mut names = Vec::new();
+                    pattern_names(p, &mut names);
+                    for res in names {
+                        let bt = match res {
+                            VarRes::Local(s) => self.frame().locals.get(&s).cloned().unwrap_or(Ty::Any),
+                            VarRes::Global(s) => self.globals.get(&s).cloned().unwrap_or(Ty::Any),
+                            _ => continue,
+                        };
+                        match joined.iter_mut().find(|(r, _)| *r == res) {
+                            Some((_, j)) => *j = join(j.clone(), bt),
+                            None => joined.push((res, bt)),
+                        }
+                    }
+                }
+                for (res, jt) in joined {
+                    match res {
+                        VarRes::Local(s) => {
+                            self.frame().locals.insert(s, jt);
+                        }
+                        VarRes::Global(s) => {
+                            self.globals.insert(s, jt);
+                        }
+                        _ => {}
+                    }
                 }
             }
             PatKind::Wild | PatKind::Lit(_) | PatKind::Range { .. } => {}
@@ -866,8 +900,22 @@ impl<'a> Checker<'a> {
                     if let (Some(b), Some(first), ExprKind::Lambda(_)) = (builtin, arg_tys.first(), &a.value.kind) {
                         self.lambda_hint = callback_params(b, &first.1, i).map(|h| (h, b));
                     }
+                    let errors = self.diags.len();
                     let t = self.expr(&a.value);
                     self.lambda_hint = None;
+                    // `catch(fn() => ...)` expects the function to fail: what
+                    // would fail there is not an error (tests do this).
+                    if builtin == Some("catch") {
+                        let mut k = errors;
+                        while k < self.diags.len() {
+                            if self.diags[k].code == "E0121" {
+                                self.diags.remove(k);
+                            } else {
+                                k += 1;
+                            }
+                        }
+                    }
+                    let t = self.enforced(&a.value, t);
                     arg_tys.push((a.name.clone(), t, a.value.span));
                 }
                 match &callee.kind {
@@ -895,6 +943,7 @@ impl<'a> Checker<'a> {
                     }
                     let t = self.expr(&a.value);
                     self.lambda_hint = None;
+                    let t = self.enforced(&a.value, t);
                     arg_tys.push((a.name.clone(), t, a.value.span));
                 }
                 // A record's own field, or a function from the module that
@@ -902,6 +951,8 @@ impl<'a> Checker<'a> {
                 if self.field_type(&rt, &method.name).is_some()
                     || self.has_home(&rt)
                     || *mutating
+                    // (An open record may have a field with the method's name.)
+                    || matches!(&rt, Ty::Record(fs) if !fs.iter().any(|(n, _)| n.is_empty()))
                     || (matches!(rt, Ty::Any) && (self.ctx.module_fns.contains(&method.name) || self.ctx.known_fields.contains(&method.name)))
                 {
                     return Ty::Any;
@@ -1061,6 +1112,8 @@ impl<'a> Checker<'a> {
                         _ => Ty::Float,
                     },
                     GlobalKind::Let | GlobalKind::Var => info.ty.clone().or_else(|| self.globals.get(&s).cloned()).unwrap_or(Ty::Any),
+                    // (One that shares a built-in's name may run the built-in.)
+                    GlobalKind::Fn if self.ctx.builtins.values.contains_key(&info.name) => Ty::Any,
                     GlobalKind::Fn => match self.ctx.sigs.get(&s).map(|v| v.as_slice()) {
                         Some([sig]) => {
                             Ty::Fn(sig.params.iter().map(|p| p.2.clone().unwrap_or(Ty::Any)).collect(), Box::new(sig.ret.clone().unwrap_or(Ty::Any)))
@@ -1097,6 +1150,22 @@ impl<'a> Checker<'a> {
                 _ => vec![],
             },
             _ => vec![],
+        }
+    }
+
+    /// The type of an argument as far as running the program enforces it:
+    /// a function value's result type is known only for an anonymous
+    /// function written in place or a named function (whose declared result
+    /// is checked when it returns), not from a `fn(A) -> B` annotation.
+    fn enforced(&self, e: &Expr, t: Ty) -> Ty {
+        let trusted = match &e.kind {
+            ExprKind::Lambda(_) => true,
+            ExprKind::Var(v) => matches!(v.res, VarRes::Global(s) if matches!(self.ctx.globals[s as usize].kind, GlobalKind::Fn)),
+            _ => false,
+        };
+        match t {
+            Ty::Fn(ps, _) if !trusted => Ty::Fn(ps, Box::new(Ty::Any)),
+            t => t,
         }
     }
 
@@ -1334,6 +1403,28 @@ fn tail_span(e: &Expr) -> Span {
     }
 }
 
+/// The variables a pattern binds.
+fn pattern_names(p: &Pattern, out: &mut Vec<VarRes>) {
+    match &p.kind {
+        PatKind::Bind { res, sub, .. } => {
+            out.push(*res);
+            if let Some(s) = sub {
+                pattern_names(s, out);
+            }
+        }
+        PatKind::Tuple(ps) | PatKind::Or(ps) => ps.iter().for_each(|q| pattern_names(q, out)),
+        PatKind::List { before, rest, after } => {
+            before.iter().chain(after.iter()).for_each(|q| pattern_names(q, out));
+            if let Some(Some(r)) = rest {
+                pattern_names(r, out);
+            }
+        }
+        PatKind::Ctor { args, .. } => args.iter().for_each(|(_, q)| pattern_names(q, out)),
+        PatKind::Record { fields, .. } => fields.iter().for_each(|(_, q)| pattern_names(q, out)),
+        PatKind::Wild | PatKind::Lit(_) | PatKind::Range { .. } => {}
+    }
+}
+
 /// Whether `e` contains a `return` or `?` (outside nested functions).
 fn leaves_early(e: &Expr) -> bool {
     match &e.kind {
@@ -1438,7 +1529,10 @@ impl Kind {
                 Kind::Num => matches!(t, Ty::Int | Ty::Float),
                 Kind::Fn => matches!(t, Ty::Fn(..)),
                 Kind::Set => matches!(t, Ty::Set(_)),
-                Kind::Sized => matches!(t, Ty::List(_) | Ty::Str | Ty::Map(..) | Ty::Set(_) | Ty::Tuple(_) | Ty::Range),
+                // (`len` of a record is its number of fields.)
+                Kind::Sized => {
+                    matches!(t, Ty::List(_) | Ty::Str | Ty::Map(..) | Ty::Set(_) | Ty::Tuple(_) | Ty::Range | Ty::Record(_) | Ty::Named { .. })
+                }
             }
     }
 
@@ -1513,7 +1607,11 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
             _ if args.is_empty() => Ty::Set(Box::new(Ty::Any)),
             _ => Ty::Any,
         },
-        "union" | "intersection" | "difference" => match &first {
+        "union" => match (&first, args.get(1).map(|a| &a.1)) {
+            (Ty::Set(a), Some(Ty::Set(b))) => Ty::Set(Box::new(join((**a).clone(), (**b).clone()))),
+            _ => Ty::Any,
+        },
+        "intersection" | "difference" => match &first {
             Ty::Set(_) => first.clone(),
             _ => Ty::Any,
         },
@@ -1536,6 +1634,8 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
             Ty::List(_) | Ty::Str | Ty::Range => list(elem),
             _ => Ty::Any,
         },
+        // (With a step, `range` gives a list.)
+        "range" if args.len() == 3 => list(Ty::Int),
         "range" => Ty::Range,
         "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" => match &first {
             Ty::Named { id, args: targs, .. } if (*id == OPTION_ID || *id == RESULT_ID) && !targs.is_empty() => {
