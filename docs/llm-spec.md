@@ -308,13 +308,36 @@ Contracts must not change anything: no assignments or `!` calls inside
 `requires`, `ensures` or `old(...)` (E0118). `result` and `old(...)` exist only
 in `ensures`.
 
+**Type invariants.** A record type may state conditions on its fields, which
+every value of the type satisfies:
+
+```
+type Span = { lo: Int, hi: Int }
+  where lo <= hi                         # fields by name (not `self.lo`)
+type Graph = { n: Int, adj: List[List[Int]] }
+  where n == adj.len()
+  where adj.all(fn(es) => es.all(fn(e) => e >= 0 and e < n))
+```
+
+The invariant is checked (E0303) whenever a value of the type is built (by
+its constructor, from an anonymous record, by `{ ..s, lo: 9 }`) and after
+every change to one of its fields (`s.lo = 9`, `g.adj[0].push!(1)`). A `!`
+function may break the invariant of its first argument while it runs; it is
+checked when the function returns. To change several fields of a value
+outside a `!` function, build a new value. Only record types have
+invariants.
+
 `cogito verify FILE` treats each function with contracts as a property: it
 generates arguments from the parameter types (including extreme Ints such as
 `max_int`), discards those that fail `requires`, and reports shrunk
 counterexamples that break `ensures`, crash, or exceed the step budget.
 Functions whose `requires` random inputs almost never satisfy (a well-formed
 tree, say) are reported as not checked, which is not a failure: test them
-with `test` blocks or a `property` that builds valid inputs.
+with `test` blocks or a `property` that builds valid inputs. Generated values
+of a type with an invariant always satisfy it: bounds in the clauses steer
+the generator, a field defined by a clause `field == expr` (`n == adj.len()`)
+is computed from the others, and the rest is retried, so a well-formed
+structure is usually best described as a type invariant.
 
 ## Tests
 

@@ -116,6 +116,9 @@ pub struct Resolver<'a> {
     exhaust_gave_up: std::cell::Cell<bool>,
     /// The fields of the matched value's declared record type, if known.
     scrutinee_fields: Option<Rc<[Name]>>,
+    /// Declared types for the parameters of the next function resolved
+    /// (an invariant's parameters are the record's fields).
+    pending_param_tys: Vec<Ty>,
     ns: Namespace,
     fns: Vec<FnCtx>,
     diags: Vec<Diagnostic>,
@@ -142,6 +145,7 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
         exhaust_steps: std::cell::Cell::new(0),
         exhaust_gave_up: std::cell::Cell::new(false),
         scrutinee_fields: None,
+        pending_param_tys: vec![],
         resolving_alias: None,
         dir: dir.to_path_buf(),
         generics: vec![],
@@ -837,6 +841,7 @@ impl<'a> Resolver<'a> {
                         self.check_discarded(e);
                     }
                 }
+                Item::Type(td) if !td.invariants.is_empty() => self.invariant(td),
                 Item::Type(_) | Item::Import(_) => {}
             }
         }
@@ -1138,6 +1143,58 @@ impl<'a> Resolver<'a> {
 
     // ------------------------------------------------------------ functions
 
+    /// A record type's `where` clauses become a function of its fields (with
+    /// the clauses as its preconditions), which the interpreter calls to
+    /// check every value of the type.
+    fn invariant(&mut self, td: &mut TypeDecl) {
+        let TypeBody::Record(fields) = &td.body else { return };
+        let span = td.span;
+        let params =
+            fields.iter().map(|f| Param { name: f.name.clone().unwrap(), span: f.span, ty: None, default: None, slot: 0, pat: None }).collect();
+        let field_tys: Vec<Ty> = match self.ctx.types.get(td.id as usize).map(|t| &t.kind) {
+            Some(TypeKind::Record { tys, .. }) => tys.clone(),
+            _ => vec![],
+        };
+        let mut def = FnDef {
+            name: Some(Rc::from(format!("invariant of {}", td.name).as_str())),
+            name_span: td.name_span,
+            span,
+            generics: td.params.clone(),
+            params,
+            ret: None,
+            requires: std::mem::take(&mut td.invariants),
+            ensures: vec![],
+            body: Expr { kind: ExprKind::Unit, span },
+            mutating: false,
+            num_slots: 0,
+            captures: vec![],
+            result_slot: 0,
+            olds: vec![],
+            global_slot: None,
+            overload_fallback: None,
+        };
+        // `self.lo` is a natural guess from other languages.
+        for c in &def.requires {
+            if let Some(sp) = find_var(c, &["self", "this"]) {
+                let d = Diagnostic::error("E0100", "a `where` clause refers to the fields by name")
+                    .at(sp)
+                    .help(format!("write the condition on the fields directly, e.g. `where {} >= 0`", def.params.first().map_or("x", |p| &*p.name)));
+                self.error(d);
+                return;
+            }
+        }
+        // (The fields' declared types, for checks such as E0119.)
+        let field_tys = if td.params.is_empty() { field_tys } else { vec![] };
+        self.resolve_fn_with(&mut def, FnKind::Function, &field_tys);
+        self.ctx.invariants.insert(td.id, Rc::new(def));
+    }
+
+    fn resolve_fn_with(&mut self, def: &mut FnDef, kind: FnKind, param_tys: &[Ty]) {
+        self.pending_param_tys = param_tys.to_vec();
+        self.resolve_fn(def, kind, false, None);
+        self.pending_param_tys.clear();
+    }
+
     fn resolve_fn(&mut self, def: &mut FnDef, kind: FnKind, parent_visible: bool, self_name: Option<Name>) {
         let sig_done = kind == FnKind::Function && !parent_visible;
         let saved_generics = self.generics.clone();
@@ -1188,8 +1245,11 @@ impl<'a> Resolver<'a> {
                     let ty = t.ty.clone();
                     self.set_declared_type(VarRes::Local(p.slot), ty);
                 }
+            } else if let Some(ty) = self.pending_param_tys.get(i).filter(|t| !t.is_any()).cloned() {
+                self.set_declared_type(VarRes::Local(p.slot), ty);
             }
         }
+        self.pending_param_tys.clear();
         if let Some(t) = &mut def.ret {
             if !sig_done {
                 self.resolve_type(t, &[]);
@@ -2715,6 +2775,22 @@ fn has_effects(e: &Expr, effects: &[&str]) -> bool {
     }
     let mut found = false;
     walk(&def.body, effects, &mut found);
+    found
+}
+
+/// The first use of a variable with one of these names in an expression.
+fn find_var(e: &Expr, names: &[&str]) -> Option<Span> {
+    if let ExprKind::Var(v) = &e.kind {
+        if names.contains(&&*v.name) {
+            return Some(e.span);
+        }
+    }
+    let mut found = None;
+    for_each_child(e, &mut |c| {
+        if found.is_none() {
+            found = find_var(c, names);
+        }
+    });
     found
 }
 

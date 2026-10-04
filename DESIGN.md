@@ -171,6 +171,32 @@ intent, and the runtime holds it to that statement. Contracts also turn into
 tests for free (see below), and they document assumptions that would
 otherwise live in comments that drift out of date.
 
+### Types carry invariants
+
+```
+type Graph = { n: Int, adj: List[List[Int]] }
+  where n == adj.len()
+  where adj.all(fn(es) => es.all(fn(e) => e >= 0 and e < n))
+```
+
+A record type's `where` clauses hold for every value of the type: they are
+checked when a value is built and after every change to one of its fields.
+A `!` function may break the invariant of its first argument while it runs
+and must restore it before it returns.
+
+*Why:* in the third dogfooding round, most of the noise from `verify` was
+malformed generated input (a graph whose edges point past the end, a stack
+whose `size` disagreed with its items), and every function on the type had
+to repeat the same `requires`. Stating the condition once, on the type,
+fixes both: functions may assume it, and the generator produces only values
+that satisfy it. The `!` exception is the class-invariant rule of Eiffel,
+for the same reason: a mutation that moves two fields (`lo` and `hi`)
+passes through states that break the invariant. A failed check is not
+undone (keeping a copy to restore would make every write through such a
+value cost as much as the value), because breaking an invariant is a bug,
+not a condition to handle. Only record types have invariants: per-variant
+conditions on enums would need their own syntax.
+
 ### Tests and properties are syntax
 
 `test "name" { ... }` and `property "name" (x: Int, xs: List[Str]) { ... }`
@@ -190,7 +216,10 @@ enumerating the tricky inputs.
 generate inputs from the parameter types, discard those that fail
 `requires`, call the function, and report any `ensures` violation or crash,
 with shrinking. It also enforces a per-case step budget, so that a runaway
-input is reported instead of hanging.
+input is reported instead of hanging. Values of types with invariants are
+generated to satisfy them: literal bounds in the clauses steer the
+generator, a field that a clause defines (`n == adj.len()`) is computed,
+retries shrink the size, and shrinking repairs the defined fields.
 
 *Why:* this closes the loop between specification and implementation without
 any extra test code. It is not a proof. Random testing can miss bugs, but it
@@ -466,9 +495,6 @@ say how to rule such inputs out.
 
 ## Future directions
 
-- A type-level invariant (`type Graph = {...} where ...`), so that `verify`
-  generates only well-formed values of a type and every constructor checks
-  it; most remaining `verify` noise is malformed generated structures.
 - Deeper static checking: arguments of built-ins, the parameter types of
   passed-in functions, and flow-sensitive types for reassigned `var`s.
 - A bytecode compiler for speed.

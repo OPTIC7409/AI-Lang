@@ -1,0 +1,86 @@
+# Type invariants: `where` clauses on record types.
+
+type Span = { lo: Int, hi: Int }
+  where lo <= hi
+
+type Stack = { items: List[Int], size: Int }
+  where size == items.len()
+
+type Graph = { n: Int, adj: List[List[Int]] }
+  where n == adj.len()
+  where adj.all(fn(es) => es.all(fn(e) => e >= 0 and e < n))
+
+type Pair = { a: Span, b: Span } where a.hi <= b.lo
+
+fn shift!(s: Span, d: Int) {
+  # In between, `lo` may pass `hi`: a `!` function restores the
+  # invariant only by the time it returns.
+  s.lo += d
+  s.hi += d
+}
+
+fn push!(s: Stack, x: Int) {
+  s.items.push!(x)
+  s.size += 1
+}
+
+fn break_it!(s: Span) {
+  s.lo = s.hi + 1
+}
+
+fn push(s: Stack, x: Int) -> Stack
+  ensures result.size == s.size + 1
+=> Stack(items: s.items + [x], size: s.size + 1)
+
+fn degree(g: Graph, v: Int) -> Int
+  requires v >= 0 and v < g.n
+  ensures result >= 0
+=> g.adj[v].len()
+
+var global_span = Span(0, 1)
+
+test "constructors check the invariant" {
+  assert Span(1, 2).hi == 2
+  assert catch(fn() => Span(2, 1)).is_err()
+  assert catch(fn() => Stack([1], 0)).is_err()
+}
+
+test "anonymous records and spreads are checked when they become the type" {
+  let s: Span = { lo: 1, hi: 3 }
+  assert s.lo == 1
+  assert catch(fn() => { let t: Span = { lo: 3, hi: 1 }; t }).is_err()
+  assert catch(fn() => { ..s, lo: 9 }).is_err()
+  assert { ..s, hi: 9 }.hi == 9
+}
+
+test "every change to a field is checked" {
+  var p = Pair(Span(0, 1), Span(2, 3))
+  p.b.hi = 10
+  assert p.b.hi == 10
+  assert catch(fn() => {
+    global_span.lo = 5
+  }).is_err()
+}
+
+test "a `!` function may break the invariant until it returns" {
+  var s = Span(1, 2)
+  s.shift!(10)
+  assert s == Span(11, 12)
+  var st = Stack([], 0)
+  st.push!(4)
+  st.push!(5)
+  assert st.size == 2
+  assert catch(fn() => global_span.break_it!()).is_err()
+}
+
+property "generated stacks satisfy their invariant" (s: Stack) {
+  assert s.size == s.items.len()
+}
+
+property "generated graphs have edges within range" (g: Graph) {
+  for es in g.adj {
+    for e in es {
+      assert e >= 0 and e < g.n
+    }
+  }
+}

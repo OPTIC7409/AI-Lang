@@ -1,0 +1,6 @@
+# expect: E0303
+type Span = { lo: Int, hi: Int }
+  where lo <= hi
+
+var s = Span(1, 5)
+s.lo = 9

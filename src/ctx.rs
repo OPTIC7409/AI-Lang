@@ -1,7 +1,7 @@
 //! Static program context shared by the resolver and the interpreter:
 //! sources, global slots, type definitions, and loaded modules.
 
-use crate::ast::{CtorRef, Module, Namespace};
+use crate::ast::{CtorRef, FnDef, Module, Namespace};
 use crate::span::{SourceMap, Span};
 use crate::types::{builtin_types, Name, Ty, TypeDef, TypeKind};
 use std::collections::{HashMap, HashSet};
@@ -64,6 +64,10 @@ pub struct Ctx {
     pub type_home: HashMap<u32, Rc<Module>>,
     /// Names of all functions defined by imported modules.
     pub module_fns: HashSet<Name>,
+    /// The invariant of each record type that has one (by type id): a
+    /// function whose parameters are the fields and whose `requires` are the
+    /// type's `where` clauses.
+    pub invariants: HashMap<u32, Rc<FnDef>>,
 }
 
 impl Ctx {
@@ -79,6 +83,7 @@ impl Ctx {
             sigs: HashMap::new(),
             type_home: HashMap::new(),
             module_fns: HashSet::new(),
+            invariants: HashMap::new(),
         };
         let types = ctx.types.clone();
         for td in &types {

@@ -164,6 +164,10 @@ pub struct TypeDecl {
     pub span: Span,
     pub params: Vec<Name>,
     pub body: TypeBody,
+    /// `where` clauses on a record type: conditions on its fields that every
+    /// value of the type satisfies (moved into `Ctx::invariants` by the
+    /// resolver).
+    pub invariants: Vec<Expr>,
     pub id: u32,
     /// Global slot of the record constructor (record types only).
     pub slot: u32,

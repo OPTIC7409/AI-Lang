@@ -500,8 +500,21 @@ impl<'s> Parser<'s> {
             }
             TypeBody::Enum(variants)
         };
+        // `where` clauses: the type's invariant.
+        let mut invariants = Vec::new();
+        while self.peek_past_newlines() == &Tok::Where {
+            self.skip_newlines();
+            let w = self.bump().span;
+            if !matches!(body, TypeBody::Record(_)) {
+                return Err(Diagnostic::error("E0116", "only record types can have an invariant (`where`)")
+                    .at(w)
+                    .help("give the condition to the functions that build the value, as `requires`/`ensures`"));
+            }
+            self.skip_newlines();
+            invariants.push(self.expr()?);
+        }
         let span = start.to(self.prev_span());
-        Ok(TypeDecl { name, name_span, span, params, body, id: 0, slot: 0 })
+        Ok(TypeDecl { name, name_span, span, params, body, invariants, id: 0, slot: 0 })
     }
 
     fn plain_string(&mut self, what: &str) -> PResult<(String, Span)> {

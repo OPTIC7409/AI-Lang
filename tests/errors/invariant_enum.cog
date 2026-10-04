@@ -1,0 +1,3 @@
+# expect: E0116
+type Shape = Circle(Float) | Square(Float)
+  where true

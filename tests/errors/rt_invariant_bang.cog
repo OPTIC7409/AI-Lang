@@ -1,0 +1,10 @@
+# expect: E0303
+type Span = { lo: Int, hi: Int }
+  where lo <= hi
+
+fn widen!(s: Span, d: Int) {
+  s.lo += d
+}
+
+var s = Span(1, 5)
+s.widen!(10)

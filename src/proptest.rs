@@ -1,15 +1,40 @@
 //! Random value generation and shrinking, driven by type annotations.
 //! Used by `property` blocks and by `cogito verify` (contract fuzzing).
 
-use crate::interp::{Interp, Rng};
+use crate::ast::{ExprKind, FnDef};
+use crate::interp::{Env, Interp, Rng};
 use crate::types::{Ty, TypeDef, TypeKind};
 use crate::value::*;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 const UNICODE: &[&str] = &["é", "ß", "中", "😀", "ñ", "Ω", "ü", "й"];
 
+/// What `requires`/`where` clauses (or a type's invariant) say about one
+/// input or field, read off comparisons with literals joined by `and`:
+/// inclusive bounds on its value (Int or Float) and on its length
+/// (`xs.len() >= 3`, `not s.is_empty()`).
+#[derive(Clone, Default, Debug)]
+pub struct Bound {
+    pub int: Option<(Option<i64>, Option<i64>)>,
+    pub float: Option<(Option<f64>, Option<f64>)>,
+    pub len: Option<(Option<i64>, Option<i64>)>,
+}
+
+/// How to generate the values of a record type that has an invariant.
+pub struct InvPlan {
+    /// The invariant: its parameters are the fields, its `requires` the clauses.
+    pub def: Rc<FnDef>,
+    /// Bounds on each field, read off the clauses.
+    pub bounds: Vec<Bound>,
+    /// For a field that a clause `field == expr` defines in terms of the other
+    /// fields (`size == items.len()`): that clause, and whether the field is
+    /// on its left. Such a field is computed rather than generated.
+    pub derived: Vec<Option<(usize, bool)>>,
+}
+
 pub struct Gen<'a> {
-    pub it: &'a Interp,
+    pub it: &'a mut Interp,
     pub rng: &'a mut Rng,
     /// Occasionally produce extreme Ints (such as max_int) for top-level parameters.
     pub extremes: bool,
@@ -17,6 +42,8 @@ pub struct Gen<'a> {
     /// parameter sometimes reuses one, so that a generated key is often in a
     /// generated map, and an element in a generated list.
     pub pool: Vec<Value>,
+    /// Record types with invariants, by type id.
+    pub plans: Rc<HashMap<u32, InvPlan>>,
 }
 
 /// Extreme Int values, likely to expose overflow.
@@ -38,8 +65,55 @@ fn mentions(ty: &Ty, id: u32) -> bool {
 }
 
 impl<'a> Gen<'a> {
-    pub fn new(it: &'a Interp, rng: &'a mut Rng, extremes: bool) -> Gen<'a> {
-        Gen { it, rng, extremes, pool: Vec::new() }
+    pub fn new(it: &'a mut Interp, rng: &'a mut Rng, extremes: bool, plans: Rc<HashMap<u32, InvPlan>>) -> Gen<'a> {
+        Gen { it, rng, extremes, pool: Vec::new(), plans }
+    }
+
+    /// A value of type `t` within the bounds `b`.
+    pub fn bounded(&mut self, t: &Ty, b: &Bound, size: u32, depth: u32) -> Result<Value, String> {
+        match (t, b) {
+            (Ty::Int, Bound { int: Some((lo, hi)), .. }) => {
+                let v = self.int_in(*lo, *hi, size);
+                self.pool.push(v.clone());
+                Ok(v)
+            }
+            (Ty::Float, Bound { float: Some((lo, hi)), .. }) => Ok(self.float_in(*lo, *hi, size)),
+            (Ty::Str | Ty::List(_) | Ty::Map(..), Bound { len: Some((lo, hi)), .. }) => self.sized(t, size, *lo, *hi),
+            _ => self.value(t, size, depth),
+        }
+    }
+
+    /// A record of a type with an invariant: generated within the bounds the
+    /// invariant states, with fields it defines computed, and retried until
+    /// the invariant holds.
+    fn valid_record(&mut self, td: &Rc<TypeDef>, plan: &InvPlan, tys: &[Ty], size: u32, depth: u32) -> Result<Value, String> {
+        let TypeKind::Record { fields, .. } = &td.kind else { unreachable!() };
+        for attempt in 0..100 {
+            // Smaller values satisfy more invariants (an empty edge list is
+            // always in range), so retries shrink.
+            let size = (size * (100 - attempt) / 100).max(1);
+            let mut vals = Vec::with_capacity(tys.len());
+            for (i, t) in tys.iter().enumerate() {
+                vals.push(match plan.derived[i] {
+                    Some(_) => Value::Unit,
+                    None => self.bounded(t, &plan.bounds[i], size, depth + 1)?,
+                });
+            }
+            if !compute_derived(self.it, plan, tys, &mut vals) {
+                continue;
+            }
+            let v = Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values: vals }));
+            let depth_before = self.it.stack.len();
+            let ok = matches!(self.it.broken_invariant(&v), Ok(None));
+            self.it.stack.truncate(depth_before);
+            if ok {
+                return Ok(v);
+            }
+        }
+        Err(format!(
+            "cannot generate a `{}` that satisfies its invariant (`where`); test functions on it with a `property` that builds valid values",
+            td.name
+        ))
     }
 
     pub fn value(&mut self, ty: &Ty, size: u32, depth: u32) -> Result<Value, String> {
@@ -318,9 +392,14 @@ impl<'a> Gen<'a> {
         let args: Vec<Ty> = if args.is_empty() { td.params.iter().map(|_| Ty::Int).collect() } else { args.to_vec() };
         match &td.kind {
             TypeKind::Record { fields, tys } => {
+                let tys: Vec<Ty> = tys.iter().map(|t| t.subst(&args)).collect();
+                let plans = self.plans.clone();
+                if let Some(plan) = plans.get(&td.id) {
+                    return self.valid_record(td, plan, &tys, size, depth);
+                }
                 let mut vals = Vec::new();
-                for t in tys {
-                    vals.push(self.value(&t.subst(&args), size, depth + 1)?);
+                for t in &tys {
+                    vals.push(self.value(t, size, depth + 1)?);
                 }
                 Ok(Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values: vals })))
             }
@@ -340,6 +419,98 @@ impl<'a> Gen<'a> {
             }
         }
     }
+}
+
+/// Fill in the fields of a record that its invariant's `field == expr`
+/// clauses define, from the other fields.
+pub fn compute_derived(it: &mut Interp, plan: &InvPlan, tys: &[Ty], vals: &mut [Value]) -> bool {
+    if plan.derived.iter().all(|d| d.is_none()) {
+        return true;
+    }
+    let def = plan.def.clone();
+    let mut env = Env::new(def.num_slots);
+    for (p, v) in def.params.iter().zip(vals.iter()) {
+        env.locals[p.slot as usize] = v.clone();
+    }
+    let depth_before = it.stack.len();
+    let mut ok = true;
+    for (i, d) in plan.derived.iter().enumerate() {
+        let Some((ci, left)) = *d else { continue };
+        let ExprKind::Binary { lhs, rhs, .. } = &def.requires[ci].kind else { continue };
+        let e = if left { rhs } else { lhs };
+        let v = match it.eval(e, &mut env).ok().and_then(|v| it.conform(v, &tys[i]).ok()) {
+            Some(v) => v,
+            None => {
+                ok = false;
+                break;
+            }
+        };
+        env.locals[def.params[i].slot as usize] = v.clone();
+        vals[i] = v;
+    }
+    it.stack.truncate(depth_before);
+    ok
+}
+
+/// A shrunk value made valid again: the fields that invariants define are
+/// recomputed (a shorter `adj` gets the matching `n`); `None` if some
+/// record still breaks its invariant.
+pub fn repair(it: &mut Interp, plans: &HashMap<u32, InvPlan>, v: &Value) -> Option<Value> {
+    if plans.is_empty() {
+        return Some(v.clone());
+    }
+    Some(match v {
+        Value::Record(r) => {
+            let mut values = Vec::with_capacity(r.values.len());
+            for x in &r.values {
+                values.push(repair(it, plans, x)?);
+            }
+            if let Some(plan) = r.ty.as_ref().and_then(|td| plans.get(&td.id)) {
+                let td = r.ty.clone().unwrap();
+                let TypeKind::Record { tys, .. } = &td.kind else { return None };
+                let tys: Vec<Ty> = tys.iter().map(|t| t.subst(&[])).collect();
+                if !compute_derived(it, plan, &tys, &mut values) {
+                    return None;
+                }
+            }
+            let nv = Value::Record(Rc::new(RecordVal { ty: r.ty.clone(), names: r.names.clone(), values }));
+            let depth = it.stack.len();
+            let ok = matches!(it.broken_invariant(&nv), Ok(None));
+            it.stack.truncate(depth);
+            if !ok {
+                return None;
+            }
+            nv
+        }
+        Value::List(xs) => {
+            let mut out = Vec::with_capacity(xs.len());
+            for x in xs.iter() {
+                out.push(repair(it, plans, x)?);
+            }
+            Value::list(out)
+        }
+        Value::Tuple(xs) => {
+            let mut out = Vec::with_capacity(xs.len());
+            for x in xs.iter() {
+                out.push(repair(it, plans, x)?);
+            }
+            Value::tuple(out)
+        }
+        Value::Variant(vv) => {
+            let mut values = Vec::with_capacity(vv.values.len());
+            for x in &vv.values {
+                values.push(repair(it, plans, x)?);
+            }
+            Value::Variant(Rc::new(VariantVal { ty: vv.ty.clone(), tag: vv.tag, values }))
+        }
+        Value::Map(m) => {
+            if m.entries.iter().any(|(k, x)| repair(it, plans, k).is_none() || repair(it, plans, x).is_none()) {
+                return None;
+            }
+            v.clone()
+        }
+        _ => v.clone(),
+    })
 }
 
 /// Candidate "simpler" values, most aggressive first.
@@ -455,7 +626,7 @@ pub fn shrink(v: &Value) -> Vec<Value> {
         }
         Value::Record(r) => {
             for i in 0..r.values.len() {
-                for s in shrink(&r.values[i]).into_iter().take(6) {
+                for s in shrink(&r.values[i]).into_iter().take(16) {
                     let mut c = (**r).clone();
                     c.values[i] = s;
                     out.push(Value::Record(Rc::new(c)));

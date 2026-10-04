@@ -317,6 +317,43 @@ stats.cog
   ✓ average  200 cases, contracts held, 13 inputs rejected by `requires`
 ```
 
+A type can carry a contract too. A `where` clause on a record type states
+what every value of the type satisfies:
+
+```cogito
+type Span = { lo: Int, hi: Int }
+  where lo <= hi
+
+fn overlap(a: Span, b: Span) -> Option[Span]
+  ensures match result {
+    Some(s) => a.lo <= s.lo and s.hi <= a.hi
+    None => true
+  }
+{
+  let lo = max(a.lo, b.lo)
+  let hi = min(a.hi, b.hi)
+  Some(Span(lo, hi))
+}
+```
+
+`Span(5, 1)` is an error, and so is a change such as `s.lo = 9` that breaks
+the invariant. `cogito verify` generates only valid spans as inputs, and
+here finds that two spans that do not overlap make an invalid one:
+
+```console
+$ cogito verify spans.cog
+spans.cog
+  ✗ overlap  type invariant violated
+      counterexample (on the first case, shrunk 12 times):
+        a = Span(lo: 1, hi: 1)
+        b = Span(lo: 0, hi: 0)
+      error[E0303]: invariant of `Span` violated: `lo <= hi`
+```
+
+The fix is to return `None` when `lo > hi`. A function whose name ends in
+`!` may break the invariant of its first argument while it runs (moving `lo`
+before `hi`, say), as long as it holds again when the function returns.
+
 ## 11. Tests and properties
 
 Tests live next to the code:

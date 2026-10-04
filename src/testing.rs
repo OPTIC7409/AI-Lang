@@ -1,13 +1,14 @@
 //! `cogito test` (unit tests and property tests) and `cogito verify`
 //! (contract checking by random testing).
 
-use crate::ast::{BinOp, Expr, ExprKind, FnDef, Item, Param, Program, UnOp};
+use crate::ast::{BinOp, Expr, ExprKind, FnDef, Item, Param, Program, UnOp, VarRes};
 use crate::diagnostic::{Colors, Diagnostic};
 use crate::interp::{Ctrl, Env, Interp, Rng};
-use crate::proptest::{shrink, Gen};
+use crate::proptest::{shrink, Bound, Gen, InvPlan};
 use crate::span::Span;
 use crate::types::Ty;
 use crate::value::{repr, Closure, Value};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 pub struct Options {
@@ -179,6 +180,7 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
         Err(m) => return PropOutcome::CannotGenerate(m),
     };
     let bounds = bounds(def);
+    let plans = invariant_plans(it);
     let c = Rc::new(Closure { def: def.clone(), captures: vec![] });
     let mut rng = Rng::new(seed);
     let mut passed = 0u32;
@@ -196,19 +198,10 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
         // filter such as `xs.len() >= 5` eventually sees inputs that pass it.
         let size = 2 + (passed + discarded).min(cases) * 40 / cases.max(1);
         let mut args = Vec::with_capacity(tys.len());
-        let mut gen = Gen::new(it, &mut rng, extremes);
+        let mut gen = Gen::new(it, &mut rng, extremes, plans.clone());
         let mut gen_err = None;
         for (t, b) in tys.iter().zip(&bounds) {
-            let v = match (t, b) {
-                (Ty::Int, Bound { int: Some((lo, hi)), .. }) => {
-                    let v = gen.int_in(*lo, *hi, size);
-                    gen.pool.push(v.clone());
-                    Ok(v)
-                }
-                (Ty::Float, Bound { float: Some((lo, hi)), .. }) => Ok(gen.float_in(*lo, *hi, size)),
-                (Ty::Str | Ty::List(_) | Ty::Map(..), Bound { len: Some((lo, hi)), .. }) => gen.sized(t, size, *lo, *hi),
-                _ => gen.value(t, size, 0),
-            };
+            let v = gen.bounded(t, b, size, 0);
             match v {
                 Ok(v) => args.push(v),
                 Err(m) => {
@@ -224,7 +217,7 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
             Outcome::Pass => passed += 1,
             Outcome::Discard => discarded += 1,
             Outcome::Fail(d) => {
-                let (args, diag, shrinks) = shrink_failure(it, &c, args, d);
+                let (args, diag, shrinks) = shrink_failure(it, &c, args, d, &plans);
                 break PropOutcome::Failed(Failure { args, diag, shrinks, after: passed + 1 });
             }
         }
@@ -233,14 +226,33 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
     result
 }
 
-/// What the `requires` / `where` clauses say about one parameter, read off
-/// comparisons with literals joined by `and`: inclusive bounds on its value
-/// (Int or Float) and on its length (`xs.len() >= 3`, `not s.is_empty()`).
-#[derive(Clone, Default)]
-struct Bound {
-    int: Option<(Option<i64>, Option<i64>)>,
-    float: Option<(Option<f64>, Option<f64>)>,
-    len: Option<(Option<i64>, Option<i64>)>,
+/// How to generate each record type that has an invariant: bounds on its
+/// fields and the fields its clauses define (`size == items.len()`).
+fn invariant_plans(it: &Interp) -> Rc<HashMap<u32, InvPlan>> {
+    let mut out = HashMap::new();
+    for (id, def) in &it.ctx.invariants {
+        let mut derived = vec![None; def.params.len()];
+        for (ci, c) in def.requires.iter().enumerate() {
+            let ExprKind::Binary { op: BinOp::Eq, lhs, rhs } = &c.kind else { continue };
+            for (side, other, left) in [(lhs, rhs, true), (rhs, lhs, false)] {
+                if let Some(i) = def.params.iter().position(|p| matches!(&side.kind, ExprKind::Var(v) if v.res == VarRes::Local(p.slot))) {
+                    if derived[i].is_none() && !uses_slot(other, def.params[i].slot) {
+                        derived[i] = Some((ci, left));
+                        break;
+                    }
+                }
+            }
+        }
+        out.insert(*id, InvPlan { def: def.clone(), bounds: bounds(def), derived });
+    }
+    Rc::new(out)
+}
+
+/// Whether an expression reads the local in `slot`.
+fn uses_slot(e: &Expr, slot: u32) -> bool {
+    let mut found = matches!(&e.kind, ExprKind::Var(v) if v.res == VarRes::Local(slot));
+    crate::ast::for_each_child(e, &mut |c| found |= uses_slot(c, slot));
+    found
 }
 
 fn bounds(def: &FnDef) -> Vec<Bound> {
@@ -378,7 +390,13 @@ fn bounds(def: &FnDef) -> Vec<Bound> {
     out
 }
 
-fn shrink_failure(it: &mut Interp, c: &Rc<Closure>, mut cur: Vec<Value>, mut diag: Box<Diagnostic>) -> (Vec<Value>, Box<Diagnostic>, u32) {
+fn shrink_failure(
+    it: &mut Interp,
+    c: &Rc<Closure>,
+    mut cur: Vec<Value>,
+    mut diag: Box<Diagnostic>,
+    plans: &HashMap<u32, InvPlan>,
+) -> (Vec<Value>, Box<Diagnostic>, u32) {
     let code = diag.code;
     let mut steps = 0u32;
     let mut tries = 0u32;
@@ -395,6 +413,11 @@ fn shrink_failure(it: &mut Interp, c: &Rc<Closure>, mut cur: Vec<Value>, mut dia
                 tries += 1;
                 let mut trial = cur.clone();
                 trial[i] = cand;
+                match crate::proptest::repair(it, plans, &trial[i]) {
+                    // (Repair may give back the value being shrunk.)
+                    Some(v) if !crate::value::values_equal(&v, &cur[i]) => trial[i] = v,
+                    _ => continue,
+                }
                 if let Outcome::Fail(d) = run_case(it, c, trial.clone()) {
                     if d.code == code {
                         cur = trial;
@@ -608,6 +631,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
                 sum.cases += f.after as u64;
                 let kind = match f.diag.code {
                     "E0302" => "postcondition violated",
+                    "E0303" => "type invariant violated",
                     "E0301" => "a precondition of a called function was violated",
                     "E0200" => "type error",
                     "E0219" => "took too long",

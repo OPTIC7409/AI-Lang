@@ -58,7 +58,9 @@ AI models now write a large share of new code. Cogito is an experiment in
 what a language optimized for that world looks like. Its core ideas:
 
 - **Specs live next to code, and are executable.** Functions declare
-  `requires`/`ensures` contracts. `test` and `property` blocks sit beside the
+  `requires`/`ensures` contracts, and record types declare invariants
+  (`type Span = { lo: Int, hi: Int } where lo <= hi`) that every value
+  keeps. `test` and `property` blocks sit beside the
   code they test. `cogito verify` generates random inputs from type
   annotations, checks every contract, and *shrinks* failures to a minimal
   counterexample. An AI (or a person) that writes a function also writes down
