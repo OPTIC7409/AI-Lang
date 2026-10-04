@@ -1,0 +1,2 @@
+# expect: E0121
+print([1, 2].map(fn(a, b) => a))

@@ -1642,7 +1642,9 @@ fn b_first(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
                 Some(Value::Int(r.start))
             }
         }
-        v => return Err(type_err(it, "first", 0, "a List, Str or Range", v, sp)),
+        // (Sets keep the order in which elements were added.)
+        Value::Set(m) => m.entries.first().map(|(k, _)| k.clone()),
+        v => return Err(type_err(it, "first", 0, "a List, Str, Range or Set", v, sp)),
     };
     Ok(it.option(r))
 }
@@ -1656,7 +1658,8 @@ fn b_last(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
             Some(_) => None,
             None => return Err(it.err(sp, "E0216", "an unbounded range has no last element")),
         },
-        v => return Err(type_err(it, "last", 0, "a List, Str or Range", v, sp)),
+        Value::Set(m) => m.entries.last().map(|(k, _)| k.clone()),
+        v => return Err(type_err(it, "last", 0, "a List, Str, Range or Set", v, sp)),
     };
     Ok(it.option(r))
 }
@@ -1904,7 +1907,9 @@ fn b_index_of(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         (Value::List(xs), x) | (Value::Tuple(xs), x) => xs.iter().position(|y| values_equal(x, y)).map(|i| Value::Int(i as i64)),
         (Value::Str(s), Value::Str(sub)) => s.find(sub.as_str()).map(|b| Value::Int(s[..b].chars().count() as i64)),
         (Value::Str(_), other) => return Err(type_err(it, "index_of", 1, "a Str", other, sp)),
-        (v, _) => return Err(type_err(it, "index_of", 0, "a List or Str", v, sp)),
+        (Value::Range(r), Value::Int(n)) => r.contains(*n).then(|| Value::Int(n - r.start)),
+        (Value::Range(_), _) => None,
+        (v, _) => return Err(type_err(it, "index_of", 0, "a List, Str or Range", v, sp)),
     };
     Ok(it.option(r))
 }

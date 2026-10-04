@@ -2038,6 +2038,14 @@ impl<'s> Parser<'s> {
                     }
                     if self.eat(&Tok::DotDot) {
                         rest = true;
+                        if let Tok::Ident(name) = self.peek().clone() {
+                            return Err(Diagnostic::error("E0010", format!("`..{}` cannot bind the other fields of a record", name))
+                                .at(self.span())
+                                .help(format!(
+                                    "write `..` alone to allow other fields; to keep the whole record, bind it with `@`: `{} @ {{ x, .. }}`",
+                                    name
+                                )));
+                        }
                         self.skip_newlines();
                         break;
                     }

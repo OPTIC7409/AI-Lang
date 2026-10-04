@@ -1,0 +1,5 @@
+# expect: E0121
+let xs = [1, 2]
+for i in xs.len() {
+  print(i)
+}

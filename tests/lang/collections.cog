@@ -141,3 +141,10 @@ test "strings are iterable" {
   for c in "abc" { out.push!(c.upper()) }
   assert out == ["A", "B", "C"]
 }
+
+test "first and last of a set, index_of on a range" {
+  assert to_set([3, 1, 2]).first() == Some(3)
+  assert to_set([3, 1, 2]).last() == Some(2)
+  assert (5..10).index_of(7) == Some(2)
+  assert (5..10).index_of(10) == None
+}

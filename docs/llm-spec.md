@@ -11,8 +11,8 @@ Run: `cogito FILE.cog [ARGS]` · Test: `cogito test FILE.cog` · Check contracts
 `cogito eval "CODE"` (prints the last expression's value) · REPL: `cogito` ·
 Explain an error code: `cogito explain E0101` · Built-in docs: `cogito doc [NAME]` ·
 Format: `cogito fmt [--check] [PATHS]` (two-space indentation, canonical spacing;
-line breaks and comments are kept, except that a `}` alone on its line
-followed by `else` becomes `} else`).
+line breaks and comments are kept, except that several blank lines in a row
+become one and a `}` alone on its line followed by `else` becomes `} else`).
 Options: `--max-depth N` (before the file name); for `test`/`verify`:
 `--cases N`, `--seed N`, `--filter TEXT`, `--budget N`, and `--all` (verify
 functions without contracts too). Arguments after the file name go to the
@@ -110,7 +110,9 @@ not matter for `==`. A declared record type (`type P = { x: Int }`) is
 nominal: `P(x: 1) != { x: 1 }`. Where an annotation expects `P`, an
 anonymous record with exactly P's fields is converted to a `P`
 (`fn mk() -> P => { x: 1 }` works). `{ ..p, y: 5 }` on a `P` is again a
-`P` (adding fields that `P` lacks is an error).
+`P` (adding fields that `P` lacks is an error). A structural annotation
+`{ w: Int }` is open: it accepts any record with an Int field `w`, whatever
+its other fields.
 
 ## Declarations
 
@@ -168,7 +170,10 @@ default values come last; defaults are evaluated on each call. If a top-level
 
 - Variables declared at the top level of a file are **module globals**:
   every function and closure sees their *current* value, and functions may
-  assign to top-level `var`s.
+  assign to top-level `var`s. A top-level name is declared once (E0102);
+  inside functions and blocks, a `let` may shadow an earlier one.
+  Another module's variables can be read (`counter.n`) but only changed by
+  that module's own functions.
 - Variables declared inside functions and blocks are **local**. Closures
   capture the *values* of the local variables they use, at the moment the
   closure is created, and cannot assign to them (error E0110).
@@ -220,9 +225,10 @@ built-ins (`xs.len()`, `"a,b".split(",")`). If `x` is a record with a field
 `let lines = ...`, or even `let get = fn(k) => m.get(k)`, whose body still
 calls the built-in) does not hide the function from method syntax. For a
 value whose type comes from an imported module, method syntax looks in that
-module first (for `!` functions too), so `q.push!(x)` (or `push!(q, x)`,
-which means the same) calls the module's `push!`; a plain call `f(x)` only
-looks in scope.
+module first, so `q.push!(x)` calls the module's `push!`. Calls of `!`
+functions are always method calls underneath (`push!(q, x)` is `q.push!(x)`),
+so they look in the module too; any other plain call `f(x)` only looks in
+scope (write `module.f(x)`).
 **Pipelines**: `x |> f(a)` is `f(x, a)`; `x |> f` is `f(x)`.
 
 ## Pattern matching
@@ -238,7 +244,7 @@ match value {
   [x] => "one element"
   [first, ..rest] => "has a head"          # also [..init, last], [a, .., z]
   (a, b) => "pair"
-  { name, age: years, .. } => "record"     # `..` allows extra fields
+  { name, age: years, .. } => "record"     # `..` allows extra fields (it binds no name)
   Circle(center: c, radius: r) => "named"  # or positional: Circle(c, r)
   geo.Circle(r) => "from a module"         # qualified constructor
   Rect(..) => "ignore fields"
@@ -352,7 +358,8 @@ not `self`. Only record types have invariants.
 `cogito verify FILE` treats each function with contracts as a property: it
 generates arguments from the parameter types (including extreme Ints such as
 `max_int` and extreme Floats such as `1e308` and `5e-324`; functions taking
-function parameters are skipped), discards those that fail `requires`, and reports shrunk
+function parameters, or parameters typed `Any` or not typed at all, are
+skipped: there is no type to generate from), discards those that fail `requires`, and reports shrunk
 counterexamples that break `ensures`, crash, or exceed the step budget.
 Functions whose `requires` random inputs almost never satisfy (a well-formed
 tree, say) are reported as not checked, which is not a failure: test them
@@ -407,10 +414,14 @@ geo.area(c)   geo.Point(1.0, 2.0)    # qualified access
 fn f(p: geo.Point) -> Float => ...   # qualified types
 ```
 
-Importing runs the module's top-level statements once. Unqualified names
+Importing runs the module's top-level statements once (a module imported by
+several files is shared). Modules cannot import each other in a cycle
+(E0114): move what both need into a third module. Unqualified names
 from a module are not visible (`check` suggests the qualified name). Types
-from different modules may share a name; values of such types are told apart
-by their module, though messages show only the short name.
+from different modules may share a name, but they are different types (never
+equal; messages say where each was declared). `check main.cog` reports an
+imported module's errors, but its warnings only when the module itself is
+checked (`cogito check .` checks every file).
 
 ## Built-in functions (all callable as methods: `xs.map(f)`)
 
@@ -420,7 +431,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`,
 - **I/O**: `print(..)` `write(..)` (no newline; both join several arguments
   with a space) `eprint(..)` `input(prompt) -> Str` (`""` at end of input)
   `read_line() -> Option[Str]` (without the `\n` or `\r\n`; `None` at end of input) `read_stdin() -> Str`
-  `read_file(path) -> Result[Str, Str]`
+  `read_file(path) -> Result[Str, Str]` (the error message names the path)
   `write_file(path, text) -> Result[Unit, Str]` `append_file(path, text) -> Result[Unit, Str]`
   `file_exists(path) -> Bool` `list_dir(path) -> Result[List[Str], Str]`
   `args() -> List[Str]` (without the script name) `env(name) -> Option[Str]`
@@ -445,7 +456,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`,
   checksums and random number generators such as xorshift;
   the operators always fail on overflow), constants `pi tau e inf max_int min_int`,
   `seed(n) random() random_int(lo, hi) shuffle(xs) choice(xs) -> Option`
-- **Collections** (lists; most also accept ranges, strings, tuples, maps):
+- **Collections** (lists; most also accept ranges, strings, tuples, sets, maps):
   `len is_empty range(end) range(start, end, step) first -> Option last -> Option get(i) -> Option
   get_or(key, default) push insert(i, x) remove(i) set(i, x) map filter
   reduce(f) fold(init, f) sum product min_by(key) -> Option max_by(key) -> Option (the first on ties) sort sort_by(key)
@@ -455,7 +466,9 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`,
   unique group_by(key) -> Map tally -> Map[T, Int] partition(pred) -> (List, List)
   chunks(n) windows(n) repeat(x, n) each(f) to_list to_map(pairs)`.
   Sorting is stable. `sort_with(cmp)` takes a function returning an
-  Ordering, as `compare(a, b)` does.
+  Ordering, as `compare(a, b)` does. Negative indexes count from the end
+  (`get(-1)` is the last element; `insert(i, x)` puts `x` at index `i`, so
+  `insert(-1, x)` appends). `first`/`last` of a set follow insertion order.
   On a Str, functions that pick or reorder characters give a Str (`take
   drop slice take_while drop_while filter sort unique reverse`, and the
   pieces of `chunks`/`windows`); `map` gives a List.

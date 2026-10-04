@@ -913,6 +913,39 @@ impl<'a> Checker<'a> {
                                 d.notes.push(format!("its fields are: {}", fields.join(", ")));
                             }
                         }
+                        // Values that have no fields at all (`xs.len` for `xs.len()`).
+                        let fieldless = matches!(
+                            t,
+                            Ty::Int
+                                | Ty::Float
+                                | Ty::Str
+                                | Ty::Bool
+                                | Ty::Unit
+                                | Ty::Range
+                                | Ty::List(_)
+                                | Ty::Map(..)
+                                | Ty::Set(_)
+                                | Ty::Fn(..)
+                                | Ty::AnyFn
+                        );
+                        let bad_index = match &t {
+                            Ty::Tuple(ts) => name.parse::<usize>().map_or(true, |i| i >= ts.len()),
+                            _ => false,
+                        };
+                        if fieldless || bad_index {
+                            let msg = match &t {
+                                Ty::Tuple(ts) if name.parse::<usize>().is_ok() => format!("{} has no element `{}` (it has {})", t, name, ts.len()),
+                                _ => format!("{} has no field `{}`", a(&t), name),
+                            };
+                            let callable = self.ctx.builtins.values.contains_key(name);
+                            let d = self.error(*name_span, msg, "no such field");
+                            if callable && fieldless {
+                                d.help = Some(format!("to call the function `{}`, write `.{}()`", name, name));
+                                d.fixes.push(crate::diagnostic::Fix { span: Span { start: name_span.end, ..*name_span }, text: "()".into() });
+                            } else if matches!(t, Ty::Tuple(_)) {
+                                d.help = Some("tuple elements are numbered from 0: `t.0`, `t.1`, ...".into());
+                            }
+                        }
                         Ty::Any
                     }
                 }
@@ -946,6 +979,10 @@ impl<'a> Checker<'a> {
                 for (i, a) in args.iter().enumerate() {
                     if let (Some(b), Some(first), ExprKind::Lambda(_)) = (builtin, arg_tys.first(), &a.value.kind) {
                         self.lambda_hint = callback_params(b, &first.1, i).map(|h| (h, b));
+                        if a.name.is_none() {
+                            let coll = first.1.clone();
+                            self.callback_arity(b, &coll, i, &a.value);
+                        }
                     }
                     let errors = self.diags.len();
                     let t = self.expr(&a.value);
@@ -987,6 +1024,9 @@ impl<'a> Checker<'a> {
                 for (i, a) in args.iter().enumerate() {
                     if let (Some(b), ExprKind::Lambda(_)) = (builtin, &a.value.kind) {
                         self.lambda_hint = callback_params(b, &rt, i + 1).map(|h| (h, b));
+                        if a.name.is_none() {
+                            self.callback_arity(b, &rt, i + 1, &a.value);
+                        }
                     }
                     let t = self.expr(&a.value);
                     self.lambda_hint = None;
@@ -1160,6 +1200,13 @@ impl<'a> Checker<'a> {
             }
             ExprKind::For { pat, iter, body } => {
                 let t = self.expr(iter);
+                if Kind::Iter.excludes(&t) {
+                    let d = self.error(iter.span, format!("cannot loop over {}", a(&t)), "not a collection");
+                    d.help = Some(match t {
+                        Ty::Int => "to count, loop over a range: `for i in 0..n`".into(),
+                        _ => "a `for` loop goes over a list, range, string, map, set or tuple".into(),
+                    });
+                }
                 self.bind(pat, &element(&t), false);
                 self.expr(body);
                 Ty::Any
@@ -1274,6 +1321,37 @@ impl<'a> Checker<'a> {
     }
 
     /// A call of a named function (with the receiver, for method syntax).
+    /// An anonymous function passed to a built-in that calls it with a
+    /// different number of arguments (`[1, 2].map(fn(a, b) => a)`).
+    fn callback_arity(&mut self, b: &str, coll: &Ty, pos: usize, arg: &Expr) {
+        let ExprKind::Lambda(def) = &arg.kind else { return };
+        let Some(n) = callback_count(b, coll, pos) else { return };
+        if n < def.required_params() || n > def.params.len() {
+            let takes = if def.required_params() == def.params.len() {
+                def.params.len().to_string()
+            } else {
+                format!("{} to {}", def.required_params(), def.params.len())
+            };
+            let d = self.error(
+                arg.span,
+                format!("`{}` calls this function with {} argument{}, but it takes {}", b, n, if n == 1 { "" } else { "s" }, takes),
+                "wrong number of parameters",
+            );
+            d.help = Some(match (b, n) {
+                ("fold", _) => "the function gets the result so far and the next element: `fn(acc, x) => acc + x`".into(),
+                ("reduce" | "sort_with", _) => "the function gets two values: `fn(a, b) => ...`".into(),
+                ("map" | "filter" | "each" | "any" | "all" | "find" | "count", 1) => {
+                    format!(
+                        "the function gets one element: `fn(x) => ...`; for the index too, use `{}` on `xs.enumerate()`, which gives `(i, x)` tuples",
+                        b
+                    )
+                }
+                (_, 1) => "the function gets one element: `fn(x) => ...`".into(),
+                _ => format!("the function gets {} arguments", n),
+            });
+        }
+    }
+
     fn call_named(&mut self, v: &Var, receiver: Option<(Ty, Span)>, args: &[(Option<Name>, Ty, Span)], span: Span) -> Ty {
         let mut all: Vec<(Option<Name>, Ty, Span)> = Vec::new();
         let receiver_given = receiver.is_some();
@@ -1595,6 +1673,22 @@ fn callback_params(name: &str, coll: &Ty, pos: usize) -> Option<Vec<Ty>> {
         _ => return None,
     };
     params.iter().any(known).then_some(params)
+}
+
+/// How many arguments a built-in passes to the function at position `pos`,
+/// when that is certain (a map's entries may be passed as one or two).
+fn callback_count(name: &str, coll: &Ty, pos: usize) -> Option<usize> {
+    let seq = matches!(coll, Ty::List(_) | Ty::Set(_) | Ty::Range | Ty::Str);
+    Some(match (name, pos) {
+        (
+            "map" | "filter" | "each" | "find" | "find_index" | "take_while" | "drop_while" | "flat_map" | "min_by" | "max_by" | "sort_by"
+            | "group_by" | "partition" | "any" | "all" | "count",
+            1,
+        ) if seq => 1,
+        ("fold", 2) if seq => 2,
+        ("reduce" | "sort_with", 1) if seq => 2,
+        _ => return None,
+    })
 }
 
 /// What a built-in's positional parameter must be, where that is certain

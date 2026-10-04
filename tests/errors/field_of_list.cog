@@ -1,0 +1,3 @@
+# expect: E0121
+let xs = [1, 2]
+print(xs.len)
