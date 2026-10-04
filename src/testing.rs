@@ -519,6 +519,16 @@ fn shrink_failure(
     let code = diag.code;
     let mut steps = 0u32;
     let mut tries = 0u32;
+    // A large Int that makes the function run out of steps: estimate where
+    // the budget runs out from a smaller input that passes, instead of
+    // halving (each failing try costs the whole budget).
+    if code == "E0219" {
+        if let Some((trial, d)) = shrink_budget_ints(it, c, &cur) {
+            cur = trial;
+            diag = d;
+            steps += 1;
+        }
+    }
     // Every attempt at shrinking a "took too long" failure runs to the full
     // budget, so only try a few, for a few seconds at most.
     let max_tries = if code == "E0219" { 24 } else { 20_000 };
@@ -550,6 +560,42 @@ fn shrink_failure(
         break;
     }
     (cur, diag, steps)
+}
+
+fn shrink_budget_ints(it: &mut Interp, c: &Rc<Closure>, cur: &[Value]) -> Option<(Vec<Value>, Box<Diagnostic>)> {
+    let budget = it.budget? as f64;
+    for i in 0..cur.len() {
+        let Value::Int(n) = cur[i] else { continue };
+        let mut small = n;
+        // A passing input, a thousand times smaller each time.
+        let passed_steps = loop {
+            small /= 1024;
+            if small.unsigned_abs() < 2 {
+                break None;
+            }
+            let mut trial = cur.to_vec();
+            trial[i] = Value::Int(small);
+            match run_case(it, c, trial) {
+                Outcome::Pass => break Some(it.ticks.max(1)),
+                Outcome::Discard => break None,
+                Outcome::Fail(d) if d.code == "E0219" => continue,
+                Outcome::Fail(_) => break None,
+            }
+        };
+        let Some(used) = passed_steps else { continue };
+        let estimate = (small as f64 * budget / used as f64 * 1.05).clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+        if estimate.unsigned_abs() >= n.unsigned_abs() {
+            continue;
+        }
+        let mut trial = cur.to_vec();
+        trial[i] = Value::Int(estimate);
+        if let Outcome::Fail(d) = run_case(it, c, trial.clone()) {
+            if d.code == "E0219" {
+                return Some((trial, d));
+            }
+        }
+    }
+    None
 }
 
 fn indent(s: &str, n: usize) -> String {
