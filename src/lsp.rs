@@ -249,6 +249,8 @@ impl Server {
         let Some((word, start, end)) = word_at(text, offset) else { return Json::Null };
         let markdown = if let Some(d) = self.declaration_doc(text, &word) {
             d
+        } else if let Some(t) = self.name_type(uri, start) {
+            format!("```cogito\n{}: {}\n```", word, t)
         } else if let Some(b) = crate::builtins::BUILTINS.iter().find(|b| b.name == word) {
             let mut doc = b.doc.lines();
             let sig = doc.next().unwrap_or("");
@@ -262,6 +264,24 @@ impl Server {
             ("contents", Json::obj(vec![("kind", Json::str("markdown")), ("value", Json::str(markdown))])),
             ("range", lines.range(start, end)),
         ])
+    }
+
+    /// The type the checker knows for the variable at `offset`, if any.
+    fn name_type(&self, uri: &str, offset: usize) -> Option<String> {
+        let text = self.text(uri);
+        let path = uri_to_path(uri);
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let mut it = Interp::new();
+        let mut ns = Namespace::default();
+        let file = it.ctx.sm.add(&path.display().to_string(), text);
+        let mut prog = crate::parser::parse_program(text, file).ok()?;
+        let diags = crate::resolver::resolve_program(&mut it.ctx, &mut prog, &mut ns, &dir, false);
+        if diags.iter().any(|d| d.is_error()) {
+            return None;
+        }
+        let types = crate::typecheck::name_types(&it.ctx, &prog);
+        let (_, t) = types.iter().find(|(sp, _)| sp.file == file && sp.start as usize == offset)?;
+        (!t.is_any()).then(|| t.to_string())
     }
 
     /// The signature and comment of a top-level function or type declared

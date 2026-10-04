@@ -7,7 +7,7 @@ Support for [Cogito](../../README.md) (`.cog` files):
 - through the Cogito language server (`cogito lsp`): errors and warnings as
   you type (syntax, names, exhaustiveness, types), **Format Document**
   (`cogito fmt`), documentation on hover for built-ins and your own
-  functions, completion (names in scope, built-ins, a module's functions
+  functions (and the inferred type of a variable), completion (names in scope, built-ins, a module's functions
   after `module.`), the outline view, and **Go to Definition**.
 
 To install locally, put `cogito` on your `PATH` (or set `cogito.path` in the

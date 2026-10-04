@@ -266,6 +266,23 @@ fn language_server_reports_diagnostics() {
     );
     let items = recv();
     assert!(items.contains("\"label\":\"print\"") && items.contains("\"label\":\"pt\""), "{}", items);
+    // Hover: the type the checker infers for a variable.
+    let src = "let words = [\"a\"].map(fn(w) => w.upper())\nvar n = 0\nn += words.len()\nprint(words, n)\n";
+    send(&format!(
+        r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"file:///tmp/x.cog","version":3}},"contentChanges":[{{"text":{}}}]}}}}"#,
+        cogito::json::Json::str(src)
+    ));
+    recv();
+    send(
+        r#"{"jsonrpc":"2.0","id":5,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"position":{"line":3,"character":8}}}"#,
+    );
+    let hover = recv();
+    assert!(hover.contains("words: List[Str]"), "{}", hover);
+    send(
+        r#"{"jsonrpc":"2.0","id":6,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"position":{"line":3,"character":14}}}"#,
+    );
+    let hover = recv();
+    assert!(hover.contains("n: Int"), "{}", hover);
     send(r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#);
     assert!(recv().contains("\"id\":2"));
     send(r#"{"jsonrpc":"2.0","method":"exit"}"#);

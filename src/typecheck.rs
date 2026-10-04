@@ -31,25 +31,36 @@ use std::rc::Rc;
 /// then dropping those an assignment breaks, until none is broken), and a
 /// last pass reports errors with them.
 pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
-    let first = check_pass(ctx, prog, HashMap::new());
-    let mut assumed = first.candidates;
+    check_pass(ctx, prog, stable_vars(ctx, prog), false).diags
+}
+
+/// The known type of each name (variable use or binding) in the program,
+/// by its span (for editors).
+pub fn name_types(ctx: &Ctx, prog: &Program) -> HashMap<Span, Ty> {
+    check_pass(ctx, prog, stable_vars(ctx, prog), true).names
+}
+
+/// The `var`s that keep the type of their first value (see `check_program`).
+fn stable_vars(ctx: &Ctx, prog: &Program) -> HashMap<Span, Ty> {
+    let mut assumed = check_pass(ctx, prog, HashMap::new(), false).candidates;
     for _ in 0..20 {
-        let pass = check_pass(ctx, prog, assumed.clone());
+        let pass = check_pass(ctx, prog, assumed.clone(), false);
         if pass.broken.is_empty() {
-            return pass.diags;
+            return assumed;
         }
         assumed.retain(|span, _| !pass.broken.contains(span));
     }
-    check_pass(ctx, prog, HashMap::new()).diags
+    HashMap::new()
 }
 
 struct Pass {
     diags: Vec<Diagnostic>,
     candidates: HashMap<Span, Ty>,
     broken: HashSet<Span>,
+    names: HashMap<Span, Ty>,
 }
 
-fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>) -> Pass {
+fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>, record: bool) -> Pass {
     let mut reassigned = HashSet::new();
     // Locals of the top-level code (inside a top-level `for` or `if`).
     let mut top_locals = HashSet::new();
@@ -82,6 +93,7 @@ fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>) -> Pass {
         candidates: HashMap::new(),
         broken: HashSet::new(),
         global_vars: HashMap::new(),
+        names: record.then(HashMap::new),
     };
     // Top-level statements first (in order), so that functions see the
     // types of the globals they use.
@@ -105,7 +117,7 @@ fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>) -> Pass {
             _ => {}
         }
     }
-    Pass { diags: c.diags, candidates: c.candidates, broken: c.broken }
+    Pass { diags: c.diags, candidates: c.candidates, broken: c.broken, names: c.names.unwrap_or_default() }
 }
 
 #[derive(Default)]
@@ -143,6 +155,8 @@ struct Checker<'a> {
     broken: HashSet<Span>,
     /// The `var` declaration of each top-level variable slot.
     global_vars: HashMap<u32, Span>,
+    /// When asked for: the known type of each name, by span.
+    names: Option<HashMap<Span, Ty>>,
 }
 
 /// Record the variables that are assigned as a whole (`x = ...`), or passed
@@ -594,6 +608,9 @@ impl<'a> Checker<'a> {
         let t = if unknown { Ty::Any } else { t.clone() };
         match &pat.kind {
             PatKind::Bind { res, sub, .. } => {
+                if let Some(names) = &mut self.names {
+                    names.insert(pat.span, t.clone());
+                }
                 match res {
                     VarRes::Local(slot) => {
                         self.frame().locals.insert(*slot, t.clone());
@@ -711,7 +728,13 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Str
             }
-            ExprKind::Var(v) => self.var(v),
+            ExprKind::Var(v) => {
+                let t = self.var(v);
+                if let Some(names) = &mut self.names {
+                    names.insert(e.span, t.clone());
+                }
+                t
+            }
             ExprKind::List(items) => {
                 let mut t: Option<Ty> = None;
                 for it in items {
