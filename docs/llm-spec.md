@@ -496,6 +496,9 @@ built-ins (`xs.sort()`), `?`/`return` inside anonymous functions, an
 ignored `Result` of your own function (use `let _ = f()` if that is
 intended), and a function named like a built-in that calls itself by
 mistake (`cogito FILE` shows these warnings too, except unused variables).
+`cogito test --json` and `cogito verify --json` print one JSON object per
+test, property or function (`file`, `kind`, `name`, `status`, and for a
+failure the `counterexample` and `diagnostic`), then a summary object.
 `cogito check --json` prints one JSON object per diagnostic for tools:
 `severity`, `code`, `message` and `notes` always; `file`, `line`, `column`,
 `end_line`, `end_column`, `label` and `help` when the diagnostic has them.

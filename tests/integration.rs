@@ -92,6 +92,24 @@ fn check_json_output() {
 }
 
 #[test]
+fn test_and_verify_json_output() {
+    let out = cogito(&["test", "--json", "tests/lang/numbers.cog"]);
+    assert!(out.status.success());
+    let stdout = text(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines.iter().take(lines.len() - 1).all(|l| l.contains("\"kind\":\"test\"") && l.contains("\"status\":\"passed\"")), "{}", stdout);
+    assert!(lines.last().unwrap().contains("\"summary\":true") && lines.last().unwrap().contains("\"ok\":true"), "{}", stdout);
+    let out = cogito(&["verify", "--json", "tests/verify/bang_invariant.cog"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("\"status\":\"failed\"") && stdout.contains("\"counterexample\":{\"s\":") && stdout.contains("\"code\":\"E0303\""),
+        "{}",
+        stdout
+    );
+}
+
+#[test]
 fn warning_codes() {
     let mut failures = Vec::new();
     for f in files("tests/warnings", "cog") {

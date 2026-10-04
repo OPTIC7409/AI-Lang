@@ -4,6 +4,7 @@
 use crate::ast::{BinOp, Expr, ExprKind, FnDef, Item, Param, Program, UnOp, VarRes};
 use crate::diagnostic::{Colors, Diagnostic};
 use crate::interp::{Ctrl, Env, Interp, Rng};
+use crate::json::Json;
 use crate::proptest::{shrink, Bound, Gen, InvPlan};
 use crate::span::Span;
 use crate::types::Ty;
@@ -20,15 +21,17 @@ pub struct Options {
     pub all: bool,
     /// Step budget per generated test case.
     pub budget: u64,
+    /// Report results as JSON objects (one per line) instead of text.
+    pub json: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { seed: None, cases: 100, filter: None, color: false, all: false, budget: 10_000_000 }
+        Options { seed: None, cases: 100, filter: None, color: false, all: false, budget: 10_000_000, json: false }
     }
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone)]
 pub struct Summary {
     pub passed: u32,
     pub failed: u32,
@@ -36,6 +39,8 @@ pub struct Summary {
     pub gave_up: u32,
     pub skipped: u32,
     pub cases: u64,
+    /// With `Options::json`: one JSON object per test, property or function.
+    pub events: Vec<Json>,
 }
 
 impl Summary {
@@ -45,7 +50,28 @@ impl Summary {
         self.gave_up += o.gave_up;
         self.skipped += o.skipped;
         self.cases += o.cases;
+        self.events.extend(o.events);
     }
+
+    /// Record a result for JSON output.
+    fn event(&mut self, file: &str, kind: &str, name: &str, status: &str, extra: Vec<(&str, Json)>) {
+        let mut fields = vec![("file", Json::str(file)), ("kind", Json::str(kind)), ("name", Json::str(name)), ("status", Json::str(status))];
+        fields.extend(extra);
+        self.events.push(Json::obj(fields));
+    }
+}
+
+/// JSON details of a failed property or contract: the counterexample and
+/// the error.
+fn failure_json(it: &Interp, def: &FnDef, f: &Failure) -> Vec<(&'static str, Json)> {
+    let mut out = vec![("cases", Json::num(f.after as f64)), ("shrinks", Json::num(f.shrinks as f64))];
+    if let Some(v) = &f.generated {
+        out.push(("generated", Json::str(repr(v))));
+    } else {
+        out.push(("counterexample", Json::Obj(def.params.iter().zip(&f.args).map(|(p, a)| (param_label(it, p), Json::str(repr(a)))).collect())));
+    }
+    out.push(("diagnostic", f.diag.to_json(&it.ctx.sm)));
+    out
 }
 
 enum Outcome {
@@ -661,6 +687,17 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
 /// Run all `test` and `property` declarations of a program. The program's
 /// top-level statements must already have been executed.
 pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -> Summary {
+    // (With JSON output, the text report and the tests' own output are
+    // swallowed.)
+    let saved_capture = if opts.json { it.capture.replace(String::new()) } else { None };
+    let sum = run_tests_inner(it, prog, file, opts);
+    if opts.json {
+        it.capture = saved_capture;
+    }
+    sum
+}
+
+fn run_tests_inner(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -> Summary {
     let c = Colors::new(opts.color);
     let mut sum = Summary::default();
     let mut out = String::new();
@@ -692,10 +729,12 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                 match r {
                     Ok(_) | Err(Ctrl::Return(_)) => {
                         sum.passed += 1;
+                        sum.event(file, "test", &t.name, "passed", vec![("ms", Json::num(ms.round()))]);
                         out.push_str(&format!("  {}✓{} {}{}\n", c.green, c.reset, t.name, timing));
                     }
                     Err(Ctrl::Error(d)) => {
                         sum.failed += 1;
+                        sum.event(file, "test", &t.name, "failed", vec![("diagnostic", d.to_json(&it.ctx.sm))]);
                         out.push_str(&format!("  {}✗ {}{}\n", c.red, t.name, c.reset));
                         out.push_str(&indent(&d.render(&it.ctx.sm, opts.color), 6));
                         out.push('\n');
@@ -715,6 +754,7 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                     PropOutcome::Passed { cases, discarded, .. } => {
                         sum.passed += 1;
                         sum.cases += cases as u64;
+                        sum.event(file, "property", &p.name, "passed", vec![("cases", Json::num(cases)), ("discarded", Json::num(discarded))]);
                         let disc = if discarded > 0 { format!(", {} discarded", discarded) } else { String::new() };
                         out.push_str(&format!("  {}✓{} {} {}({} cases{}){}\n", c.green, c.reset, p.name, c.dim, cases, disc, c.reset));
                     }
@@ -727,6 +767,17 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                             }
                             _ => "satisfied the `where` clause; narrow the input types or the clause".to_string(),
                         };
+                        sum.event(
+                            file,
+                            "property",
+                            &p.name,
+                            "gave_up",
+                            vec![
+                                ("cases", Json::num(cases)),
+                                ("discarded", Json::num(discarded)),
+                                ("message", Json::str(format!("only {} of {} generated inputs {}", cases, cases + discarded, why))),
+                            ],
+                        );
                         out.push_str(&format!(
                             "  {}?{} {} {}(gave up: only {} of {} generated inputs {}){}\n",
                             c.yellow,
@@ -742,11 +793,15 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                     PropOutcome::Failed(f) => {
                         sum.failed += 1;
                         sum.cases += f.after as u64;
+                        let mut extra = failure_json(it, &p.func, &f);
+                        extra.push(("seed", Json::num(seed as f64)));
+                        sum.event(file, "property", &p.name, "failed", extra);
                         out.push_str(&format!("  {}✗ {}{} {}(seed {}){}\n", c.red, p.name, c.reset, c.dim, seed, c.reset));
                         show_failure(it, &p.func, &f, &c, &mut out);
                     }
                     PropOutcome::CannotGenerate(m) => {
                         sum.failed += 1;
+                        sum.event(file, "property", &p.name, "failed", vec![("message", Json::str(format!("cannot generate inputs: {}", m)))]);
                         out.push_str(&format!("  {}✗ {}{}\n      cannot generate inputs: {}\n", c.red, p.name, c.reset, m));
                     }
                 }
@@ -764,6 +819,15 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
 
 /// Check every function's contracts against random inputs.
 pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -> Summary {
+    let saved_capture = if opts.json { it.capture.replace(String::new()) } else { None };
+    let sum = run_verify_inner(it, prog, file, opts);
+    if opts.json {
+        it.capture = saved_capture;
+    }
+    sum
+}
+
+fn run_verify_inner(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -> Summary {
     let c = Colors::new(opts.color);
     let mut sum = Summary::default();
     let mut out = String::new();
@@ -801,6 +865,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
         any = true;
         if def.params.is_empty() {
             sum.skipped += 1;
+            sum.event(file, "verify", &name, "skipped", vec![("message", Json::str("no inputs to generate"))]);
             out.push_str(&format!("  {}-{} {:w$}  {}skipped: no inputs to generate{}\n", c.dim, c.reset, name, c.dim, c.reset, w = width));
             flush_out(it, &mut out);
             continue;
@@ -810,6 +875,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
             PropOutcome::Passed { cases, discarded, missed } => {
                 sum.passed += 1;
                 sum.cases += cases as u64;
+                sum.event(file, "verify", &name, "passed", vec![("cases", Json::num(cases)), ("discarded", Json::num(discarded))]);
                 let what = if def.has_contracts() { "contracts held" } else { "no errors" };
                 let rejected = discarded - missed.as_ref().map_or(0, |m| m.0);
                 let mut disc = if rejected > 0 { format!(", {} inputs rejected by `requires`", rejected) } else { String::new() };
@@ -823,6 +889,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
                 // tree, a consistent table) that random values rarely are.
                 sum.skipped += 1;
                 sum.cases += cases as u64;
+                sum.event(file, "verify", &name, "not_checked", vec![("cases", Json::num(cases)), ("discarded", Json::num(discarded))]);
                 let what = match &missed {
                     Some((n, ty)) if *n * 2 > discarded => format!("contained {} {}", crate::diagnostic::a_an(ty), ty),
                     _ => "satisfied `requires`".to_string(),
@@ -843,6 +910,8 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
             PropOutcome::Failed(f) => {
                 sum.failed += 1;
                 sum.cases += f.after as u64;
+                let extra = failure_json(it, &def, &f);
+                sum.event(file, "verify", &name, "failed", extra);
                 let kind = match f.diag.code {
                     "E0302" => "postcondition violated",
                     "E0303" => "type invariant violated",
@@ -856,6 +925,7 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
             }
             PropOutcome::CannotGenerate(m) => {
                 sum.skipped += 1;
+                sum.event(file, "verify", &name, "skipped", vec![("message", Json::str(m.clone()))]);
                 out.push_str(&format!("  {}-{} {:w$}  {}skipped: {}{}\n", c.dim, c.reset, name, c.dim, m, c.reset, w = width));
             }
         }

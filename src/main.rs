@@ -35,6 +35,7 @@ OPTIONS (test / verify):
     --filter TEXT    only run tests/functions whose name contains TEXT
     --all            verify: also check functions without contracts
     --budget N       maximum steps (calls + loop iterations) per generated case (default 10000000)
+    --json           one JSON object per test, property or function, then a summary object
 
 GLOBAL OPTIONS:
     --max-depth N    maximum number of nested calls before a stack-overflow error (default 100000)
@@ -190,7 +191,26 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
         ran += 1;
         let mut it = Interp::new();
         it.test_mode = true;
-        let Some((prog, _ns)) = load(&mut it, f, opts.color, true) else {
+        let loaded = if opts.json {
+            // (Errors as JSON events, with the results.)
+            let mut ns = Namespace::default();
+            match cogito::load_file(&mut it, f, &mut ns) {
+                Ok((prog, _)) => Some((prog, ns)),
+                Err(ds) => {
+                    let diags = ds.iter().map(|d| d.to_json(&it.ctx.sm)).collect();
+                    total.events.push(cogito::json::Json::obj(vec![
+                        ("file", cogito::json::Json::str(f.display().to_string())),
+                        ("kind", cogito::json::Json::str("file")),
+                        ("status", cogito::json::Json::str("error")),
+                        ("diagnostics", cogito::json::Json::Arr(diags)),
+                    ]));
+                    None
+                }
+            }
+        } else {
+            load(&mut it, f, opts.color, true)
+        };
+        let Some((prog, _ns)) = loaded else {
             load_errors += 1;
             continue;
         };
@@ -214,6 +234,24 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
     }
     let secs = start.elapsed().as_secs_f64();
     let ok = total.failed == 0 && total.gave_up == 0 && load_errors == 0;
+    if opts.json {
+        for e in &total.events {
+            cogito::outln!("{}", e);
+        }
+        let summary = cogito::json::Json::obj(vec![
+            ("summary", cogito::json::Json::Bool(true)),
+            ("ok", cogito::json::Json::Bool(ok)),
+            ("passed", cogito::json::Json::num(total.passed)),
+            ("failed", cogito::json::Json::num(total.failed)),
+            ("gave_up", cogito::json::Json::num(total.gave_up)),
+            ("skipped", cogito::json::Json::num(total.skipped)),
+            ("files_with_errors", cogito::json::Json::num(load_errors)),
+            ("cases", cogito::json::Json::num(total.cases as f64)),
+            ("seconds", cogito::json::Json::num((secs * 1000.0).round() / 1000.0)),
+        ]);
+        cogito::outln!("{}", summary);
+        return if ok { ExitCode::SUCCESS } else { ExitCode::from(1) };
+    }
     let status = if ok { format!("{}ok{}", c.green, c.reset) } else { format!("{}FAILED{}", c.red, c.reset) };
     let mut parts = vec![format!("{} passed", total.passed), format!("{} failed", total.failed)];
     if total.gave_up > 0 {
@@ -428,6 +466,7 @@ fn parse_opts(args: &[String], color: bool, default_cases: u32) -> Result<(Optio
             "--seed" => opts.seed = Some(value(&mut i)?.parse().map_err(|_| "--seed needs a number".to_string())?),
             "--filter" => opts.filter = Some(value(&mut i)?),
             "--all" => opts.all = true,
+            "--json" => opts.json = true,
             "--budget" => opts.budget = value(&mut i)?.parse().map_err(|_| "--budget needs a number".to_string())?,
             "--no-color" => {}
             s if s.starts_with("--") => return Err(format!("unknown option `{}`", s)),
