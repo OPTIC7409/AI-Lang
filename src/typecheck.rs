@@ -45,7 +45,15 @@ pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
         reassigned: top_locals.into_iter().filter_map(|r| if let VarRes::Local(s) = r { Some(s) } else { None }).collect(),
         ..Frame::default()
     };
-    let mut c = Checker { ctx, diags: Vec::new(), globals: HashMap::new(), frames: vec![top], reassigned_globals, divisions: HashSet::new() };
+    let mut c = Checker {
+        ctx,
+        diags: Vec::new(),
+        globals: HashMap::new(),
+        frames: vec![top],
+        reassigned_globals,
+        divisions: HashSet::new(),
+        lambda_hint: None,
+    };
     // Top-level statements first (in order), so that functions see the
     // types of the globals they use.
     for item in &prog.items {
@@ -86,6 +94,9 @@ struct Checker<'a> {
     reassigned_globals: HashSet<u32>,
     /// Where `/` was used (its result is a Float even for Ints).
     divisions: HashSet<Span>,
+    /// For an anonymous function passed to a built-in such as `map`: the
+    /// types its unannotated parameters will be called with.
+    lambda_hint: Option<Vec<Ty>>,
 }
 
 /// Record the variables that are assigned as a whole (`x = ...`), or passed
@@ -307,8 +318,13 @@ impl<'a> Checker<'a> {
             name: def.name.clone(),
             ..Frame::default()
         };
-        for p in &def.params {
-            let t = p.ty.as_ref().map_or(Ty::Any, |t| t.ty.clone());
+        let hint = self.lambda_hint.take().filter(|h| h.len() == def.params.len());
+        for (i, p) in def.params.iter().enumerate() {
+            let t = match (&p.ty, &hint) {
+                (Some(t), _) => t.ty.clone(),
+                (None, Some(h)) => h[i].clone(),
+                (None, None) => Ty::Any,
+            };
             frame.locals.insert(p.slot, t);
         }
         self.frames.push(frame);
@@ -326,7 +342,12 @@ impl<'a> Checker<'a> {
                 }
             }
             if let Some(pat) = &p.pat {
-                let t = p.ty.as_ref().map_or(Ty::Any, |t| t.ty.clone());
+                let i = def.params.iter().position(|q| std::ptr::eq(q, p)).unwrap_or(0);
+                let t = match (&p.ty, &hint) {
+                    (Some(t), _) => t.ty.clone(),
+                    (None, Some(h)) => h[i].clone(),
+                    (None, None) => Ty::Any,
+                };
                 self.bind(pat, &t, false);
             }
         }
@@ -694,7 +715,19 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Call { callee, args } => {
-                let arg_tys: Vec<(Option<Name>, Ty, Span)> = args.iter().map(|a| (a.name.clone(), self.expr(&a.value), a.value.span)).collect();
+                let builtin = match &callee.kind {
+                    ExprKind::Var(v) => self.builtin_name(v),
+                    _ => None,
+                };
+                let mut arg_tys: Vec<(Option<Name>, Ty, Span)> = Vec::with_capacity(args.len());
+                for (i, a) in args.iter().enumerate() {
+                    if let (Some(b), Some(first), ExprKind::Lambda(_)) = (builtin, arg_tys.first(), &a.value.kind) {
+                        self.lambda_hint = callback_params(b, &first.1, i);
+                    }
+                    let t = self.expr(&a.value);
+                    self.lambda_hint = None;
+                    arg_tys.push((a.name.clone(), t, a.value.span));
+                }
                 match &callee.kind {
                     ExprKind::Var(v) => self.call_named(v, None, &arg_tys, e.span),
                     // A function value's result is not checked against a
@@ -708,7 +741,16 @@ impl<'a> Checker<'a> {
             }
             ExprKind::MethodCall { receiver, method, args, mutating, .. } => {
                 let rt = self.expr(receiver);
-                let arg_tys: Vec<(Option<Name>, Ty, Span)> = args.iter().map(|a| (a.name.clone(), self.expr(&a.value), a.value.span)).collect();
+                let builtin = self.builtin_name(method);
+                let mut arg_tys: Vec<(Option<Name>, Ty, Span)> = Vec::with_capacity(args.len());
+                for (i, a) in args.iter().enumerate() {
+                    if let (Some(b), ExprKind::Lambda(_)) = (builtin, &a.value.kind) {
+                        self.lambda_hint = callback_params(b, &rt, i + 1);
+                    }
+                    let t = self.expr(&a.value);
+                    self.lambda_hint = None;
+                    arg_tys.push((a.name.clone(), t, a.value.span));
+                }
                 // A record's own field, or a function from the module that
                 // declared the receiver's type, may take precedence.
                 if self.field_type(&rt, &method.name).is_some()
@@ -901,6 +943,18 @@ impl<'a> Checker<'a> {
                 _ => vec![],
             },
             _ => vec![],
+        }
+    }
+
+    /// The name of the built-in a name refers to (not shadowed by a user
+    /// function).
+    fn builtin_name(&self, v: &Var) -> Option<&'static str> {
+        match v.res {
+            VarRes::Global(s) => match self.ctx.globals[s as usize].kind {
+                GlobalKind::Builtin(i) => Some(crate::builtins::BUILTINS[i as usize].name),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -1124,6 +1178,38 @@ fn tail_span(e: &Expr) -> Span {
         },
         _ => e.span,
     }
+}
+
+/// The types a built-in calls its callback argument (at position `pos`,
+/// counting the collection as 0) with, given the collection's type:
+/// `xs.map(fn(x) => ...)` on a `List[Int]` calls it with an Int.
+fn callback_params(name: &str, coll: &Ty, pos: usize) -> Option<Vec<Ty>> {
+    let seq = matches!(coll, Ty::List(_) | Ty::Set(_) | Ty::Range | Ty::Str);
+    let elem = element(coll);
+    let known = |t: &Ty| !matches!(t, Ty::Any | Ty::Generic(_) | Ty::Param(..));
+    let named_arg = |i: usize| match coll {
+        Ty::Named { id, args, .. } if (*id == OPTION_ID || *id == RESULT_ID) && args.len() > i => Some(args[i].clone()),
+        _ => None,
+    };
+    let params = match (name, pos) {
+        (
+            "map" | "filter" | "each" | "find" | "find_index" | "take_while" | "drop_while" | "flat_map" | "min_by" | "max_by" | "sort_by"
+            | "group_by" | "partition" | "any" | "all" | "count",
+            1,
+        ) if seq => {
+            vec![elem]
+        }
+        ("fold", 2) if seq => vec![Ty::Any, elem],
+        ("reduce", 1) if seq => vec![Ty::Any, elem],
+        ("sort_with", 1) if seq => vec![elem.clone(), elem],
+        ("map" | "and_then", 1) => vec![named_arg(0)?],
+        ("map_err", 1) => match coll {
+            Ty::Named { id, .. } if *id == RESULT_ID => vec![named_arg(1)?],
+            _ => return None,
+        },
+        _ => return None,
+    };
+    params.iter().any(known).then_some(params)
 }
 
 /// What a built-in's positional parameter must be, where that is certain

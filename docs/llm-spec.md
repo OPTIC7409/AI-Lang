@@ -500,7 +500,9 @@ mistake (`cogito FILE` shows these warnings too, except unused variables).
 annotations, and the signatures of functions, constructors and common
 built-ins. Where a value's type is known and can never fit what is
 expected, the program is rejected before it runs: a call argument against a
-parameter annotation or a built-in's parameter (`"a,b".split(1)`), a
+parameter annotation or a built-in's parameter (`"a,b".split(1)`; the
+parameters of an anonymous function passed to `map`, `filter`, `fold` and
+the like get the element type: `[1, 2].map(fn(n) => n.upper())`), a
 returned value against the return type, a `let` or
 assignment against its annotation (including record fields and elements of
 declared collections), a non-Bool condition, operators on the wrong kinds
