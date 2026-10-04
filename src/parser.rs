@@ -104,14 +104,14 @@ fn new_fn(name: Option<Name>, name_span: Span, span: Span, params: Vec<Param>, b
 pub fn type_name_hint(name: &str) -> Option<&'static str> {
     Some(match name {
         "int" | "i64" | "integer" | "i32" | "usize" => "Int",
-        "float" | "f64" | "double" | "number" => "Float",
+        "float" | "f64" | "double" => "Float",
         "str" | "string" | "String" => "Str",
         "bool" | "boolean" => "Bool",
         "list" | "array" | "vec" | "Vec" | "Array" | "ArrayList" => "List",
         "map" | "dict" | "hashmap" | "HashMap" | "Dict" | "BTreeMap" => "Map",
         "set" | "HashSet" | "BTreeSet" => "Set",
         "Integer" | "Long" => "Int",
-        "Double" | "Number" => "Float",
+        "Double" => "Float",
         "Boolean" => "Bool",
         "any" => "Any",
         "unit" | "void" | "None" => "Unit",
@@ -487,7 +487,8 @@ impl<'s> Parser<'s> {
             }
             // A parameter may be a destructuring pattern: `fn((k, v)) => ...`,
             // `fn norm(Point(x, y): Point)`.
-            let ctor = matches!(self.peek(), Tok::Upper(_)) && self.peek_at(1) == &Tok::LParen;
+            let ctor = (matches!(self.peek(), Tok::Upper(_)) && self.peek_at(1) == &Tok::LParen)
+                || (matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Dot && matches!(self.peek_at(2), Tok::Upper(_)));
             let (name, span, pat) = if ctor || matches!(self.peek(), Tok::LParen | Tok::LBracket | Tok::LBrace) {
                 let pat = self.pattern_primary()?;
                 (Rc::from(format!("__arg{}", params.len()).as_str()), pat.span, Some(pat))
@@ -729,13 +730,8 @@ impl<'s> Parser<'s> {
                 self.bump();
                 self.skip_newlines();
                 let value = self.expr()?;
-                if matches!(&value.kind, ExprKind::Block(b) if b.is_empty())
-                    && self.src[value.span.start as usize..value.span.end as usize].trim() == "{}"
-                {
-                    return Err(Diagnostic::error("E0010", "`{}` is an empty block, not an empty map")
-                        .at(value.span)
-                        .help("an empty map is `[:]` (with entries: `[\"a\": 1]`); an empty list is `[]`")
-                        .fix(value.span, "[:]"));
+                if self.empty_braces(&value) {
+                    return Err(self.empty_braces_error(&value, ty.as_ref()));
                 }
                 if self.at(&Tok::Else) {
                     return Err(Diagnostic::error("E0001", format!("Cogito has no `{} ... else`", kw))
@@ -785,7 +781,7 @@ impl<'s> Parser<'s> {
                     self.bump();
                     check_place(&e)?;
                     self.skip_newlines();
-                    let value = self.expr()?;
+                    let value = self.value_expr()?;
                     let span = e.span.to(value.span);
                     return Ok(Stmt { kind: StmtKind::Assign { target: e, op, value, ty: None }, span });
                 }
@@ -1110,7 +1106,7 @@ impl<'s> Parser<'s> {
                     .at(self.span())
                     .help("spreads work in list literals, records and patterns: to pass the elements as one list, write `f([a, ..xs])`"));
             }
-            let value = self.expr()?;
+            let value = self.value_expr()?;
             if name.is_none() && args.iter().any(|a: &Arg| a.name.is_some()) {
                 return Err(Diagnostic::error("E0108", "positional arguments must come before named arguments")
                     .at(value.span)
@@ -1199,10 +1195,16 @@ impl<'s> Parser<'s> {
                                     span,
                                 );
                             } else if name.ends_with('!') {
-                                return Err(Diagnostic::error("E0111", format!("mutating function `{}` must be called", name))
+                                let mut d = Diagnostic::error("E0111", format!("mutating function `{}` must be called", name))
                                     .at(name_span)
-                                    .help(format!("write `.{}()`", name))
-                                    .fix(Span::new(name_span.file, name_span.end as usize, name_span.end as usize), "()"));
+                                    .help(format!("write `.{}(...)`", name));
+                                // (Certain only for built-ins that take nothing but the receiver.)
+                                if crate::builtins::BUILTINS.iter().any(|b| b.name == &*name && b.max == 1) {
+                                    d = d
+                                        .help(format!("write `.{}()`", name))
+                                        .fix(Span::new(name_span.file, name_span.end as usize, name_span.end as usize), "()");
+                                }
+                                return Err(d);
                             } else {
                                 let span = e.span.to(name_span);
                                 e = mk(ExprKind::Field { target: Box::new(e), name, name_span }, span);
@@ -1472,6 +1474,42 @@ impl<'s> Parser<'s> {
         Some(d)
     }
 
+    /// An expression where a value is written (an element, an argument, an
+    /// assignment): `{}` there is a map from another language.
+    fn value_expr(&mut self) -> PResult<Expr> {
+        let e = self.expr()?;
+        if self.empty_braces(&e) {
+            return Err(self.empty_braces_error(&e, None));
+        }
+        Ok(e)
+    }
+
+    /// Whether `e` is `{}` (an empty block, with nothing but spaces inside).
+    fn empty_braces(&self, e: &Expr) -> bool {
+        let t = &self.src[e.span.start as usize..e.span.end as usize];
+        matches!(&e.kind, ExprKind::Block(b) if b.is_empty())
+            && t.len() >= 2
+            && t.starts_with('{')
+            && t.ends_with('}')
+            && t[1..t.len() - 1].trim().is_empty()
+    }
+
+    fn empty_braces_error(&self, e: &Expr, ty: Option<&TypeExpr>) -> Diagnostic {
+        let declared = ty.map(|t| match &t.kind {
+            TypeExprKind::Named(n, _) => n.rsplit('.').next().unwrap_or("").to_string(),
+            _ => String::new(),
+        });
+        let (what, empty) = match declared.as_deref() {
+            Some("Set") => ("an empty set", "to_set([])"),
+            Some("List") => ("an empty list", "[]"),
+            _ => ("an empty map", "[:]"),
+        };
+        Diagnostic::error("E0010", format!("`{{}}` is an empty block, not {}", what))
+            .at(e.span)
+            .help("an empty map is `[:]` (with entries: `[\"a\": 1]`), an empty list `[]`, an empty set `to_set([])`")
+            .fix(e.span, empty)
+    }
+
     fn brace_is_record(&self) -> bool {
         let mut i = self.pos + 1;
         while i < self.toks.len() && self.toks[i].tok == Tok::Newline {
@@ -1507,7 +1545,7 @@ impl<'s> Parser<'s> {
                 }
                 self.expect(&Tok::Colon, "`:` after the field name")?;
                 self.skip_newlines();
-                let v = self.expr()?;
+                let v = self.value_expr()?;
                 names.push(name);
                 values.push(v);
             }
@@ -1533,19 +1571,19 @@ impl<'s> Parser<'s> {
             return Ok(mk(ExprKind::Map(vec![]), open.to(close)));
         }
         let first_spread = self.eat(&Tok::DotDot);
-        let first = self.expr()?;
+        let first = self.value_expr()?;
         if !first_spread && self.at(&Tok::Colon) {
             // map literal
             self.bump();
-            let v = self.expr()?;
+            let v = self.value_expr()?;
             let mut entries = vec![(first, v)];
             while self.eat(&Tok::Comma) {
                 if self.at(&Tok::RBracket) {
                     break;
                 }
-                let k = self.expr()?;
+                let k = self.value_expr()?;
                 self.expect(&Tok::Colon, "`:` between key and value")?;
-                let v = self.expr()?;
+                let v = self.value_expr()?;
                 entries.push((k, v));
             }
             let close = self.expect_closing(&Tok::RBracket, open, "`,` or `]` in map literal")?;
@@ -1576,7 +1614,7 @@ impl<'s> Parser<'s> {
                 break;
             }
             let spread = self.eat(&Tok::DotDot);
-            items.push(ListItem { expr: self.expr()?, spread });
+            items.push(ListItem { expr: self.value_expr()?, spread });
         }
         let close = self.expect_closing(&Tok::RBracket, open, "`,` or `]` in list")?;
         Ok(mk(ExprKind::List(items), open.to(close)))
@@ -1599,7 +1637,7 @@ impl<'s> Parser<'s> {
         self.bump();
         check_place(&e)?;
         self.skip_newlines();
-        let value = self.expr()?;
+        let value = self.value_expr()?;
         let span = e.span.to(value.span);
         let stmt = Stmt { kind: StmtKind::Assign { target: e, op, value, ty: None }, span };
         Ok(mk(ExprKind::Block(vec![stmt]), span))
@@ -1839,6 +1877,8 @@ impl<'s> Parser<'s> {
                 let mut d = Diagnostic::error("E0013", format!("type names start with an uppercase letter, found `{}`", name)).at(start);
                 if let Some(h) = type_name_hint(&name) {
                     d = d.help(format!("did you mean `{}`?", h)).fix(start, h);
+                } else if &*name == "number" {
+                    d = d.help("use `Int` for whole numbers and `Float` for the others (an Int is accepted where a Float is expected)");
                 }
                 Err(d)
             }

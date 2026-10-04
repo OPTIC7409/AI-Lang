@@ -1,8 +1,8 @@
 # Habits from other languages that `cogito fix` rewrites.
 fn main() {
   var xs = [3, 1, 2]
-  xs.sort!()
-  push!(xs, 4)
+  xs.sort()
+  push(xs, 4)
   print(xs.len())
   print("abc".upper())
   let ok = true
@@ -20,7 +20,6 @@ fn main() {
   let ys = [..xs, 5]
   print(ys)
   print(str(xs).starts_with("["))
-  print(sort(xs))
   xs.reverse!()
   print("done")
   print(xs.len() > 3

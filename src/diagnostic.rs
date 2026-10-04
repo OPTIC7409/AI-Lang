@@ -141,11 +141,13 @@ impl Diagnostic {
             .iter()
             .filter(|x| (x.span.file as usize) < sm.files.len())
             .map(|x| {
-                let old = sm.snippet(x.span).trim();
-                match (old.is_empty(), x.text.trim().is_empty()) {
-                    (true, _) => format!("insert `{}`", x.text.trim()),
+                // (On one line: runs of spaces and line breaks become one space.)
+                let one_line = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+                let (old, new) = (one_line(sm.snippet(x.span)), one_line(&x.text));
+                match (old.is_empty(), new.is_empty()) {
+                    (true, _) => format!("insert `{}`", new),
                     (false, true) => format!("remove `{}`", old),
-                    (false, false) => format!("`{}` → `{}`", old, x.text.trim()),
+                    (false, false) => format!("`{}` → `{}`", old, new),
                 }
             })
             .collect();

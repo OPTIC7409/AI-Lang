@@ -294,6 +294,25 @@ pub fn compatible(ctx: &Ctx, a: &Ty, e: &Ty) -> bool {
     }
 }
 
+/// Whether no value of type `a` can equal a value of type `b`. Values of
+/// the same kind of collection or the same declared type can always be
+/// equal, whatever their element types (`[] == []`, `None == None`).
+fn never_equal(a: &Ty, b: &Ty) -> bool {
+    use Ty::*;
+    match (a, b) {
+        _ if a.is_any() || b.is_any() => false,
+        (Int | Float, Int | Float) => false,
+        (List(_), List(_)) | (Set(_), Set(_)) | (Map(..), Map(..)) => false,
+        (Tuple(x), Tuple(y)) => x.len() != y.len() || x.iter().zip(y).any(|(p, q)| never_equal(p, q)),
+        (Named { id: x, .. }, Named { id: y, .. }) => x != y,
+        // (A record and a declared record type, or two records: left to
+        // `compatible`.)
+        (Record(_) | Named { .. }, Record(_) | Named { .. }) => false,
+        (Fn(..) | AnyFn, Fn(..) | AnyFn) => false,
+        _ => std::mem::discriminant(a) != std::mem::discriminant(b),
+    }
+}
+
 /// The type that results from joining two branches.
 fn join(a: Ty, b: Ty) -> Ty {
     if a == b {
@@ -1329,7 +1348,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A call of a named function (with the receiver, for method syntax).
     /// An anonymous function passed to a built-in that calls it with a
     /// different number of arguments (`[1, 2].map(fn(a, b) => a)`).
     fn callback_arity(&mut self, b: &str, coll: &Ty, pos: usize, arg: &Expr) {
@@ -1361,6 +1379,7 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A call of a named function (with the receiver, for method syntax).
     fn call_named(&mut self, v: &Var, receiver: Option<(Ty, Span)>, args: &[(Option<Name>, Ty, Span)], span: Span) -> Ty {
         let mut all: Vec<(Option<Name>, Ty, Span)> = Vec::new();
         let receiver_given = receiver.is_some();
@@ -1519,7 +1538,7 @@ impl<'a> Checker<'a> {
         match op {
             Eq | Ne => {
                 // Values of different types are never equal.
-                if !unknown(l) && !unknown(r) && !self.compatible(l, r) && !self.compatible(r, l) {
+                if !unknown(l) && !unknown(r) && never_equal(l, r) && !self.compatible(l, r) && !self.compatible(r, l) {
                     let always = if op == Eq { "false" } else { "true" };
                     let why = match (l, r) {
                         (Ty::Named { id: x, name, .. }, Ty::Named { id: y, .. }) if x != y && l.to_string() == r.to_string() => {

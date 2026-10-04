@@ -399,7 +399,7 @@ fn confusion_hint(name: &str) -> Option<&'static str> {
         "trim_right" | "rtrim" | "rstrip" | "trimEnd" | "trim_end_matches" => "use `trim_end` (or `strip_suffix` to remove a given suffix)",
         "strip" => "use `trim` (whitespace), or `strip_prefix` / `strip_suffix`",
         "substring" | "substr" | "subList" | "sublist" => "use `slice(start, end)` or indexing with a range: `s[1..4]`",
-        "indexOf" | "find_str" | "search" => "use `index_of(x)`, which returns an Option",
+        "indexOf" | "find_str" | "search" => "use `index_of(x)`, which returns an Option (`None` when it is absent, never -1)",
         "includes" | "contains_key" | "has_key" | "containsKey" => "use `contains` (lists, strings) or `has` (map keys)",
         "startswith" | "startsWith" => "use `starts_with`",
         "endswith" | "endsWith" => "use `ends_with`",
@@ -409,7 +409,7 @@ fn confusion_hint(name: &str) -> Option<&'static str> {
         "split_whitespace" => "use `words`",
         "foreach" | "for_each" | "forEach" | "iter" => "use a `for` loop, or `each(f)` to call a function on every element",
         "reversed" => "use `reverse` (a new value) or `reverse!` (in place)",
-        "sorted" => "use `sort` (a new value) or `sort!` (in place)",
+        "sorted" => "use `sort` (a new value) or `sort!` (in place); for the sorted keys of a map, `m.keys().sort()`",
         "items" | "iteritems" | "pairs" => "use `entries` (a list of `(key, value)` tuples), or `for (k, v) in m`",
         "extend" | "concat" | "append_all" => "use `xs + ys` (a new list) or `extend!` (in place)",
         "pop" | "pop_back" => "use `pop!`, which removes the last element of a `var` and returns it as an Option",
@@ -453,13 +453,10 @@ fn confusion_fix(name: &str, call: bool) -> Option<&'static str> {
         "trim_right" | "rtrim" | "rstrip" | "trimEnd" => "trim_end",
         "startswith" | "startsWith" => "starts_with",
         "endswith" | "endsWith" => "ends_with",
-        "indexOf" => "index_of",
         "includes" => "contains",
         "contains_key" | "has_key" | "containsKey" => "has",
         "to_string" | "toString" | "to_str" => "str",
         "split_whitespace" => "words",
-        "reversed" => "reverse",
-        "sorted" => "sort",
         "items" | "iteritems" => "entries",
         "isEmpty" | "empty" => "is_empty",
         "parseInt" | "atoi" => "parse_int",
@@ -470,17 +467,6 @@ fn confusion_fix(name: &str, call: bool) -> Option<&'static str> {
 
 impl<'a> Resolver<'a> {
     // ------------------------------------------------------------ utilities
-
-    /// Whether `v` names a variable declared with `var` (and not captured).
-    fn is_var(&self, v: &Var) -> bool {
-        match v.res {
-            VarRes::Local(s) => {
-                self.fns.last().is_some_and(|f| f.scopes.iter().flat_map(|sc| sc.locals.iter()).any(|l| l.slot == s && l.name == v.name && l.mutable))
-            }
-            VarRes::Global(s) => matches!(self.ctx.globals[s as usize].kind, GlobalKind::Var),
-            _ => false,
-        }
-    }
 
     /// The span of the whole line holding `span` (with its newline), when
     /// nothing else is on it; otherwise `span` itself.
@@ -571,6 +557,11 @@ impl<'a> Resolver<'a> {
         local.is_some_and(|l| l.kind == LocalKind::Param)
     }
 
+    /// Whether `name` is a local variable (of this function or an enclosing one).
+    fn is_local(&self, name: &str) -> bool {
+        self.fns.iter().any(|f| f.scopes.iter().any(|s| s.locals.iter().any(|l| &*l.name == name)))
+    }
+
     /// The kind of the local variable `name` of the current function.
     fn local_kind(&self, name: &str) -> Option<LocalKind> {
         let f = self.fns.last()?;
@@ -641,13 +632,19 @@ impl<'a> Resolver<'a> {
             Ty::Named { id, .. } if *id == crate::types::OPTION_ID || *id == crate::types::RESULT_ID => Some(*id),
             _ => None,
         };
+        // (Every form of the signature must agree: `min(xs) -> Option[T]`,
+        // but `min(a, b) -> T`.)
         let builtin_kind = |i: u16| {
             let sig = crate::builtins::BUILTINS[i as usize].doc.lines().next().unwrap_or("");
-            match (sig.contains("-> Option"), sig.contains("-> Result")) {
-                (true, false) => Some(crate::types::OPTION_ID),
-                (false, true) => Some(crate::types::RESULT_ID),
-                _ => None,
-            }
+            let kinds: Vec<Option<u32>> = sig
+                .split(" | ")
+                .map(|form| match form.split("->").nth(1).map(str::trim) {
+                    Some(r) if r.starts_with("Option") => Some(crate::types::OPTION_ID),
+                    Some(r) if r.starts_with("Result") => Some(crate::types::RESULT_ID),
+                    _ => None,
+                })
+                .collect();
+            kinds.iter().all(|k| *k == kinds[0]).then(|| kinds[0]).flatten()
         };
         let info = &self.ctx.globals[slot as usize];
         match &info.kind {
@@ -786,13 +783,17 @@ impl<'a> Resolver<'a> {
             }
         } else if let Some(alias) = self.module_with(name) {
             d = d.help(format!("`{}` is defined in the imported module `{}`: write `{}.{}`", name, alias, alias, name));
-            if self.modules_with(name) == 1 {
-                d = d.fix(span, format!("{}.{}", alias, name));
+            // (Only the name: the span of a pattern covers its fields too.
+            // Not when a local variable hides the module's name.)
+            let name_span = Span::new(span.file, span.start as usize, span.start as usize + name.len());
+            if self.modules_with(name) == 1 && self.ctx.sm.snippet(name_span) == name && !self.is_local(&alias) {
+                d = d.fix(name_span, format!("{}.{}", alias, name));
             }
         } else if let Some(h) = confusion_hint(name) {
             d = d.help(h);
-            if let Some(r) = confusion_fix(name, what == "function") {
-                d = d.fix(span, r);
+            let name_span = Span::new(span.file, span.start as usize, span.start as usize + name.len());
+            if let Some(r) = confusion_fix(name, what == "function").filter(|_| self.ctx.sm.snippet(name_span) == name) {
+                d = d.fix(name_span, r);
             }
         } else if let Some(s) = suggest(name, names.iter().map(|s| s.as_str())) {
             d = d.help(format!("did you mean `{}`?", s));
@@ -1092,6 +1093,9 @@ impl<'a> Resolver<'a> {
         // Pass 4: bodies and top-level statements, in order.
         self.fns.push(FnCtx::new(FnKind::TopLevel, false, None));
         let n_items = prog.items.len();
+        // (The last top-level statement: an explicit `main()` there can be
+        // removed without changing the order of the output.)
+        let last_stmt = prog.items.iter().rposition(|i| matches!(i, Item::Stmt(_)));
         for (idx, item) in prog.items.iter_mut().enumerate() {
             let last_item = idx + 1 == n_items;
             match item {
@@ -1141,10 +1145,12 @@ impl<'a> Resolver<'a> {
                     if let StmtKind::Expr(Expr { kind: ExprKind::Call { callee, args }, span }) = &s.kind {
                         let main_fn = self.ns.values.get("main").is_some_and(|&slot| matches!(self.ctx.globals[slot as usize].kind, GlobalKind::Fn));
                         if !self.repl && args.is_empty() && main_fn && matches!(&callee.kind, ExprKind::Var(v) if &*v.name == "main") {
-                            let d = Diagnostic::warning("W0007", "`main` runs twice: here, and again after the top-level statements")
+                            let mut d = Diagnostic::warning("W0007", "`main` runs twice: here, and again after the top-level statements")
                                 .at(*span)
-                                .help("`fn main()` is called automatically; remove this call")
-                                .fix(self.whole_line(*span), "");
+                                .help("`fn main()` is called automatically, after all the top-level statements; remove this call");
+                            if last_stmt == Some(idx) {
+                                d = d.fix(self.whole_line(*span), "");
+                            }
                             self.diags.push(d);
                         }
                     }
@@ -2089,20 +2095,7 @@ impl<'a> Resolver<'a> {
         } else {
             format!("`{}` returns a new value and does not change its arguments; store the result, e.g. `let y = ...`", name)
         };
-        let mut d = Diagnostic::warning("W0003", format!("the result of `{}` is unused", name)).at(e.span).help(help);
-        // `xs.push(x)` on a `var`: the call was meant to change it.
-        if self.ctx.builtins.values.contains_key(twin.as_str()) {
-            let target = match &e.kind {
-                ExprKind::MethodCall { receiver, method_span, .. } => Some((&**receiver, *method_span)),
-                ExprKind::Call { callee, args } => args.first().filter(|a| a.name.is_none()).map(|a| (&a.value, callee.span)),
-                _ => None,
-            };
-            if let Some((Expr { kind: ExprKind::Var(v), .. }, name_span)) = target {
-                if self.is_var(v) {
-                    d = d.fix(Span::new(name_span.file, name_span.end as usize, name_span.end as usize), "!");
-                }
-            }
-        }
+        let d = Diagnostic::warning("W0003", format!("the result of `{}` is unused", name)).at(e.span).help(help);
         self.diags.push(d);
     }
 

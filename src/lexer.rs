@@ -379,6 +379,99 @@ impl<'a> Lexer<'a> {
         format!("{}{}{}", before, word, after)
     }
 
+    /// Whether the tokens since the start of the statement are one place
+    /// (`i`, `p.count`, `xs[0]`): `x++` is then a whole statement, not part
+    /// of an expression (`let y = i++`).
+    fn operand_starts_statement(&self) -> bool {
+        let mut k = self.toks.len();
+        let mut depth = 0i32;
+        while k > 0 {
+            match &self.toks[k - 1].tok {
+                Tok::RBracket => depth += 1,
+                Tok::LBracket => depth -= 1,
+                Tok::Ident(_) | Tok::Upper(_) | Tok::Dot | Tok::Int(_) => {}
+                _ if depth > 0 => {}
+                _ => break,
+            }
+            k -= 1;
+        }
+        k == 0 || matches!(self.toks[k - 1].tok, Tok::Newline | Tok::LBrace | Tok::Semi)
+    }
+
+    /// Whether the operand of a `!` that starts at `pos` is followed by
+    /// the end of a condition (`&&`, `||`, `)`, `{`, the end of the line,
+    /// ...) rather than by an operator that binds tighter than `not`.
+    fn not_operand_ends_clause(&self, pos: usize) -> bool {
+        let b = &self.b[..self.end];
+        let mut i = pos;
+        while i < b.len() && b[i] == b'!' {
+            i += 1;
+        }
+        // The operand: a name or a parenthesized expression, then calls,
+        // indexes and fields.
+        let skip_group = |mut i: usize| -> Option<usize> {
+            let (open, close) = (b[i], if b[i] == b'(' { b')' } else { b']' });
+            let mut depth = 0;
+            while i < b.len() {
+                match b[i] {
+                    c if c == open => depth += 1,
+                    c if c == close => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i + 1);
+                        }
+                    }
+                    b'"' | b'\n' => return None,
+                    _ => {}
+                }
+                i += 1;
+            }
+            None
+        };
+        if i < b.len() && matches!(b[i], b'(' | b'[') {
+            match skip_group(i) {
+                Some(j) => i = j,
+                None => return false,
+            }
+        } else {
+            let s = i;
+            while i < b.len() && (is_ident_char(b[i])) {
+                i += 1;
+            }
+            if i == s {
+                return false;
+            }
+        }
+        loop {
+            if i < b.len() && b[i] == b'!' && b.get(i + 1) != Some(&b'=') {
+                i += 1;
+            } else if i < b.len() && matches!(b[i], b'(' | b'[') {
+                match skip_group(i) {
+                    Some(j) => i = j,
+                    None => return false,
+                }
+            } else if i + 1 < b.len() && b[i] == b'.' && is_ident_start(b[i + 1]) {
+                i += 1;
+                while i < b.len() && is_ident_char(b[i]) {
+                    i += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        while i < b.len() && matches!(b[i], b' ' | b'\t') {
+            i += 1;
+        }
+        let rest = &b[i..];
+        let word = |w: &[u8]| rest.starts_with(w) && rest.get(w.len()).is_none_or(|c| !is_ident_char(*c));
+        rest.is_empty()
+            || matches!(rest[0], b')' | b']' | b'}' | b',' | b'{' | b';' | b'\n' | b'\r' | b'#')
+            || rest.starts_with(b"&&")
+            || rest.starts_with(b"||")
+            || word(b"and")
+            || word(b"or")
+    }
+
     /// Whether the statement ends at `pos` (only spaces or a comment
     /// follow on the line, or a `;` or `}`).
     fn statement_ends_at(&self, pos: usize) -> bool {
@@ -387,51 +480,54 @@ impl<'a> Lexer<'a> {
         matches!(rest.get(n), None | Some(b'\n' | b'#' | b';' | b'}'))
     }
 
-    /// `'text'` rewritten as a Cogito string, when the quote at `start`
-    /// is closed on the same line: the replacement and the end of the
-    /// quoted text.
-    fn single_quoted(&self, start: usize) -> Option<(String, usize)> {
-        let mut out = String::from("\"");
-        let mut chars = self.src[start + 1..self.end].char_indices();
-        while let Some((i, ch)) = chars.next() {
-            match ch {
-                '\'' => {
-                    out.push('"');
-                    return Some((out, start + 1 + i + 1));
-                }
-                '\n' => return None,
-                '"' => out.push_str("\\\""),
-                '{' => out.push_str("\\{"),
-                '}' => out.push_str("\\}"),
-                '\\' => match chars.next() {
-                    Some((_, '\'')) => out.push('\''),
-                    Some((_, c)) => {
-                        out.push('\\');
-                        out.push(c);
-                    }
-                    None => return None,
-                },
-                c => out.push(c),
-            }
+    /// A string literal from another language starting at `start` (a single
+    /// quote, possibly after an `f`/`r`/`u` prefix token): the span to
+    /// replace and the Cogito string, when the translation is certain.
+    fn single_quoted(&self, start: usize) -> Option<(usize, String, usize)> {
+        if self.src[start..self.end].starts_with("\'\'\'") {
+            // (Python's triple quotes keep indentation and the first line
+            // break, which Cogito's `"""` strings do not.)
+            return None;
         }
-        None
+        let prefix = match self.toks.last() {
+            Some(Token { tok: Tok::Ident(p), span }) if span.end as usize == start => Some((p.clone(), span.start as usize)),
+            _ => None,
+        };
+        let raw = prefix.as_ref().is_some_and(|(p, _)| &**p == "r");
+        let close = closing_quote(&self.src[start + 1..self.end], '\'', raw)?;
+        let body = &self.src[start + 1..start + 1 + close];
+        let end = start + 1 + close + 1;
+        let (from, text) = match prefix.as_ref().map(|(p, at)| (&**p, *at)) {
+            None => (start, format!("\"{}\"", convert_body(body, false)?)),
+            Some(("u", at)) => (at, format!("\"{}\"", convert_body(body, false)?)),
+            Some(("f", at)) => (at, format!("\"{}\"", convert_body(body, true)?)),
+            Some(("r", at)) if !body.contains('"') => (at, format!("r\"{}\"", body)),
+            Some(("r", at)) if !body.contains("\"#") => (at, format!("r#\"{}\"#", body)),
+            Some((p, _)) if p.len() > 2 || !p.chars().all(|c| matches!(c, 'f' | 'r' | 'b' | 'u')) => {
+                (start, format!("\"{}\"", convert_body(body, false)?))
+            }
+            _ => return None,
+        };
+        Some((from, text, end))
     }
 
     /// A JavaScript template literal `` `a ${b}` `` closed on the same line,
     /// as a Cogito string: the replacement and the end of the literal.
     fn template_literal(&self, start: usize) -> Option<(String, usize)> {
         let rest = &self.src[start + 1..self.end];
-        let close = rest.find(['`', '\n'])?;
-        if rest.as_bytes()[close] != b'`' {
-            return None;
-        }
-        let body = &rest[..close];
         let mut out = String::from("\"");
-        let mut chars = body.chars().peekable();
+        let mut chars = rest.char_indices().peekable();
         let mut depth = 0;
-        while let Some(c) = chars.next() {
+        while let Some((i, c)) = chars.next() {
             match c {
-                '$' if chars.peek() == Some(&'{') && depth == 0 => {
+                '\n' => return None,
+                '`' if depth == 0 => {
+                    out.push('"');
+                    return Some((out, start + 1 + i + 1));
+                }
+                // A template inside an interpolation.
+                '`' => return None,
+                '$' if depth == 0 && chars.peek().map(|x| x.1) == Some('{') => {
                     chars.next();
                     depth = 1;
                     out.push('{');
@@ -444,20 +540,24 @@ impl<'a> Lexer<'a> {
                     depth -= 1;
                     out.push('}');
                 }
+                _ if depth > 0 => out.push(c),
                 '{' | '}' => {
                     out.push('\\');
                     out.push(c);
                 }
-                '"' if depth == 0 => out.push_str("\\\""),
+                '"' => out.push_str("\\\""),
                 '\\' => {
-                    out.push('\\');
-                    out.push(chars.next()?);
+                    let (_, e) = chars.next()?;
+                    match e {
+                        '$' => out.push('$'),
+                        '`' => out.push('`'),
+                        _ => push_escape(&mut out, e, &mut chars.by_ref().map(|x| x.1))?,
+                    }
                 }
                 c => out.push(c),
             }
         }
-        out.push('"');
-        Some((out, start + 1 + close + 1))
+        None
     }
 
     fn newline_significant(&self) -> bool {
@@ -714,7 +814,7 @@ impl<'a> Lexer<'a> {
             b'-' => match c1 {
                 b'>' => (Tok::Arrow, 2),
                 b'=' => (Tok::MinusAssign, 2),
-                b'-' if self.after_operand() && self.statement_ends_at(start + 2) => {
+                b'-' if self.after_operand() && self.statement_ends_at(start + 2) && self.operand_starts_statement() => {
                     return Err(self
                         .err("E0010", "`--` is not an operator", start, start + 2)
                         .help("use `x -= 1` to decrement")
@@ -738,7 +838,7 @@ impl<'a> Lexer<'a> {
                 b'+' => {
                     let mut d =
                         self.err("E0010", "`++` is not an operator", start, start + 2).help("use `x += 1` to increment, or `+` to concatenate");
-                    if self.after_operand() && self.statement_ends_at(start + 2) {
+                    if self.after_operand() && self.statement_ends_at(start + 2) && self.operand_starts_statement() {
                         d = d.fix(Span::new(self.file, start, start + 2), self.spaced(start, start, "+= 1").trim_end().to_string());
                     }
                     return Err(d);
@@ -771,9 +871,12 @@ impl<'a> Lexer<'a> {
                     let d = self
                         .err("E0001", "unexpected character `!`", start, start + 1)
                         .help("use the keyword `not` for boolean negation, and `!=` for inequality");
-                    // `!x` in front of an operand reads as `not x`.
+                    // `!x` in front of an operand reads as `not x` (a certain
+                    // fix only when nothing that binds tighter than `not`,
+                    // such as `<` in `!p < q`, follows the operand).
                     if !self.after_operand() && (is_ident_start(c1) || matches!(c1, b'(' | b'[' | b'!')) {
-                        self.substituted.push(d.fix(Span::new(self.file, start, start + 1), "not "));
+                        let d = if self.not_operand_ends_clause(start + 1) { d.fix(Span::new(self.file, start, start + 1), "not ") } else { d };
+                        self.substituted.push(d);
                         (Tok::Not, 1)
                     } else {
                         return Err(d);
@@ -831,8 +934,8 @@ impl<'a> Lexer<'a> {
                 let mut d = self
                     .err("E0001", "unexpected character `'`", start, start + 1)
                     .help("strings use double quotes: \"text\" (there is no separate character type)");
-                if let Some((text, end)) = self.single_quoted(start) {
-                    d = d.fix(Span::new(self.file, start, end), text);
+                if let Some((from, text, end)) = self.single_quoted(start) {
+                    d = d.fix(Span::new(self.file, from, end), text);
                 }
                 return Err(d);
             }
@@ -845,15 +948,17 @@ impl<'a> Lexer<'a> {
                 };
                 let mut d = self.err("E0001", format!("unexpected character {}", shown), start, start + ch.len_utf8());
                 if matches!(ch, '“' | '”' | '‘' | '’') {
-                    d = d.help("this is a typographic quote; use a plain `\"`").fix(Span::new(self.file, start, start + ch.len_utf8()), "\"");
-                    // Its closing quote, if it is on the same line.
+                    d = d.help("this is a typographic quote; use a plain `\"`");
+                    // The whole quoted text, if it is closed on the same line.
                     let from = start + ch.len_utf8();
                     let line = &self.src[from..self.end];
                     let line = &line[..line.find('\n').unwrap_or(line.len())];
                     let pair: [char; 2] = if matches!(ch, '“' | '”') { ['“', '”'] } else { ['‘', '’'] };
                     if let Some(i) = line.find(pair) {
                         let q = line[i..].chars().next().unwrap_or('"');
-                        d = d.fix(Span::new(self.file, from + i, from + i + q.len_utf8()), "\"");
+                        if let Some(body) = convert_body(&line[..i], false) {
+                            d = d.fix(Span::new(self.file, start, from + i + q.len_utf8()), format!("\"{}\"", body));
+                        }
                     }
                 } else if ch == ';' {
                 } else if !ch.is_ascii() {
@@ -1236,6 +1341,116 @@ pub fn dedent(raw: &str) -> String {
     }
     let indent = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start_matches([' ', '\t']).len()).min().unwrap_or(0);
     lines.iter().map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() }).collect::<Vec<_>>().join("\n")
+}
+
+/// Where a string body ends: the index of the unescaped `quote` in `s`, on
+/// the same line.
+fn closing_quote(s: &str, quote: char, raw: bool) -> Option<usize> {
+    let mut chars = s.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\n' => return None,
+            '\\' => {
+                chars.next();
+            }
+            c if c == quote => return Some(i),
+            _ => {}
+        }
+    }
+    let _ = raw;
+    None
+}
+
+/// The body of a string from another language (a single-quoted or
+/// typographically quoted string; `interp` for a Python f-string) as the
+/// body of a Cogito string; `None` when an escape has no certain
+/// equivalent.
+fn convert_body(body: &str, interp: bool) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = body.chars().peekable();
+    let mut depth = 0;
+    while let Some(c) = chars.next() {
+        match c {
+            // Inside `{...}` of an f-string, the expression is kept as it is.
+            '{' if interp && depth == 0 && chars.peek() == Some(&'{') => {
+                chars.next();
+                out.push_str("\\{");
+            }
+            '}' if interp && depth == 0 && chars.peek() == Some(&'}') => {
+                chars.next();
+                out.push_str("\\}");
+            }
+            '{' if interp => {
+                depth += 1;
+                out.push('{');
+            }
+            '}' if interp && depth > 0 => {
+                depth -= 1;
+                out.push('}');
+            }
+            _ if depth > 0 => out.push(c),
+            '{' | '}' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '"' => out.push_str("\\\""),
+            '\\' => {
+                let e = chars.next()?;
+                match e {
+                    '\'' => out.push('\''),
+                    '"' => out.push_str("\\\""),
+                    _ => push_escape(&mut out, e, &mut chars)?,
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    (depth == 0).then_some(out)
+}
+
+/// The Cogito form of the escape `\e` (with what follows in `rest`):
+/// the escapes Cogito shares, and `\uXXXX`/`\xHH` as `\u{...}`.
+fn push_escape(out: &mut String, e: char, rest: &mut dyn Iterator<Item = char>) -> Option<()> {
+    match e {
+        'n' | 't' | 'r' | '0' | '\\' => {
+            out.push('\\');
+            out.push(e);
+        }
+        'u' => {
+            let first = rest.next()?;
+            out.push_str("\\u{");
+            if first == '{' {
+                loop {
+                    let c = rest.next()?;
+                    if c == '}' {
+                        break;
+                    }
+                    c.is_ascii_hexdigit().then_some(())?;
+                    out.push(c);
+                }
+            } else {
+                first.is_ascii_hexdigit().then_some(())?;
+                out.push(first);
+                for _ in 0..3 {
+                    let c = rest.next()?;
+                    c.is_ascii_hexdigit().then_some(())?;
+                    out.push(c);
+                }
+            }
+            out.push('}');
+        }
+        'x' => {
+            out.push_str("\\u{");
+            for _ in 0..2 {
+                let c = rest.next()?;
+                c.is_ascii_hexdigit().then_some(())?;
+                out.push(c);
+            }
+            out.push('}');
+        }
+        _ => return None,
+    }
+    Some(())
 }
 
 #[cfg(test)]

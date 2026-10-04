@@ -324,18 +324,18 @@ fn language_server_reports_diagnostics() {
     let hover = recv();
     assert!(hover.contains("n: Int"), "{}", hover);
     // Code actions: the fix for the problem at the cursor, and "fix all".
-    let src = "var xs = [2, 1]\nxs.sort()\nprint(xs.length())\n";
+    let src = "var xs = [2, 1]\nprint(xs.length())\nprint(xs.size())\n";
     send(&format!(
         r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"file:///tmp/x.cog","version":4}},"contentChanges":[{{"text":{}}}]}}}}"#,
         cogito::json::Json::str(src)
     ));
     recv();
     send(
-        r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"range":{"start":{"line":2,"character":12},"end":{"line":2,"character":12}},"context":{"diagnostics":[]}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"range":{"start":{"line":1,"character":12},"end":{"line":1,"character":12}},"context":{"diagnostics":[]}}}"#,
     );
     let actions = recv();
     assert!(actions.contains("\"kind\":\"quickfix\"") && actions.contains("\"newText\":\"len\""), "{}", actions);
-    assert!(actions.contains("Fix all 2 automatically fixable problems") && actions.contains("\"newText\":\"!\""), "{}", actions);
+    assert!(actions.contains("Fix all 2 automatically fixable problems") && !actions.contains("size"), "{}", actions);
     send(r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#);
     assert!(recv().contains("\"id\":2"));
     send(r#"{"jsonrpc":"2.0","method":"exit"}"#);
