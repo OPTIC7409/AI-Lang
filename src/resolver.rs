@@ -2841,7 +2841,7 @@ impl<'a> Resolver<'a> {
             let is_ctor = |n: &str| self.global_slot(n).is_some_and(|s| matches!(self.ctx.globals[s as usize].kind, GlobalKind::Ctor(_)));
             let help = if matches!(&**name, "null" | "nil" | "undefined" | "NULL") {
                 Some("Cogito has no null: write `None` to match a missing Option value".to_string())
-            } else if &*upper != &**name && is_ctor(&upper) {
+            } else if *upper != **name && is_ctor(&upper) {
                 Some(format!("to match the constructor, write `{}`: constructors start with an uppercase letter", upper))
             } else {
                 None
