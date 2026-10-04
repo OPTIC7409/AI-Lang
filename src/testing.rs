@@ -474,6 +474,31 @@ fn bounds(def: &FnDef) -> Vec<Bound> {
         })
     }
     fn visit(def: &FnDef, e: &Expr, out: &mut [Bound]) {
+        // `s.contains("@")`, `s.starts_with("u-")`, `"@" in s`.
+        let text_clause = match &e.kind {
+            ExprKind::MethodCall { receiver, method, args, .. } if args.len() == 1 && args[0].name.is_none() => {
+                Some((&*method.name, &**receiver, &args[0].value))
+            }
+            ExprKind::Call { callee, args } if args.len() == 2 && args.iter().all(|a| a.name.is_none()) => match &callee.kind {
+                ExprKind::Var(v) => Some((&*v.name, &args[0].value, &args[1].value)),
+                _ => None,
+            },
+            ExprKind::Binary { op: BinOp::In, lhs, rhs } => Some(("contains", &**rhs, &**lhs)),
+            _ => None,
+        };
+        if let Some((name, subject, lit)) = text_clause {
+            if let (Some(i), ExprKind::Str(t)) = (param(def, subject), &lit.kind) {
+                if !t.is_empty() && matches!(name, "contains" | "starts_with" | "ends_with") {
+                    let tb = out[i].text.get_or_insert_with(Default::default);
+                    match name {
+                        "contains" => tb.contains.push(t.to_string()),
+                        "starts_with" => tb.prefix = Some(t.to_string()),
+                        _ => tb.suffix = Some(t.to_string()),
+                    }
+                }
+                return;
+            }
+        }
         match &e.kind {
             ExprKind::And(a, b) => {
                 visit(def, a, out);
@@ -893,7 +918,7 @@ fn run_verify_inner(it: &mut Interp, prog: &Program, file: &str, opts: &Options)
                 let rejected = discarded - missed.as_ref().map_or(0, |m| m.0);
                 let mut disc = if rejected > 0 { format!(", {} inputs rejected by `requires`", rejected) } else { String::new() };
                 if let Some((n, ty)) = &missed {
-                    disc.push_str(&format!(", {} attempt{} found no {}", n, if *n == 1 { "" } else { "s" }, ty));
+                    disc.push_str(&format!(", {} more skipped because no {} was found", n, ty));
                 }
                 out.push_str(&format!("  {}✓{} {:w$}  {}{} cases, {}{}{}\n", c.green, c.reset, name, c.dim, cases, what, disc, c.reset, w = width));
             }

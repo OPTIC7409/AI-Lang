@@ -1,7 +1,7 @@
 //! Random value generation and shrinking, driven by type annotations.
 //! Used by `property` blocks and by `cogito verify` (contract fuzzing).
 
-use crate::ast::{ExprKind, FnDef};
+use crate::ast::{BinOp, ExprKind, FnDef};
 use crate::diagnostic::Diagnostic;
 use crate::interp::Ctrl;
 use crate::interp::{Env, Interp, Rng};
@@ -22,6 +22,16 @@ pub struct Bound {
     pub int: Option<(Option<i64>, Option<i64>)>,
     pub float: Option<(Option<f64>, Option<f64>)>,
     pub len: Option<(Option<i64>, Option<i64>)>,
+    /// Text a Str must contain, start with, or end with
+    /// (`email.contains("@")`, `id.starts_with("u-")`).
+    pub text: Option<Box<TextBound>>,
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct TextBound {
+    pub contains: Vec<String>,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
 }
 
 /// How to generate the values of a record type that has an invariant.
@@ -57,6 +67,18 @@ pub struct Gen<'a> {
     /// How many more candidate records with invariants this case may try:
     /// for recursive types, retries at each level would multiply.
     pub inv_tries: u32,
+    /// Set while the later fields of a record with an invariant are
+    /// generated in "closed world" mode: their Ints and Strs are almost
+    /// always values generated before (map keys, amounts), so that clauses
+    /// such as `entries.all(fn(e) => accounts.has(e.account))` or two sums
+    /// being equal can hold.
+    /// (While set: the start of the part of `pool` generated for the
+    /// current record, which is where values are reused from.)
+    pub closed: Option<usize>,
+    /// The keys of the maps (and the elements of the sets) generated for
+    /// the current case: the identifiers that other fields refer to. In
+    /// closed-world mode, Ints and Strs mostly come from here.
+    pub keys: Vec<Value>,
 }
 
 /// Extreme Float values, likely to expose overflow to infinity (`a + b`,
@@ -83,7 +105,7 @@ fn mentions(ty: &Ty, id: u32) -> bool {
 
 impl<'a> Gen<'a> {
     pub fn new(it: &'a mut Interp, rng: &'a mut Rng, extremes: bool, plans: Rc<HashMap<u32, InvPlan>>) -> Gen<'a> {
-        Gen { it, rng, extremes, pool: Vec::new(), plans, missed: None, crashed: None, inv_tries: 1000 }
+        Gen { it, rng, extremes, pool: Vec::new(), plans, missed: None, crashed: None, inv_tries: 1000, closed: None, keys: Vec::new() }
     }
 
     /// A value of type `t` within the bounds `b`.
@@ -97,9 +119,35 @@ impl<'a> Gen<'a> {
                 Ok(v)
             }
             (Ty::Float, Bound { float: Some((lo, hi)), .. }) => Ok(self.float_in(*lo, *hi, size)),
+            (Ty::Str, Bound { text: Some(tb), len, .. }) => {
+                let base = match len {
+                    Some((lo, hi)) => self.sized(t, size, *lo, *hi)?,
+                    None => self.value(t, size, depth)?,
+                };
+                Ok(self.with_text(base, tb))
+            }
             (Ty::Str | Ty::List(_) | Ty::Map(..) | Ty::Set(_), Bound { len: Some((lo, hi)), .. }) => self.sized(t, size, *lo, *hi),
             _ => self.value(t, size, depth),
         }
+    }
+
+    /// `base` with the required pieces of text spliced in: each `contains`
+    /// at a random place, then the prefix and suffix.
+    fn with_text(&mut self, base: Value, tb: &TextBound) -> Value {
+        let Value::Str(s) = &base else { return base };
+        let mut chars: Vec<char> = s.chars().collect();
+        for piece in &tb.contains {
+            let at = self.rng.below(chars.len() + 1);
+            chars.splice(at..at, piece.chars());
+        }
+        let mut out: String = chars.into_iter().collect();
+        if let Some(p) = &tb.prefix {
+            out.insert_str(0, p);
+        }
+        if let Some(x) = &tb.suffix {
+            out.push_str(x);
+        }
+        Value::str(out)
     }
 
     /// An extreme Int, `min_int` or `max_int` half of the time (so that 200
@@ -161,8 +209,14 @@ impl<'a> Gen<'a> {
         let attempts = if depth == 0 { 100 } else { 10 };
         // A recursive type (a trie, a tree) nested in itself gets much
         // smaller, or it would hold thousands of nodes.
-        let size = if depth > 0 && tys.iter().any(|t| mentions(t, td.id)) { (size / 4).max(1) } else { size };
+        let recursive = tys.iter().any(|t| mentions(t, td.id));
+        let size = if depth > 0 && recursive { (size / 4).max(1) } else { size };
+        // Values from a failed attempt are not reused by the next one.
+        let pool_base = self.pool.len();
+        let keys_base = self.keys.len();
         'attempt: for attempt in 0..attempts {
+            self.pool.truncate(pool_base);
+            self.keys.truncate(keys_base);
             // (Only failed tries count against the budget.)
             if self.inv_tries == 0 {
                 break;
@@ -174,7 +228,15 @@ impl<'a> Gen<'a> {
             // Checking a candidate gets the step budget of a whole case.
             self.it.ticks = 0;
             let mut vals = Vec::with_capacity(tys.len());
+            // Every other attempt (and only for a record whose fields are
+            // related by its clauses), later fields reuse earlier values.
+            let outer_closed = self.closed;
+            let closed_world = attempt % 4 != 0 && tys.len() > 1 && !recursive;
+            let mark = self.pool.len();
             for (i, t) in tys.iter().enumerate() {
+                if closed_world && i == 1 && outer_closed.is_none() {
+                    self.closed = Some(mark);
+                }
                 vals.push(match plan.derived[i] {
                     Some(_) => Value::Unit,
                     None => match self.field(t, &plan.bounds[i], size, depth) {
@@ -183,12 +245,17 @@ impl<'a> Gen<'a> {
                         Err(_) if self.missed.is_some() && self.crashed.is_none() => {
                             self.missed = None;
                             self.inv_tries = self.inv_tries.saturating_sub(1);
+                            self.closed = outer_closed;
                             continue 'attempt;
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            self.closed = outer_closed;
+                            return Err(e);
+                        }
                     },
                 });
             }
+            self.closed = outer_closed;
             if !compute_derived(self.it, plan, tys, &mut vals) {
                 self.inv_tries = self.inv_tries.saturating_sub(1);
                 continue;
@@ -201,6 +268,11 @@ impl<'a> Gen<'a> {
                 Ok(None) => return Ok(v),
                 Ok(Some(b)) => {
                     self.inv_tries = self.inv_tries.saturating_sub(1);
+                    // An equation between Ints (two totals that must
+                    // match): move one Int in the value by the difference.
+                    if let Some(ok) = self.balance(plan, &v, b.at) {
+                        return Ok(ok);
+                    }
                     match broken.iter_mut().find(|(c, _)| *c == b.clause) {
                         Some((_, n)) => *n += 1,
                         None => broken.push((b.clause, 1)),
@@ -241,10 +313,62 @@ impl<'a> Gen<'a> {
         Err(msg)
     }
 
+    /// `v` (a record that breaks the clause at `at`, `lhs == rhs` between
+    /// Ints) with one of its Ints (a field, or one inside a list or a
+    /// nested record) moved by the difference, so that the clause holds,
+    /// if that gives a valid value.
+    fn balance(&mut self, plan: &InvPlan, v: &Value, at: Span) -> Option<Value> {
+        let clause = plan.def.requires.iter().find(|r| r.span == at)?;
+        let ExprKind::Binary { op: BinOp::Eq, lhs, rhs } = &clause.kind else { return None };
+        let Value::Record(r) = v else { return None };
+        let def = plan.def.clone();
+        let mut env = Env::new(def.num_slots);
+        for (p, x) in def.params.iter().zip(r.values.iter()) {
+            env.locals[p.slot as usize] = x.clone();
+        }
+        let depth = self.it.stack.len();
+        self.it.ticks = 0;
+        let sides = (self.it.eval(lhs, &mut env), self.it.eval(rhs, &mut env));
+        self.it.stack.truncate(depth);
+        let (Ok(Value::Int(a)), Ok(Value::Int(b))) = sides else { return None };
+        let d = a.checked_sub(b)?;
+        let mut paths: Vec<Vec<usize>> = Vec::new();
+        int_paths(v, &mut Vec::new(), &mut paths, 0);
+        if paths.is_empty() {
+            return None;
+        }
+        let plans = self.plans.clone();
+        for _ in 0..paths.len().min(32) {
+            let path = paths.swap_remove(self.rng.below(paths.len()));
+            for delta in [d, d.checked_neg()?] {
+                let Some(cand) = adjust_at(v, &path, delta) else { continue };
+                self.it.ticks = 0;
+                let depth = self.it.stack.len();
+                let r = repair(self.it, &plans, &cand);
+                self.it.stack.truncate(depth);
+                if r.is_some() {
+                    return r;
+                }
+            }
+            if paths.is_empty() {
+                break;
+            }
+        }
+        None
+    }
+
     pub fn value(&mut self, ty: &Ty, size: u32, depth: u32) -> Result<Value, String> {
         let scalar = matches!(ty, Ty::Int | Ty::Float | Ty::Str);
-        if scalar && depth == 0 {
-            if let Some(v) = self.reuse(|v| same_kind(ty, v)) {
+        // In closed-world mode, mostly the keys of maps generated before.
+        if scalar && self.closed.is_some() && self.rng.below(100) < 97 {
+            let picks: Vec<&Value> = self.keys.iter().filter(|k| same_kind(ty, k)).collect();
+            if !picks.is_empty() {
+                return Ok(picks[self.rng.below(picks.len())].clone());
+            }
+        }
+        if scalar && (depth == 0 || self.closed.is_some()) {
+            let pct = if self.closed.is_some() { 95 } else { 30 };
+            if let Some(v) = self.reuse(pct, |v| same_kind(ty, v)) {
                 return Ok(v);
             }
         }
@@ -255,14 +379,16 @@ impl<'a> Gen<'a> {
         Ok(v)
     }
 
-    /// Sometimes (30% of the time) a value from the pool that `ok` accepts.
-    fn reuse(&mut self, ok: impl Fn(&Value) -> bool) -> Option<Value> {
-        if self.pool.is_empty() || self.rng.below(100) >= 30 {
+    /// Sometimes (`pct` percent of the time) a value from the pool that `ok`
+    /// accepts.
+    fn reuse(&mut self, pct: usize, ok: impl Fn(&Value) -> bool) -> Option<Value> {
+        let from = self.closed.unwrap_or(0).min(self.pool.len());
+        if self.pool.len() == from || self.rng.below(100) >= pct {
             return None;
         }
         // A few random picks rather than a scan of the whole pool.
         for _ in 0..8 {
-            let v = &self.pool[self.rng.below(self.pool.len())];
+            let v = &self.pool[from + self.rng.below(self.pool.len() - from)];
             if ok(v) {
                 return Some(v.clone());
             }
@@ -409,6 +535,9 @@ impl<'a> Gen<'a> {
         while m.len() < n && tries < n * 4 + 8 {
             tries += 1;
             let key = self.value(k, inner, depth + 1)?;
+            if self.keys.len() < 256 && matches!(key, Value::Int(_) | Value::Str(_)) {
+                self.keys.push(key.clone());
+            }
             let val = self.value(v, inner, depth + 1)?;
             m.insert(key, val);
         }
@@ -483,7 +612,7 @@ impl<'a> Gen<'a> {
     /// An Int within optional inclusive bounds, favouring the boundaries.
     pub fn int_in(&mut self, lo: Option<i64>, hi: Option<i64>, size: u32) -> Value {
         let fits = |x: i64| lo.is_none_or(|l| x >= l) && hi.is_none_or(|h| x <= h);
-        if let Some(v) = self.reuse(|v| matches!(v, Value::Int(x) if fits(*x))) {
+        if let Some(v) = self.reuse(if self.closed.is_some() { 90 } else { 30 }, |v| matches!(v, Value::Int(x) if fits(*x))) {
             return v;
         }
         let natural = match self.value(&Ty::Int, size, 1) {
@@ -581,6 +710,55 @@ impl<'a> Gen<'a> {
 
 /// Fill in the fields of a record that its invariant's `field == expr`
 /// clauses define, from the other fields.
+/// The positions of the Ints inside `v` (fields, list elements, and those of
+/// nested records), up to 64 of them, as paths of field or element indexes.
+fn int_paths(v: &Value, path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>, depth: u32) {
+    if out.len() >= 64 || depth > 3 {
+        return;
+    }
+    match v {
+        Value::Int(_) => out.push(path.clone()),
+        Value::Record(r) => {
+            for (i, x) in r.values.iter().enumerate() {
+                path.push(i);
+                int_paths(x, path, out, depth + 1);
+                path.pop();
+            }
+        }
+        Value::List(xs) => {
+            for (i, x) in xs.iter().enumerate().take(16) {
+                path.push(i);
+                int_paths(x, path, out, depth + 1);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `v` with the Int at `path` moved by `delta` (None on overflow).
+fn adjust_at(v: &Value, path: &[usize], delta: i64) -> Option<Value> {
+    let Some((&i, rest)) = path.split_first() else {
+        return match v {
+            Value::Int(n) => n.checked_add(delta).map(Value::Int),
+            _ => None,
+        };
+    };
+    match v {
+        Value::Record(r) => {
+            let mut r2 = (**r).clone();
+            r2.values[i] = adjust_at(r.values.get(i)?, rest, delta)?;
+            Some(Value::Record(Rc::new(r2)))
+        }
+        Value::List(xs) => {
+            let mut ys: Vec<Value> = xs.iter().cloned().collect();
+            ys[i] = adjust_at(xs.get(i)?, rest, delta)?;
+            Some(Value::list(ys))
+        }
+        _ => None,
+    }
+}
+
 pub fn compute_derived(it: &mut Interp, plan: &InvPlan, tys: &[Ty], vals: &mut [Value]) -> bool {
     if plan.derived.iter().all(|d| d.is_none()) {
         return true;

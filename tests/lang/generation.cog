@@ -1,0 +1,29 @@
+# Generated values of types whose invariants relate their fields.
+
+type User = { name: Str, email: Str }
+  where name.len() >= 3 and email.contains("@") and email.ends_with(".com")
+type Db = { users: List[User], next_id: Int }
+  where next_id > users.len()
+
+property "text clauses steer generated strings" (u: User) {
+  assert u.email.contains("@") and u.email.ends_with(".com")
+}
+
+property "a database of valid users is not always empty" (dbs: List[Db]) {
+  assert dbs.all(fn(d) => d.users.all(fn(u) => "@" in u.email))
+}
+
+type Posting = { account: Str, amount: Int }
+type Entry = { postings: List[Posting], total: Int }
+  where postings.len() >= 1
+  where postings.map(fn(p) => p.amount).sum() == total * 2
+type Book = { accounts: Map[Str, Int], entries: List[Entry] }
+  where entries.all(fn(e) => e.postings.all(fn(p) => accounts.has(p.account)))
+
+property "references between fields can be satisfied" (b: Book) {
+  for e in b.entries {
+    for p in e.postings {
+      assert b.accounts.has(p.account)
+    }
+  }
+}
