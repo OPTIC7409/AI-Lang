@@ -273,7 +273,7 @@ impl Server {
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
         let mut it = Interp::new();
         let mut ns = Namespace::default();
-        let file = it.ctx.sm.add(&path.display().to_string(), text);
+        let file = it.ctx.sm.add(path.display().to_string(), text);
         let mut prog = crate::parser::parse_program(text, file).ok()?;
         let diags = crate::resolver::resolve_program(&mut it.ctx, &mut prog, &mut ns, &dir, false);
         if diags.iter().any(|d| d.is_error()) {
