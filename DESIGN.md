@@ -576,6 +576,19 @@ and deliberately failing code inside `catch`. Each now has a test that
 keeps it accepted, and every new check is first run over the corpus of
 earlier rounds' programs, where a new error must be a real failure.
 
+A seventh round tried two new areas. Language tools (a recursive-descent
+parser, a bytecode VM, a Lisp, a regex matcher, a type checker for a
+lambda calculus) went 8 of 10 on the first attempt, and simulations
+(an elevator, tic-tac-toe with minimax, a TCP state machine, a maze
+generator) 7 of 10. The language-tools agent's sharpest finding was a
+class of silent wrong answers: a statement whose value is dropped, such as
+a line starting with `- pad` meant to continue the line above (a newline
+ends a statement), `y == x + 1` meant as an assignment, or a test whose
+last line is a condition without `assert`. These are now warnings (W0008).
+The simulations agent found that every record hashed to the same value,
+so a map keyed by game boards was a list in disguise: its memoized
+minimax took 95 seconds to verify, and 0.5 after the fix.
+
 ## Future directions
 
 - Deeper static checking: the parameter types of functions passed to user
