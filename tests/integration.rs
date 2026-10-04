@@ -134,3 +134,47 @@ fn spec_is_embedded() {
     assert!(out.status.success());
     assert!(text(&out.stdout).contains("Cogito"));
 }
+
+#[test]
+fn language_server_reports_diagnostics() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cogito"))
+        .arg("lsp")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut send = |body: &str| {
+        write!(stdin, "Content-Length: {}\r\n\r\n{}", body.len(), body).unwrap();
+        stdin.flush().unwrap();
+    };
+    let mut recv = || {
+        let mut len = 0;
+        loop {
+            let mut line = String::new();
+            stdout.read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                break;
+            }
+            if let Some(v) = line.strip_prefix("Content-Length:") {
+                len = v.trim().parse().unwrap();
+            }
+        }
+        let mut buf = vec![0; len];
+        stdout.read_exact(&mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    };
+    send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+    assert!(recv().contains("documentFormattingProvider"));
+    send(
+        r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/x.cog","languageId":"cogito","version":1,"text":"fn f(n: Int) -> Int => n\nprint(f(\"a\"))\n"}}}"#,
+    );
+    let diags = recv();
+    assert!(diags.contains("publishDiagnostics") && diags.contains("E0121"), "{}", diags);
+    send(r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#);
+    assert!(recv().contains("\"id\":2"));
+    send(r#"{"jsonrpc":"2.0","method":"exit"}"#);
+    assert!(child.wait().unwrap().success());
+}

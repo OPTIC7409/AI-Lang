@@ -21,7 +21,8 @@ USAGE:
     cogito test [PATH...]           run `test` and `property` blocks (files or directories)
     cogito verify FILE.cog          check function contracts against random inputs
     cogito check FILE.cog...        report errors and warnings without running
-    cogito fmt [--check] [PATH...]  format files in the canonical layout (--check: only report)
+    cogito fmt [--check] [PATH...]  format files in the canonical layout (--check: only report; - for stdin)
+    cogito lsp                      run the language server (for editors) on stdin/stdout
     cogito eval \"CODE\"              run a snippet of code
     cogito explain CODE             explain an error code (e.g. E0101)
     cogito doc [NAME]               documentation for built-in functions
@@ -229,6 +230,26 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
 }
 
 fn cmd_fmt(paths: &[String], check: bool, color: bool) -> ExitCode {
+    // `cogito fmt -` formats standard input to standard output (for editors).
+    if paths == ["-"] {
+        let mut src = String::new();
+        if std::io::Read::read_to_string(&mut std::io::stdin(), &mut src).is_err() {
+            cogito::err_outln!("error: standard input is not valid UTF-8");
+            return ExitCode::from(2);
+        }
+        return match cogito::format::format_source(&src) {
+            Ok(out) => {
+                cogito::out!("{}", out);
+                ExitCode::SUCCESS
+            }
+            Err(d) => {
+                let mut it = Interp::new();
+                it.ctx.sm.add("<stdin>", src);
+                cogito::err_out!("{}", d.render(&it.ctx.sm, color));
+                ExitCode::from(2)
+            }
+        };
+    }
     let files = collect_files(paths);
     let (mut changed, mut failed) = (0, 0);
     for f in &files {
@@ -470,6 +491,7 @@ fn real_main() -> ExitCode {
                 }
             }
         }
+        "lsp" => ExitCode::from(cogito::lsp::run_stdio() as u8),
         "fmt" => {
             let check = args[1..].iter().any(|a| a == "--check");
             let paths: Vec<String> = args[1..].iter().filter(|a| !a.starts_with("--")).cloned().collect();

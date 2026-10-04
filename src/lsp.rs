@@ -1,0 +1,455 @@
+//! `cogito lsp`: a language server, so that editors show Cogito's errors
+//! and warnings as you type, format on request, show documentation on hover,
+//! list a file's declarations, and jump to definitions.
+//!
+//! It speaks the Language Server Protocol (JSON-RPC over standard input and
+//! output) and supports: diagnostics on open and change, formatting
+//! (`cogito fmt`), hover for built-ins, keywords and the file's own
+//! functions and types, document symbols, and go to definition.
+
+use crate::ast::{Item, Namespace, PatKind, Program, StmtKind, TypeBody};
+use crate::diagnostic::{Diagnostic, Severity};
+use crate::interp::Interp;
+use crate::json::Json;
+use std::collections::HashMap;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
+
+/// Run the server on standard input and output until `exit`.
+pub fn run_stdio() -> i32 {
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut server = Server { docs: HashMap::new(), shutdown: false };
+    loop {
+        let Some(msg) = read_message(&mut input) else { return if server.shutdown { 0 } else { 1 } };
+        let Ok(msg) = Json::parse(&msg) else { continue };
+        let method = msg.get("method").as_str().unwrap_or("").to_string();
+        let id = msg.get("id").clone();
+        if method == "exit" {
+            return if server.shutdown { 0 } else { 1 };
+        }
+        // Keep serving even if one request hits a bug.
+        let replies = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.handle(&method, msg.get("params"), &id)))
+            .unwrap_or_else(|_| if id.is_null() { vec![] } else { vec![error_reply(&id, -32603, "internal error in the Cogito language server")] });
+        let mut out = stdout.lock();
+        for r in replies {
+            let body = r.to_string();
+            let _ = write!(out, "Content-Length: {}\r\n\r\n{}", body.len(), body);
+        }
+        let _ = out.flush();
+    }
+}
+
+fn read_message(input: &mut impl BufRead) -> Option<String> {
+    let mut len = None;
+    loop {
+        let mut line = String::new();
+        if input.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some(v) = line.strip_prefix("Content-Length:") {
+            len = v.trim().parse::<usize>().ok();
+        }
+    }
+    let mut buf = vec![0; len?];
+    input.read_exact(&mut buf).ok()?;
+    String::from_utf8(buf).ok()
+}
+
+fn reply(id: &Json, result: Json) -> Json {
+    Json::obj(vec![("jsonrpc", Json::str("2.0")), ("id", id.clone()), ("result", result)])
+}
+
+fn error_reply(id: &Json, code: i32, message: &str) -> Json {
+    Json::obj(vec![
+        ("jsonrpc", Json::str("2.0")),
+        ("id", id.clone()),
+        ("error", Json::obj(vec![("code", Json::num(code)), ("message", Json::str(message))])),
+    ])
+}
+
+fn notification(method: &str, params: Json) -> Json {
+    Json::obj(vec![("jsonrpc", Json::str("2.0")), ("method", Json::str(method)), ("params", params)])
+}
+
+struct Server {
+    docs: HashMap<String, String>,
+    shutdown: bool,
+}
+
+impl Server {
+    fn handle(&mut self, method: &str, params: &Json, id: &Json) -> Vec<Json> {
+        let uri = params.get("textDocument").get("uri").as_str().unwrap_or("").to_string();
+        match method {
+            "initialize" => vec![reply(
+                id,
+                Json::obj(vec![
+                    (
+                        "capabilities",
+                        Json::obj(vec![
+                            ("textDocumentSync", Json::num(1)),
+                            ("documentFormattingProvider", Json::Bool(true)),
+                            ("hoverProvider", Json::Bool(true)),
+                            ("documentSymbolProvider", Json::Bool(true)),
+                            ("definitionProvider", Json::Bool(true)),
+                        ]),
+                    ),
+                    ("serverInfo", Json::obj(vec![("name", Json::str("cogito")), ("version", Json::str(crate::VERSION))])),
+                ]),
+            )],
+            "shutdown" => {
+                self.shutdown = true;
+                vec![reply(id, Json::Null)]
+            }
+            "textDocument/didOpen" => {
+                let text = params.get("textDocument").get("text").as_str().unwrap_or("").to_string();
+                self.docs.insert(uri.clone(), text);
+                vec![self.diagnostics(&uri)]
+            }
+            "textDocument/didChange" => {
+                // Full synchronization: the last change holds the whole text.
+                if let Json::Arr(changes) = params.get("contentChanges") {
+                    if let Some(text) = changes.last().and_then(|c| c.get("text").as_str()) {
+                        self.docs.insert(uri.clone(), text.to_string());
+                    }
+                }
+                vec![self.diagnostics(&uri)]
+            }
+            "textDocument/didSave" => vec![self.diagnostics(&uri)],
+            "textDocument/didClose" => {
+                self.docs.remove(&uri);
+                vec![notification("textDocument/publishDiagnostics", Json::obj(vec![("uri", Json::str(uri)), ("diagnostics", Json::Arr(vec![]))]))]
+            }
+            "textDocument/formatting" => vec![reply(id, self.formatting(&uri))],
+            "textDocument/hover" => vec![reply(id, self.hover(&uri, params.get("position")))],
+            "textDocument/documentSymbol" => vec![reply(id, self.symbols(&uri))],
+            "textDocument/definition" => vec![reply(id, self.definition(&uri, params.get("position")))],
+            _ if !id.is_null() => vec![error_reply(id, -32601, &format!("method not supported: {}", method))],
+            _ => vec![],
+        }
+    }
+
+    fn text(&self, uri: &str) -> &str {
+        self.docs.get(uri).map_or("", |s| s.as_str())
+    }
+
+    /// Check the document (syntax, names, types) and publish what was found.
+    fn diagnostics(&self, uri: &str) -> Json {
+        let text = self.text(uri);
+        let path = uri_to_path(uri);
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let mut it = Interp::new();
+        let mut ns = Namespace::default();
+        let name = path.display().to_string();
+        let diags = match crate::load_source(&mut it, &name, text, &dir, &mut ns, false) {
+            Ok((_, warnings)) => warnings,
+            Err(diags) => diags,
+        };
+        let lines = LineIndex::new(text);
+        let items: Vec<Json> = diags.iter().map(|d| diagnostic_json(d, &it, &lines)).collect();
+        notification("textDocument/publishDiagnostics", Json::obj(vec![("uri", Json::str(uri)), ("diagnostics", Json::Arr(items))]))
+    }
+
+    fn formatting(&self, uri: &str) -> Json {
+        let text = self.text(uri);
+        match crate::format::format_source(text) {
+            Ok(out) if out != text => {
+                let lines = LineIndex::new(text);
+                Json::Arr(vec![Json::obj(vec![("range", lines.range(0, text.len())), ("newText", Json::str(out))])])
+            }
+            _ => Json::Arr(vec![]),
+        }
+    }
+
+    fn hover(&self, uri: &str, pos: &Json) -> Json {
+        let text = self.text(uri);
+        let lines = LineIndex::new(text);
+        let Some(offset) = lines.offset(pos) else { return Json::Null };
+        let Some((word, start, end)) = word_at(text, offset) else { return Json::Null };
+        let markdown = if let Some(d) = self.declaration_doc(text, &word) {
+            d
+        } else if let Some(b) = crate::builtins::BUILTINS.iter().find(|b| b.name == word) {
+            let mut doc = b.doc.lines();
+            let sig = doc.next().unwrap_or("");
+            format!("```cogito\n{}\n```\n{}", sig, doc.collect::<Vec<_>>().join("\n"))
+        } else if let Some(k) = keyword_doc(&word) {
+            k.to_string()
+        } else {
+            return Json::Null;
+        };
+        Json::obj(vec![
+            ("contents", Json::obj(vec![("kind", Json::str("markdown")), ("value", Json::str(markdown))])),
+            ("range", lines.range(start, end)),
+        ])
+    }
+
+    /// The source of a top-level function or type declared in this file,
+    /// with the comment lines right above it.
+    fn declaration_doc(&self, text: &str, word: &str) -> Option<String> {
+        let prog = crate::parser::parse_program(text, 0).ok()?;
+        let (start, name_end) = prog.items.iter().find_map(|item| match item {
+            Item::Fn(def) if def.name.as_deref() == Some(word) => Some((def.span.start as usize, def.name_span.end as usize)),
+            Item::Type(td) if &*td.name == word => Some((td.span.start as usize, td.name_span.end as usize)),
+            _ => None,
+        })?;
+        // The declaration's first line, up to the body.
+        let line_end = text[name_end..].find('\n').map_or(text.len(), |i| name_end + i);
+        let mut sig = text[start..line_end].trim_end().to_string();
+        if let Some(i) = sig.find(" =>") {
+            sig.truncate(i);
+        }
+        let sig = sig.trim_end_matches('{').trim_end().to_string();
+        let mut comments = Vec::new();
+        for l in text[..start].lines().rev() {
+            match l.trim().strip_prefix('#') {
+                Some(c) => comments.push(c.trim().to_string()),
+                None => break,
+            }
+        }
+        comments.reverse();
+        Some(format!("```cogito\n{}\n```\n{}", sig, comments.join("\n")))
+    }
+
+    fn symbols(&self, uri: &str) -> Json {
+        let text = self.text(uri);
+        let Ok(prog) = crate::parser::parse_program(text, 0) else { return Json::Arr(vec![]) };
+        let lines = LineIndex::new(text);
+        let sym = |name: String, kind: u32, span: crate::span::Span, sel: crate::span::Span| {
+            Json::obj(vec![
+                ("name", Json::str(name)),
+                ("kind", Json::num(kind)),
+                ("range", lines.range(span.start as usize, span.end as usize)),
+                ("selectionRange", lines.range(sel.start as usize, sel.end as usize)),
+            ])
+        };
+        let mut out = Vec::new();
+        for item in &prog.items {
+            match item {
+                // LSP symbol kinds: 12 function, 23 struct, 10 enum, 13 variable, 6 method.
+                Item::Fn(def) => out.push(sym(def.display_name().to_string(), 12, def.span, def.name_span)),
+                Item::Type(td) => {
+                    let kind = match &td.body {
+                        TypeBody::Record(..) => 23,
+                        _ => 10,
+                    };
+                    out.push(sym(td.name.to_string(), kind, td.span, td.name_span));
+                }
+                Item::Test(t) => out.push(sym(format!("test \"{}\"", t.name), 6, t.span, t.span)),
+                Item::Property(p) => out.push(sym(format!("property \"{}\"", p.name), 6, p.span, p.span)),
+                Item::Stmt(s) => {
+                    if let StmtKind::Let { pat, .. } = &s.kind {
+                        if let PatKind::Bind { name, .. } = &pat.kind {
+                            out.push(sym(name.to_string(), 13, s.span, pat.span));
+                        }
+                    }
+                }
+                Item::Import(_) => {}
+            }
+        }
+        Json::Arr(out)
+    }
+
+    fn definition(&self, uri: &str, pos: &Json) -> Json {
+        let text = self.text(uri);
+        let lines = LineIndex::new(text);
+        let Some(offset) = lines.offset(pos) else { return Json::Null };
+        let Some((word, _, _)) = word_at(text, offset) else { return Json::Null };
+        let Ok(prog) = crate::parser::parse_program(text, 0) else { return Json::Null };
+        match find_declaration(&prog, &word) {
+            Some(span) => Json::obj(vec![("uri", Json::str(uri)), ("range", lines.range(span.start as usize, span.end as usize))]),
+            None => Json::Null,
+        }
+    }
+}
+
+fn find_declaration(prog: &Program, word: &str) -> Option<crate::span::Span> {
+    prog.items.iter().find_map(|item| match item {
+        Item::Fn(def) if def.name.as_deref() == Some(word) => Some(def.name_span),
+        Item::Type(td) if &*td.name == word => Some(td.name_span),
+        Item::Type(td) => match &td.body {
+            // A variant name leads to its type.
+            TypeBody::Enum(vs) if vs.iter().any(|v| &*v.name == word) => Some(td.name_span),
+            _ => None,
+        },
+        Item::Stmt(s) => match &s.kind {
+            StmtKind::Let { pat, .. } => match &pat.kind {
+                PatKind::Bind { name, .. } if &**name == word => Some(pat.span),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+fn diagnostic_json(d: &Diagnostic, it: &Interp, lines: &LineIndex) -> Json {
+    let range = match d.span {
+        Some(sp) if sp.file == 0 => lines.range(sp.start as usize, sp.end as usize),
+        _ => lines.range(0, 0),
+    };
+    let mut message = d.message.clone();
+    // Problems in an imported file are shown at the top, with their location.
+    if let Some(sp) = d.span {
+        if sp.file != 0 && (sp.file as usize) < it.ctx.sm.files.len() {
+            message = format!("{} (at {})", message, it.ctx.sm.location(sp));
+        }
+    }
+    for n in &d.notes {
+        message.push_str("\nnote: ");
+        message.push_str(n);
+    }
+    if let Some(h) = &d.help {
+        message.push_str("\nhelp: ");
+        message.push_str(h);
+    }
+    let severity = match d.severity {
+        Severity::Error => 1,
+        Severity::Warning => 2,
+    };
+    Json::obj(vec![
+        ("range", range),
+        ("severity", Json::num(severity)),
+        ("code", Json::str(d.code)),
+        ("source", Json::str("cogito")),
+        ("message", Json::str(message)),
+    ])
+}
+
+/// Converts between byte offsets and LSP positions (lines, and characters
+/// counted in UTF-16 code units).
+struct LineIndex<'a> {
+    text: &'a str,
+    starts: Vec<usize>,
+}
+
+impl<'a> LineIndex<'a> {
+    fn new(text: &'a str) -> LineIndex<'a> {
+        let mut starts = vec![0];
+        starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+        LineIndex { text, starts }
+    }
+
+    fn position(&self, offset: usize) -> Json {
+        let offset = offset.min(self.text.len());
+        let line = match self.starts.binary_search(&offset) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        let start = self.starts[line];
+        let col = self.text.get(start..offset).map_or(0, |s| s.encode_utf16().count());
+        Json::obj(vec![("line", Json::num(line as u32)), ("character", Json::num(col as u32))])
+    }
+
+    fn range(&self, start: usize, end: usize) -> Json {
+        Json::obj(vec![("start", self.position(start)), ("end", self.position(end.max(start)))])
+    }
+
+    fn offset(&self, pos: &Json) -> Option<usize> {
+        let line = pos.get("line").as_u64()? as usize;
+        let ch = pos.get("character").as_u64()? as usize;
+        let start = *self.starts.get(line)?;
+        let end = self.starts.get(line + 1).copied().unwrap_or(self.text.len());
+        let mut units = 0;
+        for (i, c) in self.text[start..end].char_indices() {
+            if units >= ch {
+                return Some(start + i);
+            }
+            units += c.len_utf16();
+        }
+        Some(end)
+    }
+}
+
+/// The identifier (with a trailing `!`) at or just before a byte offset.
+fn word_at(text: &str, offset: usize) -> Option<(String, usize, usize)> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '!';
+    let mut start = offset.min(text.len());
+    while start > 0 && text[..start].chars().next_back().is_some_and(is_word) {
+        start -= text[..start].chars().next_back().unwrap().len_utf8();
+    }
+    let mut end = offset.min(text.len());
+    while end < text.len() && text[end..].chars().next().is_some_and(is_word) {
+        end += text[end..].chars().next().unwrap().len_utf8();
+    }
+    let w = &text[start..end];
+    // `!` belongs only at the end of a name.
+    let w = match w.find('!') {
+        Some(i) => &w[..=i],
+        None => w,
+    };
+    if w.is_empty() || w.starts_with(|c: char| c.is_ascii_digit()) {
+        None
+    } else {
+        Some((w.to_string(), start, start + w.len()))
+    }
+}
+
+fn keyword_doc(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "let" => "`let name = value` binds a name that never changes. Use `var` for one that does.",
+        "var" => "`var name = value` binds a name that can be reassigned. An annotation (`var n: Int = 0`) is checked on every write.",
+        "fn" => "`fn name(param: Type) -> Type { body }` declares a function; `fn(x) => x + 1` is an anonymous function. A name ending in `!` mutates its first argument.",
+        "match" => "`match value { pattern => result ... }` takes a value apart. It must cover every case (or end with `_ => ...`).",
+        "requires" => "A precondition: checked on entry; a violation is the caller's bug. `cogito verify` checks contracts with generated inputs.",
+        "ensures" => "A postcondition: checked on exit. `result` is the returned value; `old(e)` is `e` on entry.",
+        "test" => "`test \"name\" { assert ... }` is run by `cogito test`.",
+        "property" => "`property \"name\" (x: Type) where cond { assert ... }` is run by `cogito test` with generated inputs, and failures are shrunk.",
+        "is" => "`value is Pattern` is a Bool: whether the value matches the pattern. It cannot bind names; use `match` for that.",
+        "where" => "In a `property`, `where` filters the generated inputs.",
+        "assert" => "`assert cond` (or `assert cond, \"message\"`) fails with both sides shown when a comparison is false.",
+        "import" => "`import \"path/file.cog\"` (or `as alias`) binds a module; use its members as `alias.name`.",
+        "type" => "`type Name = { field: Type }` declares a record; `type Name = | A | B(Type)` an enum; `type Name = OtherType` an alias.",
+        _ => return None,
+    })
+}
+
+/// The path of a `file://` URI (percent-decoded).
+fn uri_to_path(uri: &str) -> PathBuf {
+    let raw = uri.strip_prefix("file://").unwrap_or(uri);
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() + 1 {
+            if let Some(b) = raw.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    let s = String::from_utf8_lossy(&out).into_owned();
+    // `file:///C:/x` on Windows.
+    let s = if s.len() > 2 && s.starts_with('/') && s.as_bytes()[2] == b':' { s[1..].to_string() } else { s };
+    PathBuf::from(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positions_count_utf16() {
+        let text = "let é = 1\nlet 😀x = 2\n";
+        let li = LineIndex::new(text);
+        let p = li.position(text.find('x').unwrap());
+        assert_eq!(p.get("line").as_u64(), Some(1));
+        assert_eq!(p.get("character").as_u64(), Some(6));
+        let back = li.offset(&p).unwrap();
+        assert_eq!(&text[back..back + 1], "x");
+    }
+
+    #[test]
+    fn words() {
+        assert_eq!(word_at("xs.push!(1)", 4).map(|w| w.0), Some("push!".into()));
+        assert_eq!(word_at("len(x)", 3).map(|w| w.0), Some("len".into()));
+        assert_eq!(uri_to_path("file:///a%20b/c.cog"), PathBuf::from("/a b/c.cog"));
+    }
+}

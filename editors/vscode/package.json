@@ -1,18 +1,27 @@
 {
   "name": "cogito-lang",
   "displayName": "Cogito",
-  "description": "Syntax highlighting for the Cogito programming language",
+  "description": "Cogito language support: syntax highlighting, and errors, formatting, hover and go-to-definition through the cogito language server",
   "version": "0.1.0",
   "publisher": "cogito-lang",
   "license": "MIT",
-  "engines": { "vscode": "^1.60.0" },
-  "categories": ["Programming Languages"],
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "cogito",
-        "aliases": ["Cogito", "cogito"],
-        "extensions": [".cog"],
+        "aliases": [
+          "Cogito",
+          "cogito"
+        ],
+        "extensions": [
+          ".cog"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -22,6 +31,23 @@
         "scopeName": "source.cogito",
         "path": "./syntaxes/cogito.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Cogito",
+      "properties": {
+        "cogito.path": {
+          "type": "string",
+          "default": "cogito",
+          "description": "The cogito executable used for the language server (`cogito lsp`)."
+        }
+      }
+    }
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:cogito"
+  ],
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   }
 }
