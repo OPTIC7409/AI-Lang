@@ -1,0 +1,14 @@
+# Habits from Python that `cogito fix` rewrites.
+fn area(r: Float) -> Float {
+  pi * r ** 2
+}
+
+fn describe(n: Int) -> Str {
+  if n < 0 { "negative" } else if n == 0 { "zero" } else { "positive" }
+}
+
+var n = 100
+n //= 7
+n **= 2
+print(area(1.0) > 3.0, describe(n), floor(sqrt(2.0)), ln(e))
+print(true, None == None)

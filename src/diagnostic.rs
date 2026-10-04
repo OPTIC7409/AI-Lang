@@ -241,7 +241,6 @@ fn render_excerpt(out: &mut String, sm: &SourceMap, span: Span, label: Option<&s
     let _ = writeln!(out, "{:>w$} {}|{}", "", c.blue, c.reset, w = gutter);
     // Multi-line spans are shown by their first line only.
     let text = file.line_text(line);
-    let _ = writeln!(out, "{}{:>w$} |{} {}", c.blue, line, c.reset, text.replace('\t', "    "), w = gutter);
     let text_chars = text.chars().count();
     let to = if line == end_line {
         if end_col > col {
@@ -252,6 +251,20 @@ fn render_excerpt(out: &mut String, sm: &SourceMap, span: Span, label: Option<&s
     } else {
         text_chars + 1
     };
+    // A long line is shown around the span, with `...` for what is cut.
+    const WIDE: usize = 160;
+    let (text, col, to) = if text_chars > WIDE {
+        let lo = col.saturating_sub(1).saturating_sub(40);
+        let hi = (to.max(col + 1) - 1 + 40).min(text_chars).min(lo + WIDE);
+        let window: String = text.chars().skip(lo).take(hi - lo).collect();
+        let (pre, post) = (if lo > 0 { "..." } else { "" }, if hi < text_chars { "..." } else { "" });
+        let shift = pre.len();
+        (format!("{}{}{}", pre, window, post), col - lo + shift, (to - lo + shift).min(hi - lo + shift + 1))
+    } else {
+        (text.to_string(), col, to)
+    };
+    let text = text.as_str();
+    let _ = writeln!(out, "{}{:>w$} |{} {}", c.blue, line, c.reset, text.replace('\t', "    "), w = gutter);
     let width = to.saturating_sub(col).max(1);
     let prefix: String = text.chars().take(col.saturating_sub(1)).map(|ch| if ch == '\t' { "    " } else { " " }).collect();
     let _ = writeln!(
@@ -448,6 +461,24 @@ pub fn explain(code: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// "a" or "an", whichever reads right before `word` (a type name).
+/// "1 was given", "2 were given" (in messages about argument counts).
+pub fn given(n: usize) -> String {
+    if n == 1 {
+        "1 was given".to_string()
+    } else {
+        format!("{} were given", n)
+    }
+}
+
+/// The plural ending for "takes {count} argument{}" ("1", "at least 1").
+pub fn plural(count: &str) -> &'static str {
+    if count == "1" || count == "at least 1" {
+        ""
+    } else {
+        "s"
+    }
+}
+
 pub fn a_an(word: &str) -> &'static str {
     let w = word.trim_start_matches('`').to_lowercase();
     // Vowels that sound like consonants: a `UnionFind`, a `User`, a `OneOf`.

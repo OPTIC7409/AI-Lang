@@ -3,7 +3,7 @@
 use crate::ast::*;
 use crate::builtins::{BFn, BUILTINS};
 use crate::ctx::{Ctx, GlobalKind};
-use crate::diagnostic::{suggest, Diagnostic, TraceFrame};
+use crate::diagnostic::{given, plural, suggest, Diagnostic, TraceFrame};
 use crate::span::Span;
 use crate::types::{Name, Ty, TypeDef, TypeKind, OPTION_ID, ORDERING_ID, RESULT_ID};
 use crate::value::*;
@@ -2895,12 +2895,8 @@ impl Interp {
                 format!("{} to {}", b.min, b.max)
             };
             return Err(self.fail(
-                self.diag(
-                    span,
-                    "E0201",
-                    format!("`{}` takes {} argument{}, but {} were given", b.name, expect, if expect == "1" { "" } else { "s" }, n),
-                )
-                .note(format!("usage: {}", b.doc.lines().next().unwrap_or(""))),
+                self.diag(span, "E0201", format!("`{}` takes {} argument{}, but {}", b.name, expect, plural(&expect), given(n)))
+                    .note(format!("usage: {}", b.doc.lines().next().unwrap_or(""))),
             ));
         }
         Ok(())
@@ -2952,7 +2948,7 @@ impl Interp {
             return Err(self.err(
                 span,
                 "E0201",
-                format!("`{}` has {} field{}, but {} arguments were given", cname, n, if n == 1 { "" } else { "s" }, args.len()),
+                format!("`{}` has {} field{}, but {} arguments", cname, n, if n == 1 { "" } else { "s" }, args.len()),
             ));
         }
         let mut vals: Vec<Option<Value>> = vec![None; n];
@@ -3068,13 +3064,7 @@ impl Interp {
                 self.diag(
                     span,
                     "E0201",
-                    format!(
-                        "`{}` takes {} argument{}, but {} were given",
-                        def.display_name(),
-                        nparams,
-                        if nparams == 1 { "" } else { "s" },
-                        args.len()
-                    ),
+                    format!("`{}` takes {} argument{}, but {}", def.display_name(), nparams, if nparams == 1 { "" } else { "s" }, given(args.len())),
                 )
                 .note(format!("`{}` is defined at {}", def.display_name(), self.location(def.name_span))),
             ));

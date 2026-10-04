@@ -273,7 +273,7 @@ match.
 
 ## Mutation
 
-Only `var` bindings change. Assignment forms: `x = v`, `x += v` (also `-= *= /= %=`),
+Only `var` bindings change. Assignment forms: `x = v`, `x += v` (also `-= *= /= %= //= **=`),
 `xs[i] = v`, `m[k] = v` (inserts), `p.field = v`, `t[0] = v`, nested
 `grid[r][c] = v`. Mutating functions end in `!` and require a `var` (or
 field/index of one) as first argument: `xs.push!(4)`, `xs.sort!()`,

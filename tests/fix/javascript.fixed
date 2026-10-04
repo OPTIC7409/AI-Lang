@@ -1,0 +1,12 @@
+# Habits from JavaScript that `cogito fix` rewrites.
+let xs = [3, 1, 2]
+let doubled = xs.map(fn(x) => x * 2)
+let total = xs.reduce(fn(a, b) => a + b)
+let answer = fn() => 42
+print(doubled, total, answer())
+print(xs.len(), "abc".len())   # lengths
+print(max(1, 2), floor(2.5), abs(-1))
+print(sqrt(16.0), ln(1.0), pi > 3.0)
+if (xs.len() == 3) {
+  eprint("three")
+}

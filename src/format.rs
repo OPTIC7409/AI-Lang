@@ -101,6 +101,8 @@ fn wants_continuation(t: &Tok) -> bool {
             | Tok::StarAssign
             | Tok::SlashAssign
             | Tok::PercentAssign
+            | Tok::SlashSlashAssign
+            | Tok::StarStarAssign
             | Tok::FatArrow
             | Tok::Arrow
             | Tok::Plus

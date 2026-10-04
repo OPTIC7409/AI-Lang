@@ -74,7 +74,7 @@
         { "match": "=>|->", "name": "keyword.operator.arrow.cogito" },
         { "match": "\\.\\.=?", "name": "keyword.operator.range.cogito" },
         { "match": "==|!=|<=|>=|<|>", "name": "keyword.operator.comparison.cogito" },
-        { "match": "\\+=|-=|\\*=|/=|%=|=", "name": "keyword.operator.assignment.cogito" },
+        { "match": "\\+=|-=|\\*\\*=|\\*=|//=|/=|%=|=", "name": "keyword.operator.assignment.cogito" },
         { "match": "\\*\\*|//|[+\\-*/%?]", "name": "keyword.operator.arithmetic.cogito" }
       ]
     },

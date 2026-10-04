@@ -22,11 +22,12 @@ USAGE:
     cogito verify FILE.cog          check function contracts against random inputs
     cogito check [--json] FILE.cog... report errors and warnings without running (--json: one JSON object per line)
     cogito fmt [--check] [PATH...]  format files in the canonical layout (--check: only report; - for stdin)
-    cogito fix [--dry-run] FILE.cog... apply the fixes that `check` suggests for habits from other languages
+    cogito fix [--dry-run] PATH...  apply the fixes that `check` suggests for habits from other languages
     cogito lsp                      run the language server (for editors) on stdin/stdout
     cogito eval \"CODE\"              run a snippet of code
     cogito explain CODE             explain an error code (e.g. E0101)
-    cogito doc [NAME | FILE.cog]    documentation for built-in functions, or a Markdown reference for a file
+    cogito doc [NAME | FILE.cog]    documentation for built-in functions (NAME: a function or a
+                                    category, such as `math`), or a Markdown reference for a file
     cogito spec                     print the compact language specification (for humans and LLMs)
     cogito version                  print the version
 
@@ -79,6 +80,15 @@ fn print_diags(it: &Interp, diags: &[Diagnostic], color: bool) {
 /// can uncover the next problem), until none are left; then report what
 /// remains.
 fn cmd_fix(paths: &[String], color: bool, dry_run: bool) -> ExitCode {
+    // (It rewrites files: only those named.)
+    if paths.is_empty() {
+        cogito::err_outln!("usage: cogito fix [--dry-run] PATH...   (`cogito fix .` fixes every .cog file under the current directory)");
+        return ExitCode::from(2);
+    }
+    if let Some(p) = paths.iter().find(|p| !Path::new(p).exists()) {
+        cogito::err_outln!("error: `{}` does not exist", p);
+        return ExitCode::from(2);
+    }
     let files = collect_files(paths);
     let c = Colors::new(color);
     let mut total = 0;
@@ -127,7 +137,13 @@ fn cmd_fix(paths: &[String], color: bool, dry_run: bool) -> ExitCode {
     if total == 0 {
         cogito::outln!("nothing to fix");
     }
+    // `--dry-run` fails when there is something to fix, as `fmt --check`
+    // does when there is something to format.
     if dry_run {
+        if total > 0 {
+            cogito::outln!("dry run: no files were changed ({} fix{} to apply)", total, if total == 1 { "" } else { "es" });
+            return ExitCode::from(1);
+        }
         return ExitCode::SUCCESS;
     }
     cmd_check(paths, color, false)
@@ -235,6 +251,7 @@ fn collect_files(paths: &[String]) -> Vec<PathBuf> {
         }
     }
     out.sort();
+    out.dedup();
     out
 }
 
@@ -509,6 +526,15 @@ fn cmd_doc(name: Option<&str>) -> ExitCode {
                     cogito::outln!("{}", b.doc);
                     ExitCode::SUCCESS
                 }
+                // `cogito doc math`: one category.
+                None if BUILTINS.iter().any(|b| b.category == n) => {
+                    list_builtins(Some(n));
+                    ExitCode::SUCCESS
+                }
+                None if matches!(n, "pi" | "tau" | "e" | "inf") => {
+                    cogito::outln!("{}\nA built-in Float constant (math): pi, tau, e, inf.", n);
+                    ExitCode::SUCCESS
+                }
                 None => {
                     let names: Vec<&str> = BUILTINS.iter().map(|b| b.name).collect();
                     match cogito::diagnostic::suggest(n, names) {
@@ -520,19 +546,27 @@ fn cmd_doc(name: Option<&str>) -> ExitCode {
             }
         }
         None => {
-            let mut cat = "";
-            for b in BUILTINS {
-                if b.category != cat {
-                    cat = b.category;
-                    cogito::outln!("\n## {}\n", cat);
-                }
-                let mut lines = b.doc.lines();
-                let sig = lines.next().unwrap_or("");
-                let desc = lines.next().unwrap_or("");
-                cogito::outln!("  {:<58} {}", sig, desc);
-            }
+            list_builtins(None);
             ExitCode::SUCCESS
         }
+    }
+}
+
+/// The built-in functions (of one category, or all), one line each.
+fn list_builtins(category: Option<&str>) {
+    let mut cat = "";
+    for b in cogito::builtins::BUILTINS.iter().filter(|b| category.is_none_or(|c| b.category == c)) {
+        if b.category != cat {
+            cat = b.category;
+            cogito::outln!("\n## {}\n", cat);
+            if cat == "math" {
+                cogito::outln!("  {:<58} {}", "pi, tau, e, inf", "Float constants.");
+            }
+        }
+        let mut lines = b.doc.lines();
+        let sig = lines.next().unwrap_or("");
+        let desc = lines.next().unwrap_or("");
+        cogito::outln!("  {:<58} {}", sig, desc);
     }
 }
 

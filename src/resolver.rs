@@ -12,7 +12,7 @@
 
 use crate::ast::*;
 use crate::ctx::{Ctx, FnSig, GlobalKind};
-use crate::diagnostic::{suggest, Diagnostic};
+use crate::diagnostic::{given, plural, suggest, Diagnostic};
 use crate::parser::parse_program;
 use crate::span::Span;
 use crate::types::{Name, Ty, TypeDef, TypeKind, VariantDef};
@@ -385,6 +385,7 @@ fn confusion_hint(name: &str) -> Option<&'static str> {
         "lambda" => "anonymous functions are written `fn(x) => x + 1`",
         "length" | "size" => "use `len(x)` or `x.len()`",
         "append" => "use `push` (returns a new list) or `push!` (changes a `var` in place)",
+        "add" => "to add to a list use `push` or `push!`; to a set, `insert` or `insert!` (the `!` forms change a `var` in place)",
         "switch" | "case" | "when" => "use `match value { pattern => result }`",
         "nan" | "NaN" => "Cogito has no NaN constant: Float division by zero is an error, so NaN only comes from operations like `inf - inf`; test for it with `is_nan(x)`",
         "string" | "String" => "the string type is `Str`; to convert a value use `str(x)`",
@@ -746,6 +747,68 @@ impl<'a> Resolver<'a> {
         out
     }
 
+    /// The `//` before an undefined name that ends its line (`x // word`),
+    /// which can only be meant as a comment.
+    fn slash_comment_before(&self, span: Span) -> Option<Span> {
+        let src = &self.ctx.sm.get(span.file).src;
+        let before = &src[..span.start as usize];
+        let gap = before.len() - before.trim_end_matches([' ', '\t']).len();
+        let rest_of_line = src[span.end as usize..].split('\n').next().unwrap_or("");
+        let at = before.trim_end_matches([' ', '\t']).strip_suffix("//")?.len();
+        (gap > 0 && rest_of_line.trim().is_empty() && !before[..at].ends_with('/')).then(|| Span::new(span.file, at, at + 2))
+    }
+
+    /// `Math.floor(x)` (JavaScript, Java), `math.sqrt(x)` (Python),
+    /// `console.log(x)`: an error (with the built-in to use instead) when
+    /// the namespace is not a name of this program. `args`: the number of
+    /// arguments, for a method call.
+    fn foreign_member(&mut self, target: &Expr, member: &str, member_span: Span, args: Option<usize>) -> bool {
+        let ExprKind::Var(v) = &target.kind else { return false };
+        if !matches!(&*v.name, "Math" | "math" | "console") || self.lookup(&v.name).is_some() || self.global_slot(&v.name).is_some() {
+            return false;
+        }
+        let builtin = match (&*v.name, member, args) {
+            ("console", "log" | "info", Some(_)) => Some("print"),
+            ("console", "error" | "warn", Some(_)) => Some("eprint"),
+            ("console", ..) => None,
+            // (JavaScript's `Math.log` and one-argument `math.log` are the
+            // natural logarithm.)
+            (_, "log", Some(1)) => Some("ln"),
+            (_, "log", Some(2)) if v.name.as_ref() == "math" => Some("log"),
+            (_, "isnan", Some(_)) => Some("is_nan"),
+            (_, "fabs", Some(_)) => Some("abs"),
+            (
+                _,
+                m @ ("abs" | "sqrt" | "pow" | "exp" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "hypot" | "floor" | "ceil"
+                | "round" | "trunc" | "sign" | "gcd" | "lcm" | "min" | "max" | "random" | "log2" | "log10"),
+                Some(_),
+            ) => Some(m),
+            (_, "PI" | "pi", None) => Some("pi"),
+            (_, "E" | "e", None) => Some("e"),
+            (_, "tau", None) => Some("tau"),
+            (_, "inf", None) => Some("inf"),
+            _ => None,
+        };
+        let what = if v.name.as_ref() == "console" { "object" } else { "namespace" };
+        let mut d = Diagnostic::error("E0100", format!("Cogito has no `{}` {}", v.name, what)).at(Span { end: member_span.end, ..target.span });
+        d = match builtin {
+            Some(b) => {
+                let shown = if args.is_some() { format!("`{}(...)`", b) } else { format!("`{}`", b) };
+                d.label("not found in this scope")
+                    .help(format!("it is a built-in here: write {}", shown))
+                    .fix(Span { end: member_span.end, ..target.span }, b)
+            }
+            None if v.name.as_ref() == "console" => {
+                d.label("not found in this scope").help("print with `print(...)` (or `eprint(...)` for standard error)")
+            }
+            None => d
+                .label("not found in this scope")
+                .help("the math functions and constants (`sqrt`, `floor`, `pi`, ...) are built-ins: see `cogito doc math`"),
+        };
+        self.error(d);
+        true
+    }
+
     fn undefined(&mut self, name: &str, span: Span, what: &str) {
         if self.import_failed {
             return;
@@ -794,8 +857,11 @@ impl<'a> Resolver<'a> {
             if let Some(r) = confusion_fix(name, what == "function").filter(|_| self.ctx.sm.snippet(name_span) == name) {
                 d = d.fix(name_span, r);
             }
-        } else if let Some(s) = suggest(name, names.iter().map(|s| s.as_str())) {
+        } else if let Some(s) = suggest(name, names.iter().map(|s| s.as_str()).filter(|s| s.ends_with('!') == name.ends_with('!'))) {
             d = d.help(format!("did you mean `{}`?", s));
+        } else if let Some(slashes) = self.slash_comment_before(span) {
+            // `x = 10 // seconds`: a comment in the style of C.
+            d = d.help("comments start with `#`: `//` is floor division").fix(slashes, "#");
         } else if upper && self.ns.types.contains_key(name) {
             d = d.help(format!("`{}` is a type; build values with one of its constructors", name));
         }
@@ -1381,7 +1447,7 @@ impl<'a> Resolver<'a> {
                 let arity_err = |me: &mut Self, want: usize| {
                     let d = Diagnostic::error(
                         "E0106",
-                        format!("`{}` takes {} type argument{}, but {} were given", name, want, if want == 1 { "" } else { "s" }, targs.len()),
+                        format!("`{}` takes {} type argument{}, but {}", name, want, if want == 1 { "" } else { "s" }, given(targs.len())),
                     )
                     .at(span);
                     me.error(d);
@@ -1464,6 +1530,12 @@ impl<'a> Resolver<'a> {
                                 d = d.help(format!("did you mean `{}`?", h));
                                 if self.ctx.sm.snippet(name_span) == &*name {
                                     d = d.fix(name_span, h);
+                                }
+                            } else if let Some(alias) = self.module_with(&name) {
+                                d = d.help(format!("`{}` is defined in the imported module `{}`: write `{}.{}`", name, alias, alias, name));
+                                let name_span = Span::new(span.file, span.start as usize, span.start as usize + name.len());
+                                if self.modules_with(&name) == 1 && self.ctx.sm.snippet(name_span) == &*name {
+                                    d = d.fix(name_span, format!("{}.{}", alias, name));
                                 }
                             } else if let Some(s) = suggest(&name, cands.iter().map(|s| s.as_str())) {
                                 d = d.help(format!("did you mean `{}`?", s));
@@ -2004,6 +2076,8 @@ impl<'a> Resolver<'a> {
     /// built-in that has no side effects (`xs.sort()` instead of `xs.sort!()`).
     fn check_discarded(&mut self, e: &Expr) {
         let (name, res, mutating) = match &e.kind {
+            // (Not again when the receiver is undefined: `foo.sort()`.)
+            ExprKind::MethodCall { receiver, .. } if matches!(&receiver.kind, ExprKind::Var(v) if v.res == VarRes::Unresolved) => return,
             ExprKind::MethodCall { method, mutating, .. } => (&method.name, method.res, *mutating),
             ExprKind::Call { callee, .. } => match &callee.kind {
                 ExprKind::Var(v) => (&v.name, v.res, v.name.ends_with('!')),
@@ -2159,12 +2233,10 @@ impl<'a> Resolver<'a> {
                     } else {
                         format!("{} to {}", b.min, b.max)
                     };
-                    let d = Diagnostic::error(
-                        "E0107",
-                        format!("`{}` takes {} argument{}, but {} were given", b.name, expect, if expect == "1" { "" } else { "s" }, positional),
-                    )
-                    .at(span)
-                    .note(format!("usage: {}", b.doc.lines().next().unwrap_or("")));
+                    let d =
+                        Diagnostic::error("E0107", format!("`{}` takes {} argument{}, but {}", b.name, expect, plural(&expect), given(positional)))
+                            .at(span)
+                            .note(format!("usage: {}", b.doc.lines().next().unwrap_or("")));
                     // `set([1, 2])` from Python: a set of values is `to_set`.
                     let d = if b.name == "set" && positional <= 1 { d.help("for a set of values, use `to_set(xs)`") } else { d };
                     self.error(d);
@@ -2213,7 +2285,7 @@ impl<'a> Resolver<'a> {
         if positional > total {
             let d = Diagnostic::error(
                 "E0107",
-                format!("{} `{}` takes {} argument{}, but {} were given", what, name, total, if total == 1 { "" } else { "s" }, positional),
+                format!("{} `{}` takes {} argument{}, but {}", what, name, total, if total == 1 { "" } else { "s" }, given(positional)),
             )
             .at(span)
             .note(format!("`{}` is defined at {}", name, self.line_of(def_span)));
@@ -2269,6 +2341,18 @@ impl<'a> Resolver<'a> {
 
     fn expr(&mut self, e: &mut Expr) {
         let span = e.span;
+        // `Math.max(a, b)`, `math.pi`, `console.log(x)`: other languages'
+        // namespaces for what are built-ins here.
+        match &mut e.kind {
+            ExprKind::Field { target, name, name_span } if self.foreign_member(target, name, *name_span, None) => return,
+            ExprKind::MethodCall { receiver, method, method_span, args, mutating: false, .. }
+                if self.foreign_member(receiver, &method.name, *method_span, Some(args.len())) =>
+            {
+                self.args(args);
+                return;
+            }
+            _ => {}
+        }
         // Module member access is rewritten into a direct global reference.
         let mut replacement: Option<ExprKind> = None;
         match &mut e.kind {

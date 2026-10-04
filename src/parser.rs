@@ -228,7 +228,45 @@ impl<'s> Parser<'s> {
             let before = &self.src[..open_span.start as usize];
             let line = before.matches('\n').count() + 1;
             let col = before.chars().rev().take_while(|c| *c != '\n').count() + 1;
-            Err(self.unexpected(what).note(format!("the `{}` that needs closing is at line {}, column {}", open, line, col)))
+            let d = self.unexpected(what).note(format!("the `{}` that needs closing is at line {}, column {}", open, line, col));
+            Err(self.arrow_function(d))
+        }
+    }
+
+    /// At a `=>` after `x` or `(a, b)` that starts an expression: an arrow
+    /// function from JavaScript, C# or Scala.
+    fn arrow_function(&self, d: Diagnostic) -> Diagnostic {
+        if self.peek() != &Tok::FatArrow {
+            return d;
+        }
+        // Where an expression may start (not a guard's `if`, not a call).
+        let starts =
+            |i: usize| i > 0 && matches!(self.toks[i - 1].tok, Tok::Assign | Tok::LParen | Tok::Comma | Tok::LBracket | Tok::Colon | Tok::Return);
+        let prev = self.pos - 1;
+        let fix = match &self.toks[prev].tok {
+            Tok::Ident(x) if starts(prev) => Some((self.toks[prev].span, format!("fn({})", x))),
+            Tok::RParen => {
+                // `(a, b)` or `()`: names separated by commas.
+                let mut i = prev;
+                while i > 0 && matches!(self.toks[i - 1].tok, Tok::Ident(_) | Tok::Comma) {
+                    i -= 1;
+                }
+                let open = i.checked_sub(1).filter(|&o| self.toks[o].tok == Tok::LParen);
+                let names = &self.toks[i..prev];
+                let alternating = names.iter().enumerate().all(|(k, t)| matches!((k % 2, &t.tok), (0, Tok::Ident(_)) | (1, Tok::Comma)));
+                match open {
+                    Some(o) if starts(o) && alternating && names.len() % 2 == names.len().min(1) => {
+                        let at = self.toks[o].span;
+                        Some((Span { end: at.start, ..at }, "fn".to_string()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        match fix {
+            Some((span, text)) => d.help("an anonymous function is written `fn(x) => x * 2`").fix(span, text),
+            None => d,
         }
     }
 
@@ -246,6 +284,14 @@ impl<'s> Parser<'s> {
                 let prev_word = if let Tok::Ident(w) = &prev.tok { Some(&**w) } else { None };
                 d = match self.peek() {
                     Tok::Assign => d.help("only variables, fields and indexes can be assigned to"),
+                    Tok::FatArrow => {
+                        let d = self.arrow_function(d);
+                        if d.fixes.is_empty() {
+                            d.help("put each statement on its own line, or separate statements with `;`")
+                        } else {
+                            d
+                        }
+                    }
                     // `} elif x {`
                     Tok::Ident(w) if matches!(&**w, "elif" | "elsif" | "elseif") && prev.tok == Tok::RBrace => {
                         d.help("write `else if`").fix(self.span(), "else if")
@@ -257,6 +303,11 @@ impl<'s> Parser<'s> {
                     Tok::Ident(_) if matches!(prev_word, Some("const" | "val")) && self.peek_at(1) == &Tok::Assign => {
                         d.help("use `let` (a `let` never changes)").fix(prev.span, "let")
                     }
+                    // (No fix: the name must change too, everywhere it is used.)
+                    Tok::Upper(n) if matches!(prev_word, Some("const" | "val")) && self.peek_at(1) == &Tok::Assign => d.help(format!(
+                        "use `let` with a lowercase name: `let {} = ...` (a `let` never changes; uppercase names are for types and constructors)",
+                        snake_case(n)
+                    )),
                     Tok::Ident(_) | Tok::Upper(_) if matches!(self.toks[self.pos - 1].tok, Tok::Ident(_) | Tok::Upper(_)) => {
                         d.help("two names in a row: is an operator or a comma missing?")
                     }
@@ -775,6 +826,8 @@ impl<'s> Parser<'s> {
                     Tok::StarAssign => Some(Some(BinOp::Mul)),
                     Tok::SlashAssign => Some(Some(BinOp::Div)),
                     Tok::PercentAssign => Some(Some(BinOp::Mod)),
+                    Tok::SlashSlashAssign => Some(Some(BinOp::FloorDiv)),
+                    Tok::StarStarAssign => Some(Some(BinOp::Pow)),
                     _ => None,
                 };
                 if let Some(op) = op {
@@ -1631,6 +1684,8 @@ impl<'s> Parser<'s> {
             Tok::StarAssign => Some(Some(BinOp::Mul)),
             Tok::SlashAssign => Some(Some(BinOp::Div)),
             Tok::PercentAssign => Some(Some(BinOp::Mod)),
+            Tok::SlashSlashAssign => Some(Some(BinOp::FloorDiv)),
+            Tok::StarStarAssign => Some(Some(BinOp::Pow)),
             _ => None,
         };
         let Some(op) = op else { return Ok(e) };

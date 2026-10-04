@@ -1,0 +1,12 @@
+// Habits from JavaScript that `cogito fix` rewrites.
+const xs = [3, 1, 2]
+let doubled = xs.map(x => x * 2)
+let total = xs.reduce((a, b) => a + b)
+let answer = () => 42
+console.log(doubled, total, answer())
+console.log(xs.length, "abc".length)   // lengths
+console.log(Math.max(1, 2), Math.floor(2.5), Math.abs(-1))
+console.log(Math.sqrt(16.0), Math.log(1.0), Math.PI > 3.0)
+if (xs.length === 3) {
+  console.error("three")
+}

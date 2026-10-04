@@ -70,6 +70,8 @@ pub enum Tok {
     StarAssign,
     SlashAssign,
     PercentAssign,
+    SlashSlashAssign,
+    StarStarAssign,
     EqEq,
     NotEq,
     Lt,
@@ -232,6 +234,8 @@ impl Tok {
             Tok::StarAssign => "*=",
             Tok::SlashAssign => "/=",
             Tok::PercentAssign => "%=",
+            Tok::SlashSlashAssign => "//=",
+            Tok::StarStarAssign => "**=",
             Tok::EqEq => "==",
             Tok::NotEq => "!=",
             Tok::Lt => "<",
@@ -574,9 +578,43 @@ impl<'a> Lexer<'a> {
                         self.pos += 1;
                     }
                 }
+                // A comment in the style of C, Java, JavaScript, Rust, Go...
+                b'/' if self.slash_comment() => {
+                    let start = self.pos;
+                    // (`///` too.)
+                    let slashes = self.b[start..self.end].iter().take_while(|&&c| c == b'/').count();
+                    let d = self
+                        .err("E0010", "comments start with `#`, not `//`", start, start + 2)
+                        .help("`//` is floor division in Cogito: write the comment as `# ...`")
+                        .fix(Span::new(self.file, start, start + slashes), "#");
+                    self.substituted.push(d);
+                    while self.pos < self.end && self.b[self.pos] != b'\n' {
+                        self.pos += 1;
+                    }
+                }
                 _ => break,
             }
         }
+    }
+
+    /// Whether the `//` here can only be meant as a comment: it starts a
+    /// line (where a newline ends the statement), or prose follows it (two
+    /// words in a row, which floor division cannot be followed by).
+    fn slash_comment(&self) -> bool {
+        let rest = &self.b[self.pos..self.end];
+        if !rest.starts_with(b"//") || rest.starts_with(b"//=") {
+            return false;
+        }
+        let before = &self.b[..self.pos];
+        let line_start = before.iter().rev().take_while(|&&c| c != b'\n').all(|&c| c == b' ' || c == b'\t');
+        if line_start && self.newline_significant() {
+            return true;
+        }
+        let line = rest[2..].split(|&c| c == b'\n').next().unwrap_or(&[]);
+        let line = std::str::from_utf8(line).unwrap_or("");
+        let mut words = line.split([' ', '\t']).filter(|w| !w.is_empty());
+        let word = |w: Option<&str>| w.filter(|w| w.chars().all(|c| c.is_ascii_alphabetic()) && !KEYWORDS.contains(w)).is_some();
+        line.starts_with([' ', '\t']) && word(words.next()) && word(words.next())
     }
 
     fn continuation_ahead(&self) -> bool {
@@ -846,11 +884,13 @@ impl<'a> Lexer<'a> {
                 _ => (Tok::Plus, 1),
             },
             b'*' => match c1 {
+                b'*' if c2 == b'=' => (Tok::StarStarAssign, 3),
                 b'*' => (Tok::StarStar, 2),
                 b'=' => (Tok::StarAssign, 2),
                 _ => (Tok::Star, 1),
             },
             b'/' => match c1 {
+                b'/' if c2 == b'=' => (Tok::SlashSlashAssign, 3),
                 b'/' => (Tok::SlashSlash, 2),
                 b'=' => (Tok::SlashAssign, 2),
                 _ => (Tok::Slash, 1),

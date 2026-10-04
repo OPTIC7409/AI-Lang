@@ -979,8 +979,19 @@ impl<'a> Checker<'a> {
                                 _ => format!("{} has no field `{}`", a(&t), name),
                             };
                             let callable = self.ctx.builtins.values.contains_key(name);
+                            // (A built-in that takes only the receiver can be called with `()`.)
+                            let receiver_only = self.ctx.builtins.values.get(name).is_some_and(|&slot| match self.ctx.globals[slot as usize].kind {
+                                GlobalKind::Builtin(i) => crate::builtins::BUILTINS[i as usize].min <= 1,
+                                _ => false,
+                            });
+                            let sized = matches!(t, Ty::List(_) | Ty::Str | Ty::Map(..) | Ty::Set(_) | Ty::Range);
                             let d = self.error(*name_span, msg, "no such field");
-                            if callable && fieldless {
+                            if sized && matches!(&**name, "length" | "size" | "count") {
+                                d.help = Some("the number of elements is `.len()`".into());
+                                d.fixes.push(crate::diagnostic::Fix { span: *name_span, text: "len()".into() });
+                            } else if callable && fieldless && !receiver_only {
+                                d.help = Some(format!("`{}` is a function: call it with its arguments, `.{}(...)`", name, name));
+                            } else if callable && fieldless {
                                 d.help = Some(format!("to call the function `{}`, write `.{}()`", name, name));
                                 d.fixes.push(crate::diagnostic::Fix { span: Span { start: name_span.end, ..*name_span }, text: "()".into() });
                             } else if matches!(t, Ty::Tuple(_)) {
@@ -1580,11 +1591,17 @@ impl<'a> Checker<'a> {
                         }
                         _ => format!("{} is never equal to {}", a(l), a(r)),
                     };
+                    let collections = |x: &Ty| matches!(x, Ty::Range | Ty::List(_) | Ty::Set(_) | Ty::Str);
+                    let help = if collections(l) && collections(r) {
+                        "convert one side first: `to_list(x)` (a Range, Set or Str as a List), `to_set(xs)`"
+                    } else {
+                        "convert one side first (`str(n)`, `parse_int(s)`, `Some(x)`), or compare the right values"
+                    };
                     let d = Diagnostic::warning("W0009", format!("this comparison is always {}", always))
                         .at(span)
                         .label("values of different types")
                         .note(why)
-                        .help("convert one side first (`str(n)`, `parse_int(s)`, `Some(x)`), or compare the right values");
+                        .help(help);
                     self.diags.push(d);
                 }
                 Ty::Bool
