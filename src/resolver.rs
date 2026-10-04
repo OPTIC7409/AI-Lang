@@ -112,6 +112,10 @@ pub struct Resolver<'a> {
     /// Steps left for the current exhaustiveness check (which is exponential
     /// in the worst case); when they run out, the match is checked at runtime.
     exhaust_steps: std::cell::Cell<u32>,
+    /// Set when the exhaustiveness search ran out of steps or depth.
+    exhaust_gave_up: std::cell::Cell<bool>,
+    /// The fields of the matched value's declared record type, if known.
+    scrutinee_fields: Option<Rc<[Name]>>,
     ns: Namespace,
     fns: Vec<FnCtx>,
     diags: Vec<Diagnostic>,
@@ -136,6 +140,8 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
         diags: vec![],
         repl,
         exhaust_steps: std::cell::Cell::new(0),
+        exhaust_gave_up: std::cell::Cell::new(false),
+        scrutinee_fields: None,
         resolving_alias: None,
         dir: dir.to_path_buf(),
         generics: vec![],
@@ -144,9 +150,61 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
         or_bindings: None,
         pat_names: vec![],
     };
+    // Every record field name in the file, wherever it appears: a method
+    // call `r.count()` may call a field, so its arity cannot be checked.
+    let mut fields = HashSet::new();
+    for item in &prog.items {
+        match item {
+            Item::Stmt(s) => stmt_record_fields(s, &mut fields),
+            Item::Fn(def) => fn_record_fields(def, &mut fields),
+            Item::Test(t) => fn_record_fields(&t.func, &mut fields),
+            Item::Property(p) => fn_record_fields(&p.func, &mut fields),
+            _ => {}
+        }
+    }
+    r.ctx.known_fields.extend(fields);
     r.program(prog);
     *ns = std::mem::take(&mut r.ns);
     r.diags
+}
+
+fn fn_record_fields(def: &FnDef, out: &mut HashSet<Name>) {
+    record_fields(&def.body, out);
+    def.requires.iter().chain(&def.ensures).for_each(|e| record_fields(e, out));
+}
+
+fn stmt_record_fields(s: &Stmt, out: &mut HashSet<Name>) {
+    match &s.kind {
+        StmtKind::Let { value, .. } => record_fields(value, out),
+        StmtKind::Assign { target, value, .. } => {
+            record_fields(target, out);
+            record_fields(value, out);
+        }
+        StmtKind::Fn { def, .. } => fn_record_fields(def, out),
+        StmtKind::Assert { cond, msg } => {
+            record_fields(cond, out);
+            if let Some(m) = msg {
+                record_fields(m, out);
+            }
+        }
+        StmtKind::Expr(e) => record_fields(e, out),
+    }
+}
+
+fn record_fields(e: &Expr, out: &mut HashSet<Name>) {
+    match &e.kind {
+        ExprKind::Record { names, .. } => out.extend(names.iter().cloned()),
+        // (`for_each_child` does not enter local functions.)
+        ExprKind::Block(stmts) => {
+            for s in stmts {
+                if let StmtKind::Fn { def, .. } = &s.kind {
+                    fn_record_fields(def, out);
+                }
+            }
+        }
+        _ => {}
+    }
+    for_each_child(e, &mut |c| record_fields(c, out));
 }
 
 fn confusion_hint(name: &str) -> Option<&'static str> {
@@ -323,6 +381,8 @@ impl<'a> Resolver<'a> {
                 ExprKind::Var(Var { res: VarRes::Global(s), .. }) => *s,
                 _ => return None,
             },
+            // A function of the same name in an imported module may answer.
+            ExprKind::MethodCall { method, .. } if self.ctx.module_fns.contains(&method.name) => return None,
             ExprKind::MethodCall { method: Var { res: VarRes::Global(s), .. }, .. } => *s,
             _ => return None,
         };
@@ -330,18 +390,26 @@ impl<'a> Resolver<'a> {
             Ty::Named { id, .. } if *id == crate::types::OPTION_ID || *id == crate::types::RESULT_ID => Some(*id),
             _ => None,
         };
-        match &self.ctx.globals[slot as usize].kind {
-            GlobalKind::Builtin(i) => {
-                let sig = crate::builtins::BUILTINS[*i as usize].doc.lines().next().unwrap_or("");
-                match (sig.contains("-> Option"), sig.contains("-> Result")) {
-                    (true, false) => Some(crate::types::OPTION_ID),
-                    (false, true) => Some(crate::types::RESULT_ID),
-                    _ => None,
-                }
+        let builtin_kind = |i: u16| {
+            let sig = crate::builtins::BUILTINS[i as usize].doc.lines().next().unwrap_or("");
+            match (sig.contains("-> Option"), sig.contains("-> Result")) {
+                (true, false) => Some(crate::types::OPTION_ID),
+                (false, true) => Some(crate::types::RESULT_ID),
+                _ => None,
             }
+        };
+        let info = &self.ctx.globals[slot as usize];
+        match &info.kind {
+            GlobalKind::Builtin(i) => builtin_kind(*i),
             GlobalKind::Fn => {
                 let sigs = self.ctx.sigs.get(&slot)?;
-                let kinds: Vec<Option<u32>> = sigs.iter().map(|s| s.ret.as_ref().and_then(kind_of)).collect();
+                let mut kinds: Vec<Option<u32>> = sigs.iter().map(|s| s.ret.as_ref().and_then(kind_of)).collect();
+                // A user function named like a built-in falls back to it.
+                if let Some(&b) = self.ctx.builtins.values.get(&info.name) {
+                    if let GlobalKind::Builtin(i) = self.ctx.globals[b as usize].kind {
+                        kinds.push(builtin_kind(i));
+                    }
+                }
                 if kinds.iter().all(|k| *k == kinds[0]) {
                     kinds[0]
                 } else {
@@ -1899,7 +1967,16 @@ impl<'a> Resolver<'a> {
                     }
                 }
                 if self.diags.iter().filter(|d| d.is_error()).count() == errors_before {
+                    // A declared record type says which fields the value has.
+                    self.scrutinee_fields = match self.declared_type_of(scrutinee) {
+                        Some(Ty::Named { id, .. }) => match self.ctx.types.get(id as usize).map(|t| &t.kind) {
+                            Some(TypeKind::Record { fields, .. }) => Some(fields.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
                     self.check_exhaustive(arms, head);
+                    self.scrutinee_fields = None;
                 }
             }
             ExprKind::Block(stmts) => self.block(stmts),
@@ -2173,11 +2250,21 @@ impl<'a> Resolver<'a> {
         }
         let rows: Vec<Vec<Option<&Pattern>>> = arms.iter().filter(|a| a.guard.is_none()).map(|a| vec![Some(&a.pat)]).collect();
         self.exhaust_steps.set(20_000);
+        self.exhaust_gave_up.set(false);
         if let Some(w) = self.missing(rows, 1, 0) {
             let witness = w.into_iter().next().unwrap_or_else(|| "_".into());
-            let d = Diagnostic::error("E0109", format!("non-exhaustive match: `{}` is not handled", witness))
+            let mut d = Diagnostic::error("E0109", format!("non-exhaustive match: `{}` is not handled", witness))
                 .at(span)
                 .help(format!("add an arm for `{}`, or a catch-all arm `_ => ...`", witness));
+            if witness.contains("..") && arms.iter().any(|a| has_exact_record(&a.pat)) {
+                d = d.note("a record pattern without `..` matches only records with exactly its fields; write `{ x, y, .. }` to allow others");
+            }
+            self.error(d);
+        } else if self.exhaust_gave_up.get() {
+            // Never accept a match as exhaustive without having shown it.
+            let d = Diagnostic::error("E0109", "this match has too many combinations to check that it is exhaustive")
+                .at(span)
+                .help("add a catch-all arm `_ => ...`");
             self.error(d);
         }
     }
@@ -2187,11 +2274,16 @@ impl<'a> Resolver<'a> {
     fn missing<'p>(&self, rows: Vec<Vec<Option<&'p Pattern>>>, n: usize, depth: usize) -> Option<Vec<String>> {
         let steps = self.exhaust_steps.get();
         if depth > 64 || steps == 0 {
+            self.exhaust_gave_up.set(true);
             return None;
         }
         self.exhaust_steps.set(steps - 1);
         if n == 0 {
             return if rows.is_empty() { Some(vec![]) } else { None };
+        }
+        // A row of catch-alls matches whatever the other rows miss.
+        if rows.iter().any(|r| r.iter().all(|c| c.is_none_or(|p| p.covers()))) {
+            return None;
         }
         // Normalize the first column: bindings and catch-alls become wildcards,
         // `x @ p` becomes p, and or-patterns become several rows.
@@ -2215,7 +2307,9 @@ impl<'a> Resolver<'a> {
             }
         }
         let rows = norm;
-        let first = rows.iter().find_map(|r| r[0]);
+        // A constructor pattern says what type the column has (a record
+        // pattern in the same column is then read against that type).
+        let first = rows.iter().find_map(|r| r[0].filter(|p| matches!(p.kind, PatKind::Ctor { .. }))).or_else(|| rows.iter().find_map(|r| r[0]));
         let Some(first) = first else {
             // Only wildcards in this column.
             let rest: Vec<_> = rows.into_iter().map(|r| r[1..].to_vec()).collect();
@@ -2256,6 +2350,7 @@ impl<'a> Resolver<'a> {
                     }
                     TypeKind::Record { fields, .. } if ctor.is_record => {
                         let arity = fields.len();
+                        let names = fields.clone();
                         ctors.push((
                             td.name.to_string(),
                             arity,
@@ -2266,6 +2361,18 @@ impl<'a> Resolver<'a> {
                                         if (*idx as usize) < arity {
                                             sub[*idx as usize] = Some(a);
                                         }
+                                    }
+                                    Some(sub)
+                                }
+                                // `{ a: true, .. }` on this record type.
+                                PatKind::Record { fields, rest } => {
+                                    if !*rest && fields.len() != names.len() {
+                                        return None;
+                                    }
+                                    let mut sub = vec![None; arity];
+                                    for (n, a) in fields {
+                                        let i = names.iter().position(|x| x == n)?;
+                                        sub[i] = Some(a);
                                     }
                                     Some(sub)
                                 }
@@ -2310,17 +2417,23 @@ impl<'a> Resolver<'a> {
                 });
             }
             // Lists: a pattern without `..` matches one length, one with `..`
-            // every length from its minimum up. All lengths beyond the longest
-            // pattern behave alike, so lengths 0..=max+1 cover every case.
+            // every length from its minimum up. Once a list is longer than
+            // every fixed-length pattern and than the longest prefix plus the
+            // longest suffix (so that no `[a, ..]` and `[.., z]` overlap), all
+            // lengths behave alike: lengths 0..=that+1 cover every case.
             PatKind::List { .. } => {
-                let lens: Vec<(usize, bool)> = rows
-                    .iter()
-                    .filter_map(|r| match r[0].map(|p| &p.kind) {
-                        Some(PatKind::List { before, rest, after }) => Some((before.len() + after.len(), rest.is_some())),
-                        _ => None,
-                    })
-                    .collect();
-                let longest = lens.iter().map(|(n, _)| *n).max().unwrap_or(0);
+                let (mut fixed, mut prefix, mut suffix) = (0, 0, 0);
+                for r in &rows {
+                    match r[0].map(|p| &p.kind) {
+                        Some(PatKind::List { before, rest: None, after }) => fixed = fixed.max(before.len() + after.len()),
+                        Some(PatKind::List { before, rest: Some(_), after }) => {
+                            prefix = prefix.max(before.len());
+                            suffix = suffix.max(after.len());
+                        }
+                        _ => {}
+                    }
+                }
+                let longest = fixed.max(prefix + suffix);
                 for len in 0..=longest + 1 {
                     let open = len == longest + 1;
                     ctors.push((
@@ -2358,13 +2471,35 @@ impl<'a> Resolver<'a> {
                 let label = format!("{{{}", names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("\u{0}"));
                 let names2 = names.clone();
                 ctors.push((
-                    label,
+                    label.clone(),
                     names.len(),
                     Box::new(move |p: &'p Pattern, _| match &p.kind {
                         PatKind::Record { fields, .. } => Some(names2.iter().map(|n| fields.iter().find(|(f, _)| f == n).map(|(_, p)| p)).collect()),
                         _ => None,
                     }),
                 ));
+                // A pattern without `..` matches only records with exactly its
+                // fields, so a record with one more field must be matched by
+                // a pattern with `..` (or a wildcard), unless the value's
+                // declared type has exactly the pattern's fields.
+                let all_fields = if depth == 0 { self.scrutinee_fields.clone() } else { None };
+                let complete = move |fields: &[(Name, Pattern)]| {
+                    all_fields.as_ref().is_some_and(|all| all.len() == fields.len() && fields.iter().all(|(f, _)| all.contains(f)))
+                };
+                let exact = rows.iter().any(|r| matches!(r[0].map(|p| &p.kind), Some(PatKind::Record { rest: false, fields }) if !complete(fields)));
+                if exact {
+                    let names3 = names.clone();
+                    ctors.push((
+                        label,
+                        names.len(),
+                        Box::new(move |p: &'p Pattern, _| match &p.kind {
+                            PatKind::Record { fields, rest } if *rest || complete(fields) => {
+                                Some(names3.iter().map(|n| fields.iter().find(|(f, _)| f == n).map(|(_, p)| p)).collect())
+                            }
+                            _ => None,
+                        }),
+                    ));
+                }
             }
             _ => return None,
         }
@@ -2515,6 +2650,8 @@ fn pattern_mismatch<'p>(p: &'p Pattern, ty: &Ty) -> Option<&'p Pattern> {
         (PatKind::Or(alts), _) => return alts.iter().find_map(|a| pattern_mismatch(a, ty)),
         // (Sub-patterns of a constructor are not checked here.)
         (PatKind::Ctor { ctor, .. }, Ty::Named { id, .. }) => ctor.type_id == *id,
+        // A structural annotation `{ x: Float }` also accepts declared records.
+        (PatKind::Ctor { ctor, .. }, Ty::Record(_)) => ctor.is_record,
         (PatKind::Ctor { .. }, _) => false,
         (PatKind::Lit(Lit::Bool(_)), t) => matches!(t, Ty::Bool),
         (PatKind::Lit(Lit::Int(_) | Lit::Float(_)), t) => matches!(t, Ty::Int | Ty::Float),
@@ -2539,6 +2676,20 @@ fn pattern_mismatch<'p>(p: &'p Pattern, ty: &Ty) -> Option<&'p Pattern> {
     } else {
         Some(p)
     }
+}
+
+/// Whether a pattern contains a record pattern without `..`.
+fn has_exact_record(p: &Pattern) -> bool {
+    let mut ps = vec![];
+    flatten_alts(p, &mut ps);
+    ps.iter().any(|p| match &p.kind {
+        PatKind::Record { rest: false, .. } => true,
+        PatKind::Record { fields, .. } => fields.iter().any(|(_, f)| has_exact_record(f)),
+        PatKind::Tuple(items) => items.iter().any(has_exact_record),
+        PatKind::List { before, after, .. } => before.iter().chain(after.iter()).any(has_exact_record),
+        PatKind::Ctor { args, .. } => args.iter().any(|(_, a)| has_exact_record(a)),
+        _ => false,
+    })
 }
 
 fn flatten_alts<'p>(p: &'p Pattern, out: &mut Vec<&'p Pattern>) {

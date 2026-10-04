@@ -84,7 +84,9 @@ impl fmt::Display for Ty {
             }
             Ty::Record(fs) => {
                 write!(f, "{{ ")?;
-                for (i, (n, t)) in fs.iter().enumerate() {
+                // (The type checker marks a record literal's exact type with
+                // a field named "", which is not shown.)
+                for (i, (n, t)) in fs.iter().filter(|(n, _)| !n.is_empty()).enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }

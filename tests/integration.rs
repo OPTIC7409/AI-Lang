@@ -135,6 +135,21 @@ fn repl_evaluates_piped_input() {
 }
 
 #[test]
+fn exhaustiveness_never_gives_up_silently() {
+    // 70 columns is deeper than the exhaustiveness search goes: rather than
+    // accept the match unchecked, `check` asks for a catch-all arm.
+    let n = 70;
+    let mut src = "fn f(t) -> Int => match t {\n".to_string();
+    for i in 0..n {
+        let row: Vec<&str> = (0..n).map(|j| if i == j { "true" } else { "_" }).collect();
+        src += &format!("  ({}) => {}\n", row.join(", "), i);
+    }
+    src += &format!("  ({}) => -1\n}}\n", vec!["false"; n].join(", "));
+    let out = cogito(&["eval", &src]);
+    assert!(text(&out.stderr).contains("too many combinations"), "stderr: {}", text(&out.stderr));
+}
+
+#[test]
 fn spec_is_embedded() {
     let out = cogito(&["spec"]);
     assert!(out.status.success());

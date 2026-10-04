@@ -74,3 +74,89 @@ test "slices drop from either end" {
   assert xs[..-1] == [1, 2, 3] and xs[-2..] == [3, 4]
   assert "abc"[..-1] == "ab"
 }
+
+type Flags = { a: Bool, b: Int }
+
+fn flag_value(p: Flags) -> Int => match p {
+  { a: true, .. } => 1
+  Flags(false, _) => 0
+}
+
+fn ends(xs: List[Bool]) -> Str => match xs {
+  [] => "empty"
+  [true, ..] => "starts T"
+  [.., true] => "ends T"
+  [false, .., false] => "F...F"
+  [false] => "F"
+}
+
+test "record and constructor patterns of one type combine in a match" {
+  assert flag_value(Flags(true, 5)) == 1 and flag_value(Flags(false, 5)) == 0
+}
+
+test "list patterns with a prefix and a suffix" {
+  assert ends([false, true, false]) == "F...F"
+  assert ends([false]) == "F" and ends([false, true]) == "ends T"
+}
+
+# Programs the static checker once rejected, though they run correctly.
+
+type Box[T] = { v: T, n: Int }
+
+type Pair[T] = { a: T, b: T }
+
+fn relabel(b: Box[Int]) -> Box[Str] => { ..b, v: "x" }
+
+fn first_field(r: { a: Int }) -> Int => r.b
+
+fn wide() -> { a: Int } => { a: 1, b: 2 }
+
+type Spot = { x: Float, y: Float }
+
+fn spot_name(r: { x: Float, y: Float }) -> Str => match r {
+  Spot(x, _) => "spot at {x}"
+  _ => "other"
+}
+
+fn apply(f: fn(Int) -> Int) -> Str {
+  let s: Str = f(1)
+  s
+}
+
+fn first_even(xs: List[Int]) -> Int {
+  for x in xs {
+    if x % 2 == 0 {
+      return x
+    }
+  }
+  assert false, "no even number"
+}
+
+fn call_count(r) => r.count()
+
+test "generic type arguments are not inferred from one constructor call" {
+  assert relabel(Box(1, 0)).v == "x"
+  var b = Box(1, 0)
+  b.v = 2.5
+  assert b.v == 2.5
+  let p = Pair(1, "x")
+  assert p.a + 1 == 2
+}
+
+test "a structural annotation accepts records with more fields" {
+  assert first_field({ a: 1, b: 2 }) == 2
+  assert wide().b == 2
+  assert spot_name(Spot(1.0, 2.0)) == "spot at 1.0"
+}
+
+test "results of built-ins and function values" {
+  let r: Range = range(3)
+  assert r.to_list() == [0, 1, 2]
+  let cs: List[Str] = shuffle("ab")
+  assert cs.sort() == ["a", "b"]
+  let port: Int = env("COGITO_TEST_UNSET").unwrap_or(8080)
+  assert port == 8080
+  assert apply(fn(x) => "got {x}") == "got 1"
+  assert first_even([3, 4]) == 4
+  assert call_count({ count: fn() => 7 }) == 7
+}

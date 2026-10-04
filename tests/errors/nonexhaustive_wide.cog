@@ -1,0 +1,19 @@
+# expect: E0109
+# Each arm handles one `true`; nothing handles all `false`.
+fn f(t: (Bool, Bool, Bool, Bool, Bool, Bool, Bool, Bool, Bool, Bool, Bool, Bool, Bool, Bool)) -> Int => match t {
+  (true, _, _, _, _, _, _, _, _, _, _, _, _, _) => 1
+  (_, true, _, _, _, _, _, _, _, _, _, _, _, _) => 2
+  (_, _, true, _, _, _, _, _, _, _, _, _, _, _) => 3
+  (_, _, _, true, _, _, _, _, _, _, _, _, _, _) => 4
+  (_, _, _, _, true, _, _, _, _, _, _, _, _, _) => 5
+  (_, _, _, _, _, true, _, _, _, _, _, _, _, _) => 6
+  (_, _, _, _, _, _, true, _, _, _, _, _, _, _) => 7
+  (_, _, _, _, _, _, _, true, _, _, _, _, _, _) => 8
+  (_, _, _, _, _, _, _, _, true, _, _, _, _, _) => 9
+  (_, _, _, _, _, _, _, _, _, true, _, _, _, _) => 10
+  (_, _, _, _, _, _, _, _, _, _, true, _, _, _) => 11
+  (_, _, _, _, _, _, _, _, _, _, _, true, _, _) => 12
+  (_, _, _, _, _, _, _, _, _, _, _, _, true, _) => 13
+  (_, _, _, _, _, _, _, _, _, _, _, _, _, true) => 14
+}
+print(f((false, false, false, false, false, false, false, false, false, false, false, false, false, true)))

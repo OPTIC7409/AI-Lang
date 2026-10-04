@@ -1,0 +1,12 @@
+# expect: E0109
+# A prefix and a suffix pattern overlap on short lists, but not on long ones.
+fn f(xs: List[Bool]) -> Str => match xs {
+  [] => "empty"
+  [_] => "one"
+  [_, _] => "two"
+  [true, true, ..] => "starts TT"
+  [.., false, false] => "ends FF"
+  [false, ..] => "starts F"
+  [.., true] => "ends T"
+}
+print(f([true, false, true, false]))

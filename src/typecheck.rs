@@ -26,9 +26,14 @@ use std::rc::Rc;
 /// Check a resolved program; returns the errors found.
 pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
     let mut reassigned = HashSet::new();
+    // Locals of the top-level code (inside a top-level `for` or `if`).
+    let mut top_locals = HashSet::new();
     for item in &prog.items {
         match item {
-            Item::Stmt(s) => scan_stmt(s, &mut reassigned),
+            Item::Stmt(s) => {
+                scan_stmt(s, &mut reassigned);
+                scan_stmt(s, &mut top_locals);
+            }
             Item::Fn(def) => scan(&def.body, &mut reassigned),
             Item::Test(t) => scan(&t.func.body, &mut reassigned),
             Item::Property(p) => scan(&p.func.body, &mut reassigned),
@@ -36,8 +41,11 @@ pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
         }
     }
     let reassigned_globals = reassigned.into_iter().filter_map(|r| if let VarRes::Global(s) = r { Some(s) } else { None }).collect();
-    let mut c =
-        Checker { ctx, diags: Vec::new(), globals: HashMap::new(), frames: vec![Frame::default()], reassigned_globals, divisions: HashSet::new() };
+    let top = Frame {
+        reassigned: top_locals.into_iter().filter_map(|r| if let VarRes::Local(s) = r { Some(s) } else { None }).collect(),
+        ..Frame::default()
+    };
+    let mut c = Checker { ctx, diags: Vec::new(), globals: HashMap::new(), frames: vec![top], reassigned_globals, divisions: HashSet::new() };
     // Top-level statements first (in order), so that functions see the
     // types of the globals they use.
     for item in &prog.items {
@@ -86,6 +94,10 @@ fn scan(e: &Expr, out: &mut HashSet<VarRes>) {
         ExprKind::Block(stmts) => {
             for s in stmts {
                 scan_target(s, out);
+                // (`for_each_child` does not enter local functions.)
+                if let StmtKind::Fn { def, .. } = &s.kind {
+                    scan(&def.body, out);
+                }
             }
         }
         ExprKind::MethodCall { receiver, mutating: true, .. } => {
@@ -96,6 +108,19 @@ fn scan(e: &Expr, out: &mut HashSet<VarRes>) {
         _ => {}
     }
     for_each_child(e, &mut |c| scan(c, out));
+}
+
+/// Whether a statement never finishes normally.
+fn diverges(s: &Stmt) -> bool {
+    match &s.kind {
+        StmtKind::Assert { cond: Expr { kind: ExprKind::Bool(false), .. }, .. } => true,
+        StmtKind::Expr(x) => match &x.kind {
+            ExprKind::Return(_) | ExprKind::Break(_) | ExprKind::Continue => true,
+            ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Var(v) if matches!(&*v.name, "panic" | "todo" | "exit")),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn scan_target(s: &Stmt, out: &mut HashSet<VarRes>) {
@@ -141,12 +166,15 @@ pub fn compatible(ctx: &Ctx, a: &Ty, e: &Ty) -> bool {
         // exactly the same fields.
         (Ty::Record(fs), Ty::Named { id, args, .. }) => match ctx.types.get(*id as usize).map(|t| &t.kind) {
             Some(TypeKind::Record { fields, tys }) => {
+                let fs: Vec<&(Name, Ty)> = fs.iter().filter(|(n, _)| !n.is_empty()).collect();
                 fields.len() == fs.len()
                     && fs.iter().all(|(n, t)| fields.iter().position(|f| f == n).is_some_and(|i| compatible(ctx, t, &tys[i].subst(args))))
             }
             _ => false,
         },
-        (Ty::Record(f1), Ty::Record(f2)) => f2.iter().all(|(n, t)| f1.iter().find(|(m, _)| m == n).is_some_and(|(_, u)| compatible(ctx, u, t))),
+        (Ty::Record(f1), Ty::Record(f2)) => {
+            f2.iter().filter(|(n, _)| !n.is_empty()).all(|(n, t)| f1.iter().find(|(m, _)| m == n).is_some_and(|(_, u)| compatible(ctx, u, t)))
+        }
         // A declared record is checked field by field against a structural annotation.
         (Ty::Named { .. }, Ty::Record(_)) => true,
         (Ty::Fn(..), Ty::Fn(..)) => true,
@@ -348,7 +376,12 @@ impl<'a> Checker<'a> {
                 };
                 let bound = match declared {
                     Some(d) => d,
-                    None if *mutable && stable && matches!(t, Ty::Named { .. }) => t,
+                    // (Without its inferred type arguments: `var b = Box(1)`
+                    // may later get `b.v = 2.5`, which is not checked.)
+                    None if *mutable && stable && matches!(t, Ty::Named { .. }) => match t {
+                        Ty::Named { id, name, .. } => Ty::Named { id, name, args: vec![] },
+                        t => t,
+                    },
                     None if *mutable => Ty::Any,
                     None => t,
                 };
@@ -483,7 +516,7 @@ impl<'a> Checker<'a> {
     /// The type of a field of a value of type `t`, if known.
     fn field_type(&self, t: &Ty, name: &str) -> Option<Ty> {
         match t {
-            Ty::Record(fs) => fs.iter().find(|(n, _)| &**n == name).map(|(_, t)| t.clone()),
+            Ty::Record(fs) => fs.iter().find(|(n, _)| !n.is_empty() && &**n == name).map(|(_, t)| t.clone()),
             Ty::Named { id, args, .. } => {
                 let td = self.type_def(*id)?;
                 match &td.kind {
@@ -566,8 +599,10 @@ impl<'a> Checker<'a> {
                     Some(s) => {
                         let st = self.expr(s);
                         match &st {
-                            // `{ ..p, y: 5 }` keeps p's declared type.
-                            Ty::Named { .. } => {
+                            // `{ ..p, y: 5 }` keeps p's declared type, but not its
+                            // type arguments (`{ ..b, v: "x" }` on a Box[Int]).
+                            Ty::Named { id, name, .. } => {
+                                let st = Ty::Named { id: *id, name: name.clone(), args: vec![] };
                                 for ((n, t), v) in names.iter().zip(&tys).zip(values) {
                                     match self.field_type(&st, n) {
                                         Some(ft) if !self.compatible(t, &ft) => {
@@ -584,7 +619,10 @@ impl<'a> Checker<'a> {
                             _ => Ty::Any,
                         }
                     }
-                    None => Ty::Record(names.iter().cloned().zip(tys).collect()),
+                    // A literal's fields are exactly these (marked by a field
+                    // named ""); an annotation `{ a: Int }` accepts records
+                    // with more fields.
+                    None => Ty::Record(names.iter().cloned().zip(tys).chain(std::iter::once((Name::from(""), Ty::Unit))).collect()),
                 }
             }
             ExprKind::Field { target, name, name_span } => {
@@ -593,7 +631,7 @@ impl<'a> Checker<'a> {
                     Some(ft) => ft,
                     None => {
                         let missing = match &t {
-                            Ty::Record(_) => true,
+                            Ty::Record(fs) => fs.iter().any(|(n, _)| n.is_empty()),
                             Ty::Named { .. } => self.is_record_type(&t),
                             _ => false,
                         };
@@ -627,10 +665,13 @@ impl<'a> Checker<'a> {
                 let arg_tys: Vec<(Option<Name>, Ty, Span)> = args.iter().map(|a| (a.name.clone(), self.expr(&a.value), a.value.span)).collect();
                 match &callee.kind {
                     ExprKind::Var(v) => self.call_named(v, None, &arg_tys, e.span),
-                    _ => match self.expr(callee) {
-                        Ty::Fn(_, r) => *r,
-                        _ => Ty::Any,
-                    },
+                    // A function value's result is not checked against a
+                    // `fn(A) -> B` annotation when the program runs, so it is
+                    // not assumed here either.
+                    _ => {
+                        self.expr(callee);
+                        Ty::Any
+                    }
                 }
             }
             ExprKind::MethodCall { receiver, method, args, mutating, .. } => {
@@ -641,7 +682,7 @@ impl<'a> Checker<'a> {
                 if self.field_type(&rt, &method.name).is_some()
                     || self.has_home(&rt)
                     || *mutating
-                    || (matches!(rt, Ty::Any) && self.ctx.module_fns.contains(&method.name))
+                    || (matches!(rt, Ty::Any) && (self.ctx.module_fns.contains(&method.name) || self.ctx.known_fields.contains(&method.name)))
                 {
                     return Ty::Any;
                 }
@@ -726,7 +767,13 @@ impl<'a> Checker<'a> {
                         _ => self.stmt(s),
                     }
                 }
-                last
+                // A block that stops partway (`return`, `assert false`,
+                // `panic(...)`) never produces its last value.
+                if stmts.iter().any(diverges) {
+                    Ty::Any
+                } else {
+                    last
+                }
             }
             ExprKind::Lambda(def) => {
                 let caps = self.capture_types(def);
@@ -816,7 +863,7 @@ impl<'a> Checker<'a> {
 
     fn field_names(&self, t: &Ty) -> Vec<String> {
         match t {
-            Ty::Record(fs) => fs.iter().map(|(n, _)| n.to_string()).collect(),
+            Ty::Record(fs) => fs.iter().filter(|(n, _)| !n.is_empty()).map(|(n, _)| n.to_string()).collect(),
             Ty::Named { id, .. } => match self.type_def(*id).map(|d| &d.kind) {
                 Some(TypeKind::Record { fields, .. }) => fields.iter().map(|f| f.to_string()).collect(),
                 _ => vec![],
@@ -842,13 +889,11 @@ impl<'a> Checker<'a> {
                     _ => Ty::Any,
                 }
             }
-            VarRes::Local(_) | VarRes::Capture(_) => match self.var(v) {
-                Ty::Fn(_, r) => *r,
-                _ => {
-                    let _ = span;
-                    Ty::Any
-                }
-            },
+            // (See `ExprKind::Call`: a function value's result is unknown.)
+            VarRes::Local(_) | VarRes::Capture(_) => {
+                let _ = span;
+                Ty::Any
+            }
             _ => Ty::Any,
         }
     }
@@ -909,7 +954,10 @@ impl<'a> Checker<'a> {
             let ft = &tys[i];
             if let Ty::Param(p, _) = ft {
                 if let Some(slot) = inferred.get_mut(*p as usize) {
-                    *slot = Some(t.clone());
+                    *slot = Some(match slot.take() {
+                        None => t.clone(),
+                        Some(prev) => join(prev, t.clone()),
+                    });
                 }
                 continue;
             }
@@ -1056,8 +1104,13 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
             Ty::Map(k, v) => list(Ty::Tuple(vec![(**k).clone(), (**v).clone()])),
             _ => Ty::Any,
         },
-        "sort" | "reverse" | "unique" | "filter" | "take" | "drop" | "slice" | "take_while" | "drop_while" | "shuffle" => match &first {
+        "sort" | "reverse" | "unique" | "filter" | "take" | "drop" | "slice" | "take_while" | "drop_while" => match &first {
             Ty::List(_) | Ty::Str => first.clone(),
+            _ => Ty::Any,
+        },
+        "shuffle" => match &first {
+            Ty::List(_) => first.clone(),
+            Ty::Str => list(Ty::Str),
             _ => Ty::Any,
         },
         "first" | "last" | "get" => match &first {
@@ -1073,9 +1126,21 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
             Ty::List(_) | Ty::Str | Ty::Range => list(elem),
             _ => Ty::Any,
         },
-        "range" => list(Ty::Int),
+        "range" => Ty::Range,
         "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" => match &first {
-            Ty::Named { id, args, .. } if (*id == OPTION_ID || *id == RESULT_ID) && !args.is_empty() => args[0].clone(),
+            Ty::Named { id, args: targs, .. } if (*id == OPTION_ID || *id == RESULT_ID) && !targs.is_empty() => {
+                // The default may be of another type (`env("PORT").unwrap_or(8080)`).
+                let default = match (name, args.get(1).map(|a| &a.1)) {
+                    ("unwrap_or", Some(t)) => Some(t.clone()),
+                    ("unwrap_or_else", Some(Ty::Fn(_, r))) => Some((**r).clone()),
+                    ("unwrap_or" | "unwrap_or_else", _) => Some(Ty::Any),
+                    _ => None,
+                };
+                match default {
+                    Some(d) => join(targs[0].clone(), d),
+                    None => targs[0].clone(),
+                }
+            }
             _ => Ty::Any,
         },
         _ => Ty::Any,

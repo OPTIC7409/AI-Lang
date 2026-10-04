@@ -244,7 +244,9 @@ have `_`). This is checked before the program runs, for enums, Bools,
 tuples, records, list lengths and literals (a literal never covers all
 numbers or strings), including nested patterns, and the error names a
 missing case. Arms with guards (`if ...`) do not count toward
-exhaustiveness. Matching a variable declared with a type against patterns
+exhaustiveness. A record pattern without `..` matches only records with
+exactly its fields, so it counts as covering a value only when the value's
+declared type has those fields (otherwise write `{ x, y, .. }`). Matching a variable declared with a type against patterns
 of another type is an error (E0119). A refutable pattern in `let`
 (`let [a, b] = xs`) is allowed and fails at runtime (E0212) if it does not
 match.

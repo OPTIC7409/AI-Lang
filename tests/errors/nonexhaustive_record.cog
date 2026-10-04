@@ -1,0 +1,7 @@
+# expect: E0109
+# Without `..`, a record pattern matches only records with exactly its fields.
+fn f(r) -> Int => match r {
+  { a: true } => 1
+  { a: false } => 0
+}
+print(f({ a: true, b: 1 }))
