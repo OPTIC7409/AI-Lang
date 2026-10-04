@@ -7,6 +7,8 @@
 //!   warning on the first line (`# expect: W0003`, or `# expect: nothing`).
 //! * `tests/verify/*.cog` — programs that `verify` must reject, with a line
 //!   `# expect: text` giving part of the report.
+//! * `tests/fix/*.cog`    — programs that `cogito fix` must turn into
+//!   `tests/fix/NAME.fixed`, which `check` then accepts.
 //! * `examples/*.cog`     — example programs; when `examples/NAME.out` exists,
 //!   the program's output must match it exactly.
 
@@ -89,6 +91,26 @@ fn check_json_output() {
     assert_eq!(lines.len(), 2, "{}", stdout);
     assert!(lines[0].starts_with('{') && lines[0].contains("\"code\":\"E0121\"") && lines[0].contains("\"line\":3,\"column\":15"), "{}", lines[0]);
     assert!(lines[1].contains("\"severity\":\"warning\"") && lines[1].contains("\"code\":\"W0006\""), "{}", lines[1]);
+}
+
+#[test]
+fn fix_rewrites_habits_from_other_languages() {
+    let dir = std::env::temp_dir().join(format!("cogito-fix-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in files("tests/fix", "cog") {
+        let copy = dir.join(f.file_name().unwrap());
+        std::fs::copy(&f, &copy).unwrap();
+        let out = cogito(&["fix", copy.to_str().unwrap()]);
+        let fixed = std::fs::read_to_string(&copy).unwrap();
+        let expected = std::fs::read_to_string(f.with_extension("fixed")).unwrap();
+        assert_eq!(fixed, expected, "{}:\n{}{}", f.display(), text(&out.stdout), text(&out.stderr));
+        assert!(out.status.success(), "{}: `check` rejects the fixed program:\n{}", f.display(), text(&out.stderr));
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+    // `check --json` offers the edits.
+    let out = cogito(&["check", "--json", "tests/fix/habits.cog"]);
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("\"fixes\":[{\"file\":\"tests/fix/habits.cog\",\"line\":9,\"column\":11,"), "{}", stdout);
 }
 
 #[test]
@@ -301,6 +323,19 @@ fn language_server_reports_diagnostics() {
     );
     let hover = recv();
     assert!(hover.contains("n: Int"), "{}", hover);
+    // Code actions: the fix for the problem at the cursor, and "fix all".
+    let src = "var xs = [2, 1]\nxs.sort()\nprint(xs.length())\n";
+    send(&format!(
+        r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"file:///tmp/x.cog","version":4}},"contentChanges":[{{"text":{}}}]}}}}"#,
+        cogito::json::Json::str(src)
+    ));
+    recv();
+    send(
+        r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"range":{"start":{"line":2,"character":12},"end":{"line":2,"character":12}},"context":{"diagnostics":[]}}}"#,
+    );
+    let actions = recv();
+    assert!(actions.contains("\"kind\":\"quickfix\"") && actions.contains("\"newText\":\"len\""), "{}", actions);
+    assert!(actions.contains("Fix all 2 automatically fixable problems") && actions.contains("\"newText\":\"!\""), "{}", actions);
     send(r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#);
     assert!(recv().contains("\"id\":2"));
     send(r#"{"jsonrpc":"2.0","method":"exit"}"#);

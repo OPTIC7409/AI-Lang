@@ -101,14 +101,18 @@ fn new_fn(name: Option<Name>, name_span: Span, span: Span, params: Vec<Param>, b
     }
 }
 
-fn type_name_hint(name: &str) -> Option<&'static str> {
+pub fn type_name_hint(name: &str) -> Option<&'static str> {
     Some(match name {
         "int" | "i64" | "integer" | "i32" | "usize" => "Int",
         "float" | "f64" | "double" | "number" => "Float",
         "str" | "string" | "String" => "Str",
         "bool" | "boolean" => "Bool",
-        "list" | "array" | "vec" | "Vec" | "Array" => "List",
-        "map" | "dict" | "hashmap" | "HashMap" | "Dict" => "Map",
+        "list" | "array" | "vec" | "Vec" | "Array" | "ArrayList" => "List",
+        "map" | "dict" | "hashmap" | "HashMap" | "Dict" | "BTreeMap" => "Map",
+        "set" | "HashSet" | "BTreeSet" => "Set",
+        "Integer" | "Long" => "Int",
+        "Double" | "Number" => "Float",
+        "Boolean" => "Bool",
         "any" => "Any",
         "unit" | "void" | "None" => "Unit",
         "option" | "Maybe" => "Option",
@@ -238,8 +242,21 @@ impl<'s> Parser<'s> {
             _ => {
                 let mut d = self.unexpected("end of statement");
                 d.label = Some("expected a newline or `;` before this".into());
+                let prev = &self.toks[self.pos - 1];
+                let prev_word = if let Tok::Ident(w) = &prev.tok { Some(&**w) } else { None };
                 d = match self.peek() {
                     Tok::Assign => d.help("only variables, fields and indexes can be assigned to"),
+                    // `} elif x {`
+                    Tok::Ident(w) if matches!(&**w, "elif" | "elsif" | "elseif") && prev.tok == Tok::RBrace => {
+                        d.help("write `else if`").fix(self.span(), "else if")
+                    }
+                    _ if matches!(prev_word, Some("elif" | "elsif" | "elseif")) => d.help("write `else if`").fix(prev.span, "else if"),
+                    Tok::Ident(_) if matches!(prev_word, Some("def" | "function" | "func" | "fun")) && self.peek_at(1) == &Tok::LParen => {
+                        d.help("functions are declared with `fn`: `fn name(x: Int) -> Int { ... }`").fix(prev.span, "fn")
+                    }
+                    Tok::Ident(_) if matches!(prev_word, Some("const" | "val")) && self.peek_at(1) == &Tok::Assign => {
+                        d.help("use `let` (a `let` never changes)").fix(prev.span, "let")
+                    }
                     Tok::Ident(_) | Tok::Upper(_) if matches!(self.toks[self.pos - 1].tok, Tok::Ident(_) | Tok::Upper(_)) => {
                         d.help("two names in a row: is an operator or a comma missing?")
                     }
@@ -440,6 +457,17 @@ impl<'s> Parser<'s> {
                 self.arm_body()
             }
             Tok::Assign => Err(self.unexpected("function body").help(format!("single-expression functions use `=>`: `fn {}(x) => x * 2`", name))),
+            Tok::Colon if !matches!(self.peek_at(1), Tok::Upper(_) | Tok::LParen | Tok::Ident(_)) => Err(self
+                .unexpected("function body `{ ... }` or `=> expression`")
+                .help(format!("a function body goes in braces, not after a colon: `fn {}(x) {{ ... }}` (indentation has no meaning)", name))),
+            Tok::Colon => {
+                let sp = self.span();
+                let spaced = sp.start > 0 && self.src.as_bytes()[sp.start as usize - 1] == b' ';
+                Err(self
+                    .unexpected("function body `{ ... }` or `=> expression`")
+                    .help(format!("the return type follows `->`: `fn {}(x: Int) -> Int`", name))
+                    .fix(sp, if spaced { "->" } else { " ->" }))
+            }
             _ => Err(self.unexpected("function body `{ ... }` or `=> expression`")),
         }
     }
@@ -663,6 +691,18 @@ impl<'s> Parser<'s> {
             Tok::Let | Tok::Var => {
                 let mutable = self.bump().tok == Tok::Var;
                 let kw = if mutable { "var" } else { "let" };
+                if matches!(self.peek(), Tok::Ident(w) if &**w == "mut") && matches!(self.peek_at(1), Tok::Ident(_) | Tok::LParen) {
+                    let mut_span = self.span();
+                    let d = Diagnostic::error("E0010", format!("Cogito has no `{} mut`", kw))
+                        .at(start.to(mut_span))
+                        .help("declare a variable that changes with `var`: `var x = 1`");
+                    let space = usize::from(self.src.as_bytes().get(mut_span.end as usize) == Some(&b' '));
+                    return Err(if mutable {
+                        d.fix(Span::new(mut_span.file, mut_span.start as usize, mut_span.end as usize + space), "")
+                    } else {
+                        d.fix(start.to(mut_span), "var")
+                    });
+                }
                 if let Tok::Upper(n) = self.peek().clone() {
                     if !matches!(self.peek_at(1), Tok::LParen) {
                         let mut d = Diagnostic::error("E0013", format!("variable `{}` must start with a lowercase letter", n))
@@ -683,6 +723,14 @@ impl<'s> Parser<'s> {
                 self.bump();
                 self.skip_newlines();
                 let value = self.expr()?;
+                if matches!(&value.kind, ExprKind::Block(b) if b.is_empty())
+                    && self.src[value.span.start as usize..value.span.end as usize].trim() == "{}"
+                {
+                    return Err(Diagnostic::error("E0010", "`{}` is an empty block, not an empty map")
+                        .at(value.span)
+                        .help("an empty map is `[:]` (with entries: `[\"a\": 1]`); an empty list is `[]`")
+                        .fix(value.span, "[:]"));
+                }
                 if self.at(&Tok::Else) {
                     return Err(Diagnostic::error("E0001", format!("Cogito has no `{} ... else`", kw))
                         .at(self.span())
@@ -1036,6 +1084,14 @@ impl<'s> Parser<'s> {
             if self.at(&Tok::RParen) {
                 break;
             }
+            if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Assign {
+                let eq = self.toks[self.pos + 1].span;
+                let spaced = self.src.as_bytes().get(eq.end as usize) == Some(&b' ');
+                return Err(Diagnostic::error("E0010", "named arguments are written `name: value`")
+                    .at(eq)
+                    .help("write `f(x: 1)`; `=` only assigns to variables")
+                    .fix(eq, if spaced { ":" } else { ": " }));
+            }
             let name = if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon {
                 let (n, _) = self.lower_ident("argument name")?;
                 self.bump();
@@ -1139,7 +1195,8 @@ impl<'s> Parser<'s> {
                             } else if name.ends_with('!') {
                                 return Err(Diagnostic::error("E0111", format!("mutating function `{}` must be called", name))
                                     .at(name_span)
-                                    .help(format!("write `.{}()`", name)));
+                                    .help(format!("write `.{}()`", name))
+                                    .fix(Span::new(name_span.file, name_span.end as usize, name_span.end as usize), "()"));
                             } else {
                                 let span = e.span.to(name_span);
                                 e = mk(ExprKind::Field { target: Box::new(e), name, name_span }, span);
@@ -1262,6 +1319,8 @@ impl<'s> Parser<'s> {
             Tok::LBrace => {
                 if self.brace_is_record() {
                     self.record_literal()
+                } else if let Some(d) = self.brace_map() {
+                    Err(d)
                 } else {
                     self.block()
                 }
@@ -1300,6 +1359,9 @@ impl<'s> Parser<'s> {
                 }
                 let cond = self.expr()?;
                 self.skip_newlines();
+                if self.at(&Tok::Assign) {
+                    return Err(self.unexpected("`{` after the `while` condition").help("did you mean `==` (comparison)?").fix(self.span(), "=="));
+                }
                 let body = self.block()?;
                 let span = start.to(body.span);
                 Ok(mk(ExprKind::While { cond: Box::new(cond), body: Box::new(body) }, span))
@@ -1369,6 +1431,39 @@ impl<'s> Parser<'s> {
                 Err(d)
             }
         }
+    }
+
+    /// `{"a": 1}` (a map, written as in JSON or Python): the error, with
+    /// the braces turned into brackets.
+    fn brace_map(&self) -> Option<Diagnostic> {
+        let mut i = self.pos + 1;
+        while self.toks.get(i).is_some_and(|t| t.tok == Tok::Newline) {
+            i += 1;
+        }
+        let key = matches!(self.toks.get(i)?.tok, Tok::Str(_) | Tok::Int(_) | Tok::Float(_));
+        if !key || self.toks.get(i + 1)?.tok != Tok::Colon {
+            return None;
+        }
+        let open = self.span();
+        let mut d = Diagnostic::error("E0010", "maps are written with square brackets")
+            .at(open)
+            .help("write a map as `[\"a\": 1, \"b\": 2]` (and an empty map as `[:]`); braces hold blocks and records");
+        let mut depth = 0;
+        for t in &self.toks[self.pos..] {
+            match t.tok {
+                Tok::LBrace => depth += 1,
+                Tok::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        d = d.fix(open, "[").fix(t.span, "]");
+                        break;
+                    }
+                }
+                Tok::Eof => break,
+                _ => {}
+            }
+        }
+        Some(d)
     }
 
     fn brace_is_record(&self) -> bool {
@@ -1522,6 +1617,9 @@ impl<'s> Parser<'s> {
             if self.at(&Tok::Colon) {
                 d = d.help("Cogito uses braces, not colons: `if cond { ... }`");
             }
+            if self.at(&Tok::Assign) {
+                d = d.help("did you mean `==` (comparison)?").fix(self.span(), "==");
+            }
             return Err(d);
         }
         let then = self.block()?;
@@ -1565,7 +1663,7 @@ impl<'s> Parser<'s> {
             if !self.at(&Tok::FatArrow) {
                 let mut d = self.unexpected("`=>` after the pattern");
                 if self.at(&Tok::Arrow) {
-                    d = d.help("match arms use a fat arrow: `pattern => result`");
+                    d = d.help("match arms use a fat arrow: `pattern => result`").fix(self.span(), "=>");
                 } else if self.at(&Tok::Colon) {
                     d = d.help("match arms are written `pattern => result`");
                 }
@@ -1584,6 +1682,36 @@ impl<'s> Parser<'s> {
     }
 
     // ------------------------------------------------------------ types
+
+    /// `List<Int>`: the error, with the angle brackets made square.
+    fn angle_type_args(&self) -> Diagnostic {
+        let mut d = Diagnostic::error("E0010", "type arguments go in square brackets")
+            .at(self.span())
+            .help("write `List[Int]` or `Map[Str, List[Int]]`; `<` and `>` only compare");
+        let mut depth = 0;
+        let mut fixes = Vec::new();
+        for t in &self.toks[self.pos..] {
+            match t.tok {
+                Tok::Lt => {
+                    depth += 1;
+                    fixes.push((t.span, "["));
+                }
+                Tok::Gt => {
+                    depth -= 1;
+                    fixes.push((t.span, "]"));
+                    if depth == 0 {
+                        for (sp, text) in fixes {
+                            d = d.fix(sp, text);
+                        }
+                        break;
+                    }
+                }
+                Tok::Upper(_) | Tok::Ident(_) | Tok::Comma | Tok::Dot | Tok::LParen | Tok::RParen => {}
+                _ => break,
+            }
+        }
+        d
+    }
 
     pub fn type_expr(&mut self) -> PResult<TypeExpr> {
         self.enter()?;
@@ -1610,6 +1738,8 @@ impl<'s> Parser<'s> {
                         }
                     }
                     self.expect_closing(&Tok::RBracket, open, "`,` or `]` in type arguments")?;
+                } else if self.at(&Tok::Lt) {
+                    return Err(self.angle_type_args());
                 }
                 Ok(TypeExpr { kind: TypeExprKind::Named(name, args), span: start.to(self.prev_span()), ty: Ty::Any })
             }
@@ -1702,7 +1832,7 @@ impl<'s> Parser<'s> {
             Tok::Ident(name) => {
                 let mut d = Diagnostic::error("E0013", format!("type names start with an uppercase letter, found `{}`", name)).at(start);
                 if let Some(h) = type_name_hint(&name) {
-                    d = d.help(format!("did you mean `{}`?", h));
+                    d = d.help(format!("did you mean `{}`?", h)).fix(start, h);
                 }
                 Err(d)
             }
@@ -1993,7 +2123,7 @@ pub fn parse_fmt_spec(s: &str) -> Result<FmtSpec, String> {
     }
     if i < chars.len() {
         match chars[i] {
-            'x' | 'X' | 'b' | 'o' | 'e' | '%' => {
+            'x' | 'X' | 'b' | 'o' | 'e' | '%' | 'f' | 'd' | 's' => {
                 spec.kind = Some(chars[i]);
                 i += 1;
             }

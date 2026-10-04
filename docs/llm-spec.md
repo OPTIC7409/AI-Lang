@@ -39,7 +39,8 @@ program's `args()`.
   follow `:` — `{x:.2}` (2 decimals), `{s:>8}` `{s:<8}` `{s:^8}` (align in
   width 8), `{n:05}` (zero pad), `{n:+}`, `{n:,}` (thousands separators),
   `{n:x}` `{n:b}` `{n:o}` (hex/binary/octal), `{f:e}` (`1.500000e+03`; `{f:.1e}` gives `1.5e+03`), `{f:.1%}`,
-  `{n:X}` (upper-case hex), `{s:*>6}` (fill char). Parts combine in the
+  `{n:X}` (upper-case hex), `{s:*>6}` (fill char); Python's `f`, `d` and
+  `s` types also work (`{x:.2f}` is `{x:.2}`, `{x:f}` has 6 decimals). Parts combine in the
   order fill+align, `+`, `0`, width, `,`, `.precision`, type: `{x:>15,.2}`
   is `   1,234,567.89`, `{n:+08}` is `+0000042`, `{10:04x}` is `000a`.
   A precision on a string truncates it (`{s:.3}`).
@@ -507,8 +508,11 @@ built-in that calls itself by mistake (`cogito FILE` shows these warnings too, e
 test, property or function (`file`, `kind`, `name`, `status`, and for a
 failure the `counterexample` and `diagnostic`), then a summary object.
 `cogito check --json` prints one JSON object per diagnostic for tools:
-`severity`, `code`, `message` and `notes` always; `file`, `line`, `column`,
+`severity`, `code`, `message`, `notes` and `fixes` always; `file`, `line`, `column`,
 `end_line`, `end_column`, `label` and `help` when the diagnostic has them.
+Each fix is an edit (`file`, `line`, `column`, `end_line`, `end_column`,
+`replacement`) that certainly fixes the problem; `cogito fix FILE` applies
+them all (checking again until none are left) and prints what it changed.
 Code inside a function passed to `catch` is not reported for failing:
 tests use `catch` to check that something fails.
 
@@ -543,13 +547,17 @@ parameters.
 
 These are the mistakes AI agents made most often while learning Cogito from
 this document. Each one is an error with a hint, but avoiding it saves a run.
+`cogito fix FILE` rewrites most of them (`&&`, `!x`, `x++`, `'text'`,
+`f"..."`, `null`, `True`, `elif`, `def`, `let mut`, `List<Int>`, `{"a": 1}`,
+`xs.length()`, `s.startsWith(p)`, a dropped `xs.sort()` on a `var`, ...).
 
 - `if let` / `while let`: use `match`, or `is` for a test (`if r is Ok(_)`).
 - `c ? a : b`: use `if c { a } else { b }`. `?` only propagates errors.
 - `&&`, `||`, `!x`: use `and`, `or`, `not x`. `x++`: use `x += 1`.
 - `null`/`nil`: use `None` (an `Option`).
 - `let MAX = 10`: names of values start lowercase; uppercase is for types.
-- `var m: Map[Str, Int] = {}`: `{}` is an empty block. An empty map is `[:]`.
+- `var m: Map[Str, Int] = {}`: `{}` is an empty block (an error as a
+  `let`/`var` value). An empty map is `[:]`; a map literal is `["a": 1]`.
 - `"{"` in a string starts an interpolation; write `"\{"` for a brace.
 - `a < b < c`: comparisons do not chain; write `a < b and b < c`.
 - `7 / 2` is `3.5`; `7 // 2` is `3`.

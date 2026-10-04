@@ -402,8 +402,70 @@ fn confusion_hint(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The exact replacement for a name from another language, when there is
+/// one: `null` is `None`. Names of functions (`length` is `len`) are only
+/// replaced where they are called (`call`).
+fn confusion_fix(name: &str, call: bool) -> Option<&'static str> {
+    let value = match name {
+        "null" | "nil" | "undefined" | "none" | "NULL" => Some("None"),
+        "True" | "TRUE" => Some("true"),
+        "False" | "FALSE" => Some("false"),
+        _ => None,
+    };
+    if value.is_some() || !call {
+        return value;
+    }
+    Some(match name {
+        "println" | "puts" | "printLn" | "say" => "print",
+        "length" | "size" => "len",
+        "to_upper" | "toUpperCase" | "uppercase" | "to_uppercase" | "upcase" => "upper",
+        "to_lower" | "toLowerCase" | "lowercase" | "to_lowercase" | "downcase" => "lower",
+        "trim_left" | "ltrim" | "lstrip" | "trimStart" => "trim_start",
+        "trim_right" | "rtrim" | "rstrip" | "trimEnd" => "trim_end",
+        "startswith" | "startsWith" => "starts_with",
+        "endswith" | "endsWith" => "ends_with",
+        "indexOf" => "index_of",
+        "includes" => "contains",
+        "contains_key" | "has_key" | "containsKey" => "has",
+        "to_string" | "toString" | "to_str" => "str",
+        "split_whitespace" => "words",
+        "reversed" => "reverse",
+        "sorted" => "sort",
+        "items" | "iteritems" => "entries",
+        "isEmpty" | "empty" => "is_empty",
+        "parseInt" | "atoi" => "parse_int",
+        "parseFloat" | "atof" => "parse_float",
+        _ => return None,
+    })
+}
+
 impl<'a> Resolver<'a> {
     // ------------------------------------------------------------ utilities
+
+    /// Whether `v` names a variable declared with `var` (and not captured).
+    fn is_var(&self, v: &Var) -> bool {
+        match v.res {
+            VarRes::Local(s) => {
+                self.fns.last().is_some_and(|f| f.scopes.iter().flat_map(|sc| sc.locals.iter()).any(|l| l.slot == s && l.name == v.name && l.mutable))
+            }
+            VarRes::Global(s) => matches!(self.ctx.globals[s as usize].kind, GlobalKind::Var),
+            _ => false,
+        }
+    }
+
+    /// The span of the whole line holding `span` (with its newline), when
+    /// nothing else is on it; otherwise `span` itself.
+    fn whole_line(&self, span: Span) -> Span {
+        let src = &self.ctx.sm.get(span.file).src;
+        let (s, e) = (span.start as usize, span.end as usize);
+        let start = src[..s].rfind('\n').map_or(0, |i| i + 1);
+        let end = src[e..].find('\n').map_or(src.len(), |i| e + i + 1);
+        if src[start..s].trim().is_empty() && src[e..end].trim().is_empty() {
+            Span::new(span.file, start, end)
+        } else {
+            span
+        }
+    }
 
     fn error(&mut self, d: Diagnostic) {
         self.diags.push(d);
@@ -670,6 +732,9 @@ impl<'a> Resolver<'a> {
             d = d.help(format!("`{}` is defined in the imported module `{}`: write `{}.{}`", name, alias, alias, name));
         } else if let Some(h) = confusion_hint(name) {
             d = d.help(h);
+            if let Some(r) = confusion_fix(name, what == "function") {
+                d = d.fix(span, r);
+            }
         } else if let Some(s) = suggest(name, names.iter().map(|s| s.as_str())) {
             d = d.help(format!("did you mean `{}`?", s));
         } else if upper && self.ns.types.contains_key(name) {
@@ -1000,7 +1065,8 @@ impl<'a> Resolver<'a> {
                         if !self.repl && args.is_empty() && main_fn && matches!(&callee.kind, ExprKind::Var(v) if &*v.name == "main") {
                             let d = Diagnostic::warning("W0007", "`main` runs twice: here, and again after the top-level statements")
                                 .at(*span)
-                                .help("`fn main()` is called automatically; remove this call");
+                                .help("`fn main()` is called automatically; remove this call")
+                                .fix(self.whole_line(*span), "");
                             self.diags.push(d);
                         }
                     }
@@ -1299,6 +1365,13 @@ impl<'a> Resolver<'a> {
                                 d = Diagnostic::error("E0106", format!("the type alias `{}` refers to itself", name))
                                     .at(span)
                                     .help(format!("an alias is only another name for an existing type; for a recursive type, declare an enum or record: `type {} = | Leaf | Node(List[{}])`", name, name));
+                            } else if let Some(h) = crate::parser::type_name_hint(&name) {
+                                // (The span covers type arguments too: `HashMap[Str, Int]`.)
+                                let name_span = Span::new(span.file, span.start as usize, span.start as usize + name.len());
+                                d = d.help(format!("did you mean `{}`?", h));
+                                if self.ctx.sm.snippet(name_span) == &*name {
+                                    d = d.fix(name_span, h);
+                                }
                             } else if let Some(s) = suggest(&name, cands.iter().map(|s| s.as_str())) {
                                 d = d.help(format!("did you mean `{}`?", s));
                             } else if name.len() == 1 {
@@ -1866,7 +1939,20 @@ impl<'a> Resolver<'a> {
         } else {
             format!("`{}` returns a new value and does not change its arguments; store the result, e.g. `let y = ...`", name)
         };
-        let d = Diagnostic::warning("W0003", format!("the result of `{}` is unused", name)).at(e.span).help(help);
+        let mut d = Diagnostic::warning("W0003", format!("the result of `{}` is unused", name)).at(e.span).help(help);
+        // `xs.push(x)` on a `var`: the call was meant to change it.
+        if self.ctx.builtins.values.contains_key(twin.as_str()) {
+            let target = match &e.kind {
+                ExprKind::MethodCall { receiver, method_span, .. } => Some((&**receiver, *method_span)),
+                ExprKind::Call { callee, args } => args.first().filter(|a| a.name.is_none()).map(|a| (&a.value, callee.span)),
+                _ => None,
+            };
+            if let Some((Expr { kind: ExprKind::Var(v), .. }, name_span)) = target {
+                if self.is_var(v) {
+                    d = d.fix(Span::new(name_span.file, name_span.end as usize, name_span.end as usize), "!");
+                }
+            }
+        }
         self.diags.push(d);
     }
 
@@ -2150,7 +2236,16 @@ impl<'a> Resolver<'a> {
                 self.expr(index);
             }
             ExprKind::Call { callee, args } => {
+                let n = self.diags.len();
                 self.expr(callee);
+                // `length(xs)`: the name of a function from another language.
+                if let (ExprKind::Var(v), Some(d)) = (&callee.kind, self.diags.get_mut(n)) {
+                    if d.code == "E0100" && d.span == Some(callee.span) && d.fixes.is_empty() {
+                        if let Some(r) = confusion_fix(&v.name, true) {
+                            d.fixes.push(crate::diagnostic::Fix { span: callee.span, text: r.to_string() });
+                        }
+                    }
+                }
                 self.args(args);
                 if let ExprKind::Var(Var { res: VarRes::Global(slot), .. }) = callee.kind {
                     self.check_call(slot, 0, args, span);

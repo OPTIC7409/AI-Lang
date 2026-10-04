@@ -2203,7 +2203,18 @@ impl Interp {
                     digits
                 }
             }
-            (Some('e' | '%'), Value::Float(f)) if !f.is_finite() => format_float(*f),
+            (Some('e' | '%' | 'f'), Value::Float(f)) if !f.is_finite() => format_float(*f),
+            // Python's `f` (fixed point, 6 decimals by default), `d` and `s`.
+            (Some('f'), Value::Float(f)) => format_fixed(*f, spec.precision.unwrap_or(6)),
+            (Some('f'), Value::Int(n)) => match spec.precision.unwrap_or(6) {
+                0 => n.to_string(),
+                p => format!("{}.{}", n, "0".repeat(p)),
+            },
+            (Some('d'), Value::Int(n)) => n.to_string(),
+            (Some('s'), Value::Str(s)) => match spec.precision {
+                Some(p) => s.chars().take(p).collect(),
+                None => s.to_string(),
+            },
             (Some('e'), x) if numeric => {
                 // Python style: 1.234500e+03
                 let f = x.as_f64().unwrap();
@@ -2221,7 +2232,14 @@ impl Interp {
                 format!("{}%", format_fixed(f, spec.precision.unwrap_or(0)))
             }
             (Some(k), _) => {
-                return Err(self.err(span, "E0216", format!("format type `{}` cannot be used with {}", k, describe(v))));
+                let help = match k {
+                    'x' | 'X' | 'b' | 'o' | 'd' => {
+                        "this format type is for Ints; for a Float with no decimals use `{x:.0}`, or convert it with `round(x)`"
+                    }
+                    's' => "`s` is for strings; leave the type out (`{x}`) to show any value",
+                    _ => "this format type is for numbers; leave the type out (`{x}`) to show any value",
+                };
+                return Err(self.fail(self.diag(span, "E0216", format!("format type `{}` cannot be used with {}", k, describe(v))).help(help)));
             }
             (None, Value::Float(f)) if spec.precision.is_some() => format_fixed(*f, spec.precision.unwrap()),
             // Ints are formatted exactly (not through a Float).
@@ -2239,7 +2257,7 @@ impl Interp {
         // `inf` and `nan` are never zero-padded; only plain decimal digits
         // are grouped (not `1e16`).
         let finite = !matches!(v, Value::Float(f) if !f.is_finite());
-        if spec.group && numeric && spec.kind.is_none() && finite && !body.contains(['e', 'E']) {
+        if spec.group && numeric && spec.kind.is_none_or(|k| matches!(k, 'f' | 'd')) && finite && !body.contains(['e', 'E']) {
             body = group_thousands(&body);
         }
         if spec.plus && numeric && !body.starts_with('-') {

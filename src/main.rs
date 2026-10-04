@@ -22,6 +22,7 @@ USAGE:
     cogito verify FILE.cog          check function contracts against random inputs
     cogito check [--json] FILE.cog... report errors and warnings without running (--json: one JSON object per line)
     cogito fmt [--check] [PATH...]  format files in the canonical layout (--check: only report; - for stdin)
+    cogito fix [--dry-run] FILE.cog... apply the fixes that `check` suggests for habits from other languages
     cogito lsp                      run the language server (for editors) on stdin/stdout
     cogito eval \"CODE\"              run a snippet of code
     cogito explain CODE             explain an error code (e.g. E0101)
@@ -60,6 +61,76 @@ fn print_diags(it: &Interp, diags: &[Diagnostic], color: bool) {
     for d in diags {
         cogito::err_out!("{}", d.render(&it.ctx.sm, color));
     }
+    let fixable = diags.iter().filter(|d| !d.fixes.is_empty()).count();
+    if let Some(d) = diags.iter().find(|d| !d.fixes.is_empty()) {
+        let c = Colors::new(color);
+        let file = &it.ctx.sm.get(d.fixes[0].span.file).name;
+        cogito::err_outln!(
+            "{}{} of these can be fixed automatically: run `cogito fix {}`{}",
+            c.dim,
+            if fixable == 1 { "one".to_string() } else { fixable.to_string() },
+            file,
+            c.reset
+        );
+    }
+}
+
+/// `cogito fix`: apply the fixes that `check` suggests, check again (a fix
+/// can uncover the next problem), until none are left; then report what
+/// remains.
+fn cmd_fix(paths: &[String], color: bool, dry_run: bool) -> ExitCode {
+    let files = collect_files(paths);
+    let c = Colors::new(color);
+    let mut total = 0;
+    for f in &files {
+        for _round in 0..200 {
+            let mut it = Interp::new();
+            let mut ns = Namespace::default();
+            let ds = match cogito::load_file(&mut it, f, &mut ns) {
+                Ok((_, ws)) => ws,
+                Err(ds) => ds,
+            };
+            let mut changed = false;
+            for (id, file) in it.ctx.sm.files.iter().enumerate() {
+                let (text, used) = cogito::diagnostic::apply_fixes(&file.src, id as u32, &ds);
+                if used.is_empty() || !Path::new(&file.name).is_file() {
+                    continue;
+                }
+                for d in &used {
+                    cogito::outln!(
+                        "{}{}{} {}: {} {}({}: {}){}",
+                        c.green,
+                        if dry_run { "would fix" } else { "fixed" },
+                        c.reset,
+                        it.ctx.sm.location(d.fixes[0].span),
+                        d.describe_fixes(&it.ctx.sm),
+                        c.dim,
+                        d.code,
+                        d.message,
+                        c.reset
+                    );
+                }
+                total += used.len();
+                if !dry_run {
+                    if let Err(e) = std::fs::write(&file.name, text) {
+                        cogito::err_outln!("error: cannot write `{}`: {}", file.name, e);
+                        return ExitCode::from(2);
+                    }
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    if total == 0 {
+        cogito::outln!("nothing to fix");
+    }
+    if dry_run {
+        return ExitCode::SUCCESS;
+    }
+    cmd_check(paths, color, false)
 }
 
 fn load(it: &mut Interp, path: &Path, color: bool, show_warnings: bool) -> Option<(cogito::ast::Program, Namespace)> {
@@ -577,6 +648,11 @@ fn real_main() -> ExitCode {
             let check = args[1..].iter().any(|a| a == "--check");
             let paths: Vec<String> = args[1..].iter().filter(|a| !a.starts_with("--")).cloned().collect();
             cmd_fmt(&paths, check, color)
+        }
+        "fix" => {
+            let dry_run = args[1..].iter().any(|a| a == "--dry-run");
+            let paths: Vec<String> = args[1..].iter().filter(|a| !a.starts_with("--")).cloned().collect();
+            cmd_fix(&paths, color, dry_run)
         }
         "check" => {
             let json = args[1..].iter().any(|a| a == "--json");

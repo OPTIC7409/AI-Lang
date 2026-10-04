@@ -17,6 +17,15 @@ pub struct TraceFrame {
     pub span: Span,
 }
 
+/// An edit that certainly fixes a problem: replace the text at `span` with
+/// `text`. `cogito fix` applies them; `check --json` and the language
+/// server offer them. All the edits of one diagnostic go together.
+#[derive(Clone, Debug)]
+pub struct Fix {
+    pub span: Span,
+    pub text: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
     pub severity: Severity,
@@ -27,6 +36,7 @@ pub struct Diagnostic {
     pub notes: Vec<String>,
     pub help: Option<String>,
     pub trace: Vec<TraceFrame>,
+    pub fixes: Vec<Fix>,
 }
 
 impl Diagnostic {
@@ -56,6 +66,25 @@ impl Diagnostic {
         if let Some(h) = &self.help {
             fields.push(("help", Json::str(h.clone())));
         }
+        let fixes = self
+            .fixes
+            .iter()
+            .filter(|x| (x.span.file as usize) < sm.files.len())
+            .map(|x| {
+                let f = sm.get(x.span.file);
+                let (line, col) = f.line_col(x.span.start as usize);
+                let (end_line, end_col) = f.line_col(x.span.end as usize);
+                Json::obj(vec![
+                    ("file", Json::str(f.name.clone())),
+                    ("line", Json::num(line as f64)),
+                    ("column", Json::num(col as f64)),
+                    ("end_line", Json::num(end_line as f64)),
+                    ("end_column", Json::num(end_col as f64)),
+                    ("replacement", Json::str(x.text.clone())),
+                ])
+            })
+            .collect();
+        fields.push(("fixes", Json::Arr(fixes)));
         Json::obj(fields)
     }
 
@@ -69,6 +98,7 @@ impl Diagnostic {
             notes: Vec::new(),
             help: None,
             trace: Vec::new(),
+            fixes: Vec::new(),
         }
     }
 
@@ -96,6 +126,30 @@ impl Diagnostic {
     pub fn help(mut self, help: impl Into<String>) -> Diagnostic {
         self.help = Some(help.into());
         self
+    }
+
+    /// Attach an edit that certainly fixes the problem (see `Fix`).
+    pub fn fix(mut self, span: Span, text: impl Into<String>) -> Diagnostic {
+        self.fixes.push(Fix { span, text: text.into() });
+        self
+    }
+
+    /// The edits of the fix, in words: "`&&` → `and`", "inserted `!`".
+    pub fn describe_fixes(&self, sm: &SourceMap) -> String {
+        let edits: Vec<String> = self
+            .fixes
+            .iter()
+            .filter(|x| (x.span.file as usize) < sm.files.len())
+            .map(|x| {
+                let old = sm.snippet(x.span).trim();
+                match (old.is_empty(), x.text.trim().is_empty()) {
+                    (true, _) => format!("insert `{}`", x.text.trim()),
+                    (false, true) => format!("remove `{}`", old),
+                    (false, false) => format!("`{}` → `{}`", old, x.text.trim()),
+                }
+            })
+            .collect();
+        edits.join(", ")
     }
 
     pub fn maybe_help(mut self, help: Option<String>) -> Diagnostic {
@@ -237,6 +291,40 @@ impl Colors {
             Colors { red: "", yellow: "", green: "", blue: "", cyan: "", bold: "", dim: "", reset: "" }
         }
     }
+}
+
+/// Apply the fixes of `diags` that fall in file `file` to its text `src`.
+/// A diagnostic whose edits overlap edits already taken is skipped (a later
+/// run of `cogito fix` gets to it). Returns the new text and the
+/// diagnostics whose fixes were applied.
+pub fn apply_fixes<'a>(src: &str, file: u32, diags: &'a [Diagnostic]) -> (String, Vec<&'a Diagnostic>) {
+    let mut taken: Vec<&Fix> = Vec::new();
+    let mut used = Vec::new();
+    let fits = |x: &Fix| {
+        let (s, e) = (x.span.start as usize, x.span.end as usize);
+        x.span.file == file && s <= e && e <= src.len() && src.is_char_boundary(s) && src.is_char_boundary(e)
+    };
+    let overlap = |a: &Fix, b: &Fix| a.span.start == b.span.start || (a.span.start < b.span.end && b.span.start < a.span.end);
+    for d in diags {
+        if d.fixes.is_empty() || !d.fixes.iter().all(fits) {
+            continue;
+        }
+        if d.fixes.iter().enumerate().any(|(i, x)| d.fixes[..i].iter().chain(taken.iter().copied()).any(|t| overlap(x, t))) {
+            continue;
+        }
+        taken.extend(d.fixes.iter());
+        used.push(d);
+    }
+    taken.sort_by_key(|x| x.span.start);
+    let mut out = String::with_capacity(src.len());
+    let mut pos = 0;
+    for x in taken {
+        out.push_str(&src[pos..x.span.start as usize]);
+        out.push_str(&x.text);
+        pos = x.span.end as usize;
+    }
+    out.push_str(&src[pos..]);
+    (out, used)
 }
 
 /// Levenshtein distance, used for "did you mean ...?" suggestions.

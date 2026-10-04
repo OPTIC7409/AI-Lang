@@ -328,6 +328,116 @@ impl<'a> Lexer<'a> {
         Diagnostic::error(code, msg).at(Span::new(self.file, start, end.max(start + 1).min(self.src.len().max(start))))
     }
 
+    /// Whether the last token ends an operand, so that a binary operator
+    /// may follow.
+    fn after_operand(&self) -> bool {
+        matches!(
+            self.toks.last().map(|t| &t.tok),
+            Some(
+                Tok::Int(_)
+                    | Tok::Float(_)
+                    | Tok::Str(_)
+                    | Tok::Ident(_)
+                    | Tok::Upper(_)
+                    | Tok::True
+                    | Tok::False
+                    | Tok::RParen
+                    | Tok::RBracket
+                    | Tok::Question
+            )
+        )
+    }
+
+    /// `word` as the replacement for the operator at `start..end`, with
+    /// spaces where the operator touches its operands (`a&&b`).
+    fn spaced(&self, start: usize, end: usize, word: &str) -> String {
+        let tight = |c: Option<&u8>| c.is_some_and(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r'));
+        let before = if tight(start.checked_sub(1).and_then(|i| self.b.get(i))) { " " } else { "" };
+        let after = if tight(self.b[..self.end].get(end)) { " " } else { "" };
+        format!("{}{}{}", before, word, after)
+    }
+
+    /// Whether the statement ends at `pos` (only spaces or a comment
+    /// follow on the line, or a `;` or `}`).
+    fn statement_ends_at(&self, pos: usize) -> bool {
+        let rest = &self.b[pos.min(self.end)..self.end];
+        let n = rest.iter().take_while(|&&c| matches!(c, b' ' | b'\t' | b'\r')).count();
+        matches!(rest.get(n), None | Some(b'\n' | b'#' | b';' | b'}'))
+    }
+
+    /// `'text'` rewritten as a Cogito string, when the quote at `start`
+    /// is closed on the same line: the replacement and the end of the
+    /// quoted text.
+    fn single_quoted(&self, start: usize) -> Option<(String, usize)> {
+        let mut out = String::from("\"");
+        let mut chars = self.src[start + 1..self.end].char_indices();
+        while let Some((i, ch)) = chars.next() {
+            match ch {
+                '\'' => {
+                    out.push('"');
+                    return Some((out, start + 1 + i + 1));
+                }
+                '\n' => return None,
+                '"' => out.push_str("\\\""),
+                '{' => out.push_str("\\{"),
+                '}' => out.push_str("\\}"),
+                '\\' => match chars.next() {
+                    Some((_, '\'')) => out.push('\''),
+                    Some((_, c)) => {
+                        out.push('\\');
+                        out.push(c);
+                    }
+                    None => return None,
+                },
+                c => out.push(c),
+            }
+        }
+        None
+    }
+
+    /// A JavaScript template literal `` `a ${b}` `` closed on the same line,
+    /// as a Cogito string: the replacement and the end of the literal.
+    fn template_literal(&self, start: usize) -> Option<(String, usize)> {
+        let rest = &self.src[start + 1..self.end];
+        let close = rest.find(['`', '\n'])?;
+        if rest.as_bytes()[close] != b'`' {
+            return None;
+        }
+        let body = &rest[..close];
+        let mut out = String::from("\"");
+        let mut chars = body.chars().peekable();
+        let mut depth = 0;
+        while let Some(c) = chars.next() {
+            match c {
+                '$' if chars.peek() == Some(&'{') && depth == 0 => {
+                    chars.next();
+                    depth = 1;
+                    out.push('{');
+                }
+                '{' if depth > 0 => {
+                    depth += 1;
+                    out.push('{');
+                }
+                '}' if depth > 0 => {
+                    depth -= 1;
+                    out.push('}');
+                }
+                '{' | '}' => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                '"' if depth == 0 => out.push_str("\\\""),
+                '\\' => {
+                    out.push('\\');
+                    out.push(chars.next()?);
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        Some((out, start + 1 + close + 1))
+    }
+
     fn newline_significant(&self) -> bool {
         matches!(self.delims.last(), None | Some(b'{'))
     }
@@ -353,6 +463,9 @@ impl<'a> Lexer<'a> {
             return true;
         }
         if rest.starts_with(b".") && !rest.starts_with(b"..") {
+            return true;
+        }
+        if rest.starts_with(b"&&") || rest.starts_with(b"||") {
             return true;
         }
         for kw in [&b"and"[..], &b"or"[..]] {
@@ -409,6 +522,20 @@ impl<'a> Lexer<'a> {
                     self.hashed_raw_string(hashes)?;
                     continue;
                 }
+            }
+            // `f"..."` from Python: every Cogito string interpolates.
+            if c == b'f' && self.peek_at(1) == b'"' && !self.b[self.pos..self.end].starts_with(b"f\"\"\"") {
+                let line = &self.src[start..self.end];
+                let line = &line[..line.find('\n').unwrap_or(line.len())];
+                let mut d = self
+                    .err("E0001", "strings need no `f` prefix", start, start + 1)
+                    .help("every string interpolates: \"total: {n}\" (write `\\{` for a literal brace)");
+                if !line.contains("{{") && !line.contains("}}") {
+                    d = d.fix(Span::new(self.file, start, start + 1), "");
+                }
+                self.substituted.push(d);
+                self.pos += 1;
+                continue;
             }
             if is_ident_start(c) {
                 self.ident();
@@ -550,7 +677,12 @@ impl<'a> Lexer<'a> {
                 if c1 == b'.' && c2 == b'=' {
                     (Tok::DotDotEq, 3)
                 } else if c1 == b'.' && c2 == b'.' {
-                    return Err(self.err("E0010", "`...` is not an operator", start, start + 3).help("use `..` for ranges and rest patterns"));
+                    let mut d = self.err("E0010", "`...` is not an operator", start, start + 3).help("use `..` for ranges and rest patterns");
+                    // A spread, as in `[...xs]` or `f(...args)`.
+                    if matches!(self.toks.last().map(|t| &t.tok), Some(Tok::LBracket | Tok::LParen | Tok::LBrace | Tok::Comma)) {
+                        d = d.fix(Span::new(self.file, start, start + 3), "..");
+                    }
+                    return Err(d);
                 } else if c1 == b'.' {
                     (Tok::DotDot, 2)
                 } else {
@@ -560,19 +692,34 @@ impl<'a> Lexer<'a> {
             b'-' => match c1 {
                 b'>' => (Tok::Arrow, 2),
                 b'=' => (Tok::MinusAssign, 2),
+                b'-' if self.after_operand() && self.statement_ends_at(start + 2) => {
+                    return Err(self
+                        .err("E0010", "`--` is not an operator", start, start + 2)
+                        .help("use `x -= 1` to decrement")
+                        .fix(Span::new(self.file, start, start + 2), self.spaced(start, start, "-= 1").trim_end().to_string()))
+                }
                 _ => (Tok::Minus, 1),
             },
             b'=' => match c1 {
                 b'>' => (Tok::FatArrow, 2),
+                b'=' if c2 == b'=' => {
+                    return Err(self
+                        .err("E0010", "`===` is not an operator", start, start + 3)
+                        .help("use `==`, which compares values (of any type)")
+                        .fix(Span::new(self.file, start, start + 3), "=="))
+                }
                 b'=' => (Tok::EqEq, 2),
                 _ => (Tok::Assign, 1),
             },
             b'+' => match c1 {
                 b'=' => (Tok::PlusAssign, 2),
                 b'+' => {
-                    return Err(self
-                        .err("E0010", "`++` is not an operator", start, start + 2)
-                        .help("use `x += 1` to increment, or `+` to concatenate"))
+                    let mut d =
+                        self.err("E0010", "`++` is not an operator", start, start + 2).help("use `x += 1` to increment, or `+` to concatenate");
+                    if self.after_operand() && self.statement_ends_at(start + 2) {
+                        d = d.fix(Span::new(self.file, start, start + 2), self.spaced(start, start, "+= 1").trim_end().to_string());
+                    }
+                    return Err(d);
                 }
                 _ => (Tok::Plus, 1),
             },
@@ -591,11 +738,24 @@ impl<'a> Lexer<'a> {
                 _ => (Tok::Percent, 1),
             },
             b'!' => match c1 {
+                b'=' if c2 == b'=' => {
+                    return Err(self
+                        .err("E0010", "`!==` is not an operator", start, start + 3)
+                        .help("use `!=`, which compares values (of any type)")
+                        .fix(Span::new(self.file, start, start + 3), "!="))
+                }
                 b'=' => (Tok::NotEq, 2),
                 _ => {
-                    return Err(self
+                    let d = self
                         .err("E0001", "unexpected character `!`", start, start + 1)
-                        .help("use the keyword `not` for boolean negation, and `!=` for inequality"))
+                        .help("use the keyword `not` for boolean negation, and `!=` for inequality");
+                    // `!x` in front of an operand reads as `not x`.
+                    if !self.after_operand() && (is_ident_start(c1) || matches!(c1, b'(' | b'[' | b'!')) {
+                        self.substituted.push(d.fix(Span::new(self.file, start, start + 1), "not "));
+                        (Tok::Not, 1)
+                    } else {
+                        return Err(d);
+                    }
                 }
             },
             b'<' => match c1 {
@@ -609,24 +769,50 @@ impl<'a> Lexer<'a> {
             b'|' => match c1 {
                 b'>' => (Tok::PipeGt, 2),
                 b'|' => {
-                    let d = self.err("E0001", "unexpected `||`", start, start + 2).help("use the keyword `or` for boolean disjunction");
-                    self.substituted.push(d);
+                    let d = self.err("E0001", "unexpected `||`", start, start + 2);
+                    if !self.after_operand() {
+                        return Err(d.help("anonymous functions are written `fn() => value` (with parameters: `fn(x) => x + 1`)"));
+                    }
+                    let fix = self.spaced(start, start + 2, "or");
+                    self.substituted.push(d.help("use the keyword `or` for boolean disjunction").fix(Span::new(self.file, start, start + 2), fix));
                     (Tok::Or, 2)
                 }
                 _ => (Tok::Bar, 1),
             },
             b'&' => {
                 let len = if c1 == b'&' { 2 } else { 1 };
-                let d = self
+                let mut d = self
                     .err("E0001", format!("unexpected `{}`", &self.src[start..start + len]), start, start + len)
                     .help("use the keyword `and` for boolean conjunction");
+                if !self.after_operand() {
+                    return Err(d.help("Cogito has no references: pass the value itself (values are never changed through another name)"));
+                }
+                // (A single `&` may be a bitwise and, which is `bit_and(a, b)`.)
+                if len == 2 {
+                    d = d.fix(Span::new(self.file, start, start + 2), self.spaced(start, start + 2, "and"));
+                } else {
+                    d = d.help("use the keyword `and` for boolean conjunction, or `bit_and(a, b)` for the bitwise and of two Ints");
+                }
                 self.substituted.push(d);
                 (Tok::And, len)
             }
+            b'`' => {
+                let mut d = self
+                    .err("E0001", "unexpected character `` ` ``", start, start + 1)
+                    .help("strings use double quotes, and interpolate with braces: \"total: {n}\"");
+                if let Some((text, end)) = self.template_literal(start) {
+                    d = d.fix(Span::new(self.file, start, end), text);
+                }
+                return Err(d);
+            }
             b'\'' => {
-                return Err(self
+                let mut d = self
                     .err("E0001", "unexpected character `'`", start, start + 1)
-                    .help("strings use double quotes: \"text\" (there is no separate character type)"))
+                    .help("strings use double quotes: \"text\" (there is no separate character type)");
+                if let Some((text, end)) = self.single_quoted(start) {
+                    d = d.fix(Span::new(self.file, start, end), text);
+                }
+                return Err(d);
             }
             _ => {
                 let ch = self.src[start..].chars().next().unwrap_or('?');
@@ -637,7 +823,16 @@ impl<'a> Lexer<'a> {
                 };
                 let mut d = self.err("E0001", format!("unexpected character {}", shown), start, start + ch.len_utf8());
                 if matches!(ch, '“' | '”' | '‘' | '’') {
-                    d = d.help("this is a typographic quote; use a plain `\"`");
+                    d = d.help("this is a typographic quote; use a plain `\"`").fix(Span::new(self.file, start, start + ch.len_utf8()), "\"");
+                    // Its closing quote, if it is on the same line.
+                    let from = start + ch.len_utf8();
+                    let line = &self.src[from..self.end];
+                    let line = &line[..line.find('\n').unwrap_or(line.len())];
+                    let pair: [char; 2] = if matches!(ch, '“' | '”') { ['“', '”'] } else { ['‘', '’'] };
+                    if let Some(i) = line.find(pair) {
+                        let q = line[i..].chars().next().unwrap_or('"');
+                        d = d.fix(Span::new(self.file, from + i, from + i + q.len_utf8()), "\"");
+                    }
                 } else if ch == ';' {
                 } else if !ch.is_ascii() {
                     d = d.help("identifiers must be ASCII; non-ASCII text is allowed inside strings and comments");

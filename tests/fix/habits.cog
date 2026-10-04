@@ -1,0 +1,31 @@
+# Habits from other languages that `cogito fix` rewrites.
+fn main() {
+  var xs = [3, 1, 2]
+  xs.sort()
+  push(xs, 4)
+  print(xs.length())
+  print("abc".toUpperCase())
+  let ok = True
+  let s = 'it\'s "{fine}"'
+  print(s)
+  if !ok || xs.isEmpty() { print("no") }
+  if ok&&true { print("yes") }
+  var i = 0
+  i++
+  i--
+  let n = null
+  print(n)
+  if i = 0 { print("zero") }
+  while i = 1 { i += 1 }
+  let ys = [...xs, 5]
+  print(ys)
+  print(str(xs).startsWith("["))
+  print(sorted(xs))
+  xs.reverse!
+  print(“done”)
+  print(xs.size() > 3
+    && ok)
+}
+fn f(x: int) -> String => "a"
+fn g(m: HashMap[Str, Integer]) -> Bool => m.contains_key("a")
+main()

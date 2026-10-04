@@ -112,6 +112,18 @@ test "format specs" {
   assert "{"x":*>3}" == "**x"
 }
 
+test "Python's format types f, d and s" {
+  let x = 3.14159
+  assert "{x:.2f}" == "3.14"
+  assert "{x:f}" == "3.141590"
+  assert "{7:.2f}" == "7.00"
+  assert "{1234567.891:,.2f}" == "1,234,567.89"
+  assert "{1234567:,d}" == "1,234,567"
+  assert "{42:>5d}" == "   42"
+  assert "{"abcdef":.3s}" == "abc"
+  assert "{x:08.3f}" == "0003.142"
+}
+
 test "multi-line strings" {
   let s = """
     line one

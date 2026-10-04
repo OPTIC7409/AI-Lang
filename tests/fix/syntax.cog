@@ -1,0 +1,32 @@
+# More habits: keywords, literals and brackets from other languages.
+let x = 1
+if x > 1 {
+  print(1)
+} elif x > 0 {
+  print(2)
+}
+def f(n) {
+  n * 2
+}
+function g(n) {
+  n + 1
+}
+let mut total = 0
+var mut count = 0
+const limit = 10
+print(x === 1, x !== 2)
+let name = "a"
+print(f"hi {name} {x:.2f}")
+print(`total: ${x + 1} {braces} "q"`)
+fn h(a: Int): Int => a
+match x {
+  1 -> print("one")
+  _ -> print("other")
+}
+let xs = [3, 1, 2]
+print(xs.sort_by(key=fn(v) => -v))
+let ys: List<Int> = []
+let m: Map<Str, List<Int>> = ["a": [1]]
+let d = {"a": 1, "b": {"c": 2}}
+let e = {}
+print(f(1), g(1), total, count, limit, h(1), ys, m, d, e)

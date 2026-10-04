@@ -101,6 +101,10 @@ impl Server {
                             ("documentSymbolProvider", Json::Bool(true)),
                             ("definitionProvider", Json::Bool(true)),
                             ("completionProvider", Json::obj(vec![("triggerCharacters", Json::Arr(vec![Json::str(".")]))])),
+                            (
+                                "codeActionProvider",
+                                Json::obj(vec![("codeActionKinds", Json::Arr(vec![Json::str("quickfix"), Json::str("source.fixAll")]))]),
+                            ),
                         ]),
                     ),
                     ("serverInfo", Json::obj(vec![("name", Json::str("cogito")), ("version", Json::str(crate::VERSION))])),
@@ -134,6 +138,7 @@ impl Server {
             "textDocument/documentSymbol" => vec![reply(id, self.symbols(&uri))],
             "textDocument/definition" => vec![reply(id, self.definition(&uri, params.get("position")))],
             "textDocument/completion" => vec![reply(id, self.completion(&uri, params.get("position")))],
+            "textDocument/codeAction" => vec![reply(id, self.code_actions(&uri, params.get("range")))],
             _ if !id.is_null() => vec![error_reply(id, -32601, &format!("method not supported: {}", method))],
             _ => vec![],
         }
@@ -214,8 +219,8 @@ impl Server {
         items.json(prefix)
     }
 
-    /// Check the document (syntax, names, types) and publish what was found.
-    fn diagnostics(&self, uri: &str) -> Json {
+    /// Check the document (syntax, names, types).
+    fn check(&self, uri: &str) -> (Interp, Vec<Diagnostic>) {
         let text = self.text(uri);
         let path = uri_to_path(uri);
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
@@ -226,6 +231,54 @@ impl Server {
             Ok((_, warnings)) => warnings,
             Err(diags) => diags,
         };
+        (it, diags)
+    }
+
+    /// The fixes for the problems in `range`, as quick fixes, and all the
+    /// fixes in the document as one "fix all" action.
+    fn code_actions(&self, uri: &str, range: &Json) -> Json {
+        let text = self.text(uri);
+        let (it, diags) = self.check(uri);
+        let lines = LineIndex::new(text);
+        let from = lines.offset(range.get("start")).unwrap_or(0);
+        let to = lines.offset(range.get("end")).unwrap_or(text.len()).max(from);
+        let edit = |fixes: Vec<&crate::diagnostic::Fix>| {
+            let edits = fixes
+                .iter()
+                .map(|x| Json::obj(vec![("range", lines.range(x.span.start as usize, x.span.end as usize)), ("newText", Json::str(x.text.clone()))]));
+            Json::obj(vec![("changes", Json::Obj(vec![(uri.to_string(), Json::Arr(edits.collect()))]))])
+        };
+        let in_doc = |d: &&Diagnostic| !d.fixes.is_empty() && d.fixes.iter().all(|x| x.span.file == 0);
+        let mut actions = Vec::new();
+        for d in diags.iter().filter(in_doc) {
+            let Some(sp) = d.span.filter(|s| s.file == 0) else { continue };
+            if (sp.end as usize) < from || (sp.start as usize) > to {
+                continue;
+            }
+            actions.push(Json::obj(vec![
+                ("title", Json::str(format!("Fix: {}", d.describe_fixes(&it.ctx.sm)))),
+                ("kind", Json::str("quickfix")),
+                ("diagnostics", Json::Arr(vec![diagnostic_json(d, &it, &lines)])),
+                ("isPreferred", Json::Bool(true)),
+                ("edit", edit(d.fixes.iter().collect())),
+            ]));
+        }
+        let fixable: Vec<Diagnostic> = diags.iter().filter(in_doc).cloned().collect();
+        let (_, used) = crate::diagnostic::apply_fixes(text, 0, &fixable);
+        if !used.is_empty() {
+            actions.push(Json::obj(vec![
+                ("title", Json::str(format!("Fix all {} automatically fixable problem{}", used.len(), if used.len() == 1 { "" } else { "s" }))),
+                ("kind", Json::str("source.fixAll")),
+                ("edit", edit(used.iter().flat_map(|d| d.fixes.iter()).collect())),
+            ]));
+        }
+        Json::Arr(actions)
+    }
+
+    /// Check the document and publish what was found.
+    fn diagnostics(&self, uri: &str) -> Json {
+        let text = self.text(uri);
+        let (it, diags) = self.check(uri);
         let lines = LineIndex::new(text);
         let items: Vec<Json> = diags.iter().map(|d| diagnostic_json(d, &it, &lines)).collect();
         notification("textDocument/publishDiagnostics", Json::obj(vec![("uri", Json::str(uri)), ("diagnostics", Json::Arr(items))]))
