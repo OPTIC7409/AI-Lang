@@ -558,6 +558,24 @@ inputs to the bound, building million-element lists. The text agent found
 that `xs = xs + [x]` and `xs = [..xs, x]`, which the specification shows
 as idioms, copied the list each time; they now append in place.
 
+A sixth round added numerics and data analysis (statistics, regression,
+money in integer cents, numerical integration, matrices, a sales report):
+5 of 10 programs passed everything on the first attempt, and again every
+failure was the agent's own, four of them real gaps that `verify` found.
+The round's findings were about numbers: rounding to a precision scaled
+by a power of ten and so inherited its error (`round(2.675, 2)` gave
+2.68; it now rounds the stored value exactly, as decimal arithmetic on it
+would), `verify` never tried huge or tiny Floats, and a negative base with
+a fractional exponent gave a silent NaN. An adversarial agent turned on
+the static checker, which had just learned to infer the parameter and
+result types of functions passed to built-ins and the types of `var`s.
+It found nine kinds of correct program that `check` rejected, such as a
+user function named like a built-in passed as a value, an or-pattern
+binding a name with two types, a structural annotation treated as closed,
+and deliberately failing code inside `catch`. Each now has a test that
+keeps it accepted, and every new check is first run over the corpus of
+earlier rounds' programs, where a new error must be a real failure.
+
 ## Future directions
 
 - Deeper static checking: the parameter types of functions passed to user
