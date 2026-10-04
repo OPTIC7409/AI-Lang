@@ -1496,9 +1496,8 @@ fn builtin_kinds(name: &str) -> &'static [Kind] {
         "replace" => &[Str, Str, Str],
         "parse_int" => &[Str, Int],
         "chr" | "bit_not" | "seed" | "exit" => &[Int],
-        "gcd" | "lcm" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "bit_and" | "bit_or" | "bit_xor" | "shl" | "shr" | "random_int" => {
-            &[Int, Int]
-        }
+        "gcd" | "lcm" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "bit_and" | "bit_or" | "bit_xor" | "shl" | "shr" | "wrapping_shl"
+        | "shr_logical" | "random_int" => &[Int, Int],
         "abs" | "sqrt" | "exp" | "ln" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "floor" | "ceil" | "trunc" | "sign"
         | "is_nan" | "sleep" => &[Num],
         "pow" | "log" | "atan2" | "hypot" => &[Num, Num],
@@ -1569,8 +1568,8 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
         _ => {}
     }
     match name {
-        "len" | "count" | "ord" | "gcd" | "lcm" | "bit_and" | "bit_or" | "bit_xor" | "bit_not" | "shl" | "shr" | "wrapping_add" | "wrapping_sub"
-        | "wrapping_mul" | "hash" | "random_int" | "int" | "floor" | "ceil" | "trunc" | "sign" => Ty::Int,
+        "len" | "count" | "ord" | "gcd" | "lcm" | "bit_and" | "bit_or" | "bit_xor" | "bit_not" | "shl" | "shr" | "wrapping_shl" | "shr_logical"
+        | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "hash" | "random_int" | "int" | "floor" | "ceil" | "trunc" | "sign" => Ty::Int,
         "round" if args.len() == 1 => Ty::Int,
         "round" => Ty::Float,
         "str" | "repr" | "upper" | "lower" | "trim" | "trim_start" | "trim_end" | "capitalize" | "replace" | "pad_left" | "pad_right" | "join"

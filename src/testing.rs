@@ -657,6 +657,10 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
             c.dim, size, bound, c.reset
         ));
     }
+    // An overflowing `shl` is fixed by `wrapping_shl`, not by smaller inputs.
+    if f.diag.code == "E0207" && f.diag.message.contains("shl(") {
+        return;
+    }
     if f.diag.code == "E0207" {
         let huge = def.params.iter().zip(&f.args).find(|(_, a)| matches!(a, Value::Int(n) if n.unsigned_abs() >= 1 << 31));
         let is_huge = |v: &Value| matches!(v, Value::Int(n) if n.unsigned_abs() >= 1 << 31);

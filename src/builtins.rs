@@ -120,8 +120,10 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("math", "bit_or", 2, 2, b_bit_or, "bit_or(a: Int, b: Int) -> Int\nBitwise or."),
     b!("math", "bit_xor", 2, 2, b_bit_xor, "bit_xor(a: Int, b: Int) -> Int\nBitwise exclusive or."),
     b!("math", "bit_not", 1, 1, b_bit_not, "bit_not(a: Int) -> Int\nBitwise complement."),
-    b!("math", "shl", 2, 2, b_shl, "shl(a: Int, n: Int) -> Int\nShift left by n bits."),
-    b!("math", "shr", 2, 2, b_shr, "shr(a: Int, n: Int) -> Int\nArithmetic shift right by n bits."),
+    b!("math", "shl", 2, 2, b_shl, "shl(a: Int, n: Int) -> Int\nShift left by n bits; an error if the result does not fit in an Int (see wrapping_shl)."),
+    b!("math", "shr", 2, 2, b_shr, "shr(a: Int, n: Int) -> Int\nArithmetic shift right by n bits (the sign is kept: shr(-8, 1) == -4)."),
+    b!("math", "wrapping_shl", 2, 2, b_wrapping_shl, "wrapping_shl(a: Int, n: Int) -> Int\nShift left by n bits, dropping the bits shifted out (for hashes and random number generators such as xorshift)."),
+    b!("math", "shr_logical", 2, 2, b_shr_logical, "shr_logical(a: Int, n: Int) -> Int\nShift right by n bits, filling with zeros (the Int as 64 unsigned bits: shr_logical(-1, 60) == 15)."),
     b!("math", "seed", 1, 1, b_seed, "seed(n: Int)\nSeed the random number generator, for reproducible runs."),
     b!("math", "random", 0, 0, b_random, "random() -> Float\nA random Float in [0, 1)."),
     b!("math", "random_int", 2, 2, b_random_int, "random_int(lo: Int, hi: Int) -> Int\nA random Int in [lo, hi] (inclusive)."),
@@ -1200,9 +1202,32 @@ fn b_shl(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     }
     let r = x.wrapping_shl(n as u32);
     if r >> n != x {
-        return Err(it.err(sp, "E0207", format!("integer overflow: shl({}, {})", x, n)));
+        return Err(it.fail(
+            it.diag(sp, "E0207", format!("integer overflow: shl({}, {})", x, n))
+                .help("to drop the bits shifted out (as hashes and random number generators do), use `wrapping_shl`"),
+        ));
     }
     Ok(Value::Int(r))
+}
+
+fn shift_amount(it: &mut Interp, a: &[Value], sp: Span, name: &str) -> R<u32> {
+    let n = int_arg(it, a, 1, name, sp)?;
+    if !(0..64).contains(&n) {
+        return Err(it.err(sp, "E0216", format!("shift amount must be in 0..64, got {}", n)));
+    }
+    Ok(n as u32)
+}
+
+fn b_wrapping_shl(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let x = int_arg(it, &a, 0, "wrapping_shl", sp)?;
+    let n = shift_amount(it, &a, sp, "wrapping_shl")?;
+    Ok(Value::Int(x.wrapping_shl(n)))
+}
+
+fn b_shr_logical(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let x = int_arg(it, &a, 0, "shr_logical", sp)?;
+    let n = shift_amount(it, &a, sp, "shr_logical")?;
+    Ok(Value::Int(((x as u64) >> n) as i64))
 }
 fn b_shr(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let x = int_arg(it, &a, 0, "shr", sp)?;

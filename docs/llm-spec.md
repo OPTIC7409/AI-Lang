@@ -90,7 +90,10 @@ with a Float it is a Float; a negative base with a fractional exponent
 
 **Value semantics**: every value behaves like an independent copy.
 `let b = a` then changing `a` never changes `b`. (Implemented with
-copy-on-write, so copies are cheap, and `xs += [x]`, `xs = xs + [x]`,
+copy-on-write, so copies are cheap until one of them changes: then that
+one is copied once. Building a new record from an old one with a changed
+big map, step after step, copies the map each time; changing the variable
+in place, with a `!` function or `r.m[k] = v`, does not. Also, `xs += [x]`, `xs = xs + [x]`,
 `xs = [..xs, x]` and `s = s + "x"` add to the variable in place.)
 
 **Equality** `==` is structural (deep). `1 == 1.0` is true (Int/Float
@@ -223,7 +226,7 @@ looks in scope.
 ```
 match value {
   0 => "zero"
-  1 | 2 => "one or two"                    # or-patterns
+  1 | 2 => "one or two"                    # or-patterns, also nested: `(A | B, Some(n))`
   n if n < 0 => "negative"                 # guard (tried for each alternative of an or-pattern)
   3..=9 => "small"                         # range (also "a"..="z")
   "hello" => "greeting"
@@ -431,14 +434,16 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
 - **Math**: `abs sqrt pow exp ln log(x, base) log2 log10 sin cos tan asin acos
   atan atan2 hypot floor ceil trunc` (floor/ceil/trunc/round return Int),
   `round(x, digits) -> Float`, `sign -> Int clamp(x, lo, hi) gcd lcm is_nan fixed(x, digits) -> Str` (gcd and lcm are never negative),
-  `bit_and bit_or bit_xor bit_not shl shr`, `wrapping_add wrapping_sub
-  wrapping_mul` (wrap around instead of failing, for hashes and checksums;
+  `bit_and bit_or bit_xor bit_not shl shr` (`shl` fails on overflow; `shr`
+  keeps the sign), `wrapping_add wrapping_sub wrapping_mul wrapping_shl`
+  and `shr_logical` (zero-fill) (wrap around instead of failing, for hashes,
+  checksums and random number generators such as xorshift;
   the operators always fail on overflow), constants `pi tau e inf max_int min_int`,
   `seed(n) random() random_int(lo, hi) shuffle(xs) choice(xs) -> Option`
 - **Collections** (lists; most also accept ranges, strings, tuples, maps):
   `len is_empty range(end) range(start, end, step) first -> Option last -> Option get(i) -> Option
   get_or(k, default) push insert(i, x) remove(i) set(i, x) map filter
-  reduce(f) fold(init, f) sum product min_by(key) max_by(key) (the first on ties) sort sort_by(key)
+  reduce(f) fold(init, f) sum product min_by(key) -> Option max_by(key) -> Option (the first on ties) sort sort_by(key)
   sort_with(cmp) reverse contains index_of -> Option find -> Option
   find_index -> Option any(pred) all(pred) count(pred_or_value) take drop
   take_while drop_while slice(a, b) zip enumerate flat_map flatten join(sep)

@@ -341,6 +341,7 @@ fn hash_child<H: Hasher>(x: &Value, h: &mut H, memo: &mut HashMemo) {
     let node = match x {
         Value::List(c) | Value::Tuple(c) => Some((Rc::as_ptr(c) as *const u8 as usize, Rc::strong_count(c))),
         Value::Variant(vv) if !vv.values.is_empty() => Some((Rc::as_ptr(vv) as *const u8 as usize, Rc::strong_count(vv))),
+        Value::Record(r) if !r.values.is_empty() => Some((Rc::as_ptr(r) as *const u8 as usize, Rc::strong_count(r))),
         _ => None,
     };
     if let Some((key, count)) = node {
@@ -359,6 +360,18 @@ fn hash_child<H: Hasher>(x: &Value, h: &mut H, memo: &mut HashMemo) {
         return;
     }
     hash_inner(x, h, memo)
+}
+
+/// Hash pairs in any order (the sum of each pair's own hash).
+fn unordered<'a, H: Hasher>(pairs: impl Iterator<Item = [&'a Value; 2]>, h: &mut H, memo: &mut HashMemo) {
+    let mut sum = 0u64;
+    for [a, b] in pairs {
+        let mut sub = std::collections::hash_map::DefaultHasher::new();
+        hash_child(a, &mut sub, memo);
+        hash_child(b, &mut sub, memo);
+        sum = sum.wrapping_add(sub.finish());
+    }
+    sum.hash(h);
 }
 
 fn hash_inner<H: Hasher>(v: &Value, h: &mut H, memo: &mut HashMemo) {
@@ -393,17 +406,31 @@ fn hash_inner<H: Hasher>(v: &Value, h: &mut H, memo: &mut HashMemo) {
                 hash_child(x, h, memo);
             }
         }
+        // Maps, sets and records are equal whatever the order of their
+        // entries or fields, so each entry is hashed on its own and the
+        // results are added up.
         Value::Map(m) => {
             6u8.hash(h);
             m.len().hash(h);
+            unordered(m.entries.iter().map(|(k, v)| [k, v]), h, memo);
         }
         Value::Set(m) => {
             13u8.hash(h);
             m.len().hash(h);
+            unordered(m.entries.iter().map(|(k, _)| [k, k]), h, memo);
         }
         Value::Record(r) => {
             7u8.hash(h);
+            r.ty.as_ref().map(|t| t.id).hash(h);
             r.values.len().hash(h);
+            let mut sum = 0u64;
+            for (n, x) in r.names.iter().zip(r.values.iter()) {
+                let mut sub = std::collections::hash_map::DefaultHasher::new();
+                n.hash(&mut sub);
+                hash_child(x, &mut sub, memo);
+                sum = sum.wrapping_add(sub.finish());
+            }
+            sum.hash(h);
         }
         Value::Variant(v) => {
             8u8.hash(h);

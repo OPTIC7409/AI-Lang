@@ -1,0 +1,23 @@
+# Records, maps and sets as map keys and set elements: hashing must use
+# their contents (and ignore the order of fields and entries, as equality
+# does).
+
+type Pos = { x: Int, y: Int }
+
+test "records are distinct keys" {
+  var seen: Map[Pos, Int] = [:]
+  for i in 0..2000 {
+    seen[Pos(i, i)] = i
+  }
+  assert seen.len() == 2000 and seen[Pos(7, 7)] == 7
+  assert hash(Pos(1, 2)) != hash(Pos(2, 1))
+}
+
+test "equal values hash equally, whatever the order" {
+  assert hash({ a: 1, b: 2 }) == hash({ b: 2, a: 1 })
+  assert hash(["a": 1, "b": 2]) == hash(["b": 2, "a": 1])
+  assert hash(to_set([1, 2, 3])) == hash(to_set([3, 2, 1]))
+  assert hash({ x: 1 }) == hash({ x: 1.0 })
+  let s = to_set([Pos(1, 1), Pos(1, 1), Pos(2, 2)])
+  assert s.len() == 2
+}

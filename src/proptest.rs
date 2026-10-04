@@ -807,7 +807,8 @@ pub fn shrink(v: &Value) -> Vec<Value> {
             // Simpler variants: nullary ones declared earlier, then sub-terms of the same type.
             if let TypeKind::Enum { variants } = &vv.ty.kind {
                 for (tag, var) in variants.iter().enumerate() {
-                    if var.tys.is_empty() && (tag as u32) != vv.tag {
+                    // (Only earlier ones: shrinking must make progress.)
+                    if var.tys.is_empty() && (tag as u32) < vv.tag {
                         out.push(Value::Variant(Rc::new(VariantVal { ty: vv.ty.clone(), tag: tag as u32, values: vec![] })));
                     }
                 }

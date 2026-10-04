@@ -22,3 +22,9 @@ test "a negative base needs a whole-number exponent" {
   assert catch(fn() => pow(-8.0, 1.0 / 3.0)).is_err()
   assert catch(fn() => (-8.0) ** 0.5).is_err()
 }
+
+test "shifts" {
+  assert catch(fn() => shl(3, 62)).is_err()
+  assert wrapping_shl(3, 62) == -4611686018427387904
+  assert shr(-8, 1) == -4 and shr_logical(-1, 60) == 15
+}
