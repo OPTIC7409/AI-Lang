@@ -1866,7 +1866,14 @@ impl Interp {
             } else {
                 d = d.note(format!("its fields are: {}", r.names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")));
             }
-        } else {
+        }
+        if self.ctx.module_fns.contains(name) {
+            d = d.note(format!(
+                "`{}` is a function of an imported module; `value.{}()` finds it only when the value's type is declared in that module",
+                name, name
+            ));
+            d = d.help(format!("call it through the module: `module.{}(value)` (and check that no variable hides the module's name)", name));
+        } else if !matches!(v, Value::Record(_)) {
             let names: Vec<&str> = BUILTINS.iter().map(|b| b.name).collect();
             if let Some(s) = suggest(name, names) {
                 d = d.help(format!("did you mean `{}`?", s));
@@ -1989,7 +1996,15 @@ impl Interp {
             (_, Value::Float(x), _) | (_, _, Value::Float(x)) if x.is_nan() => {
                 Some("nan is not less than, equal to or greater than anything; check with `is_nan(x)` first".to_string())
             }
-            _ if ta == tb => None,
+            _ if ta == tb => match (declared_type_id(a), declared_type_id(b)) {
+                (Some(x), Some(y)) if x != y => Some(format!(
+                    "these are two different types that are both named `{}` (declared at {} and at {}); values of different types are never equal or ordered",
+                    ta,
+                    self.declared_at(x),
+                    self.declared_at(y)
+                )),
+                _ => None,
+            },
             _ => Some("Cogito never converts types implicitly (except Int to Float)".to_string()),
         };
         if let Some(h) = help {
@@ -2598,7 +2613,28 @@ impl Interp {
             }
             _ => {}
         }
+        // Two types with the same name, from different modules.
+        if let (Ty::Named { id, name, .. }, Some(vid)) = (ty, declared_type_id(&v)) {
+            if vid != *id && self.ctx.types.get(vid as usize).is_some_and(|t| t.name == *name) {
+                return Err(format!(
+                    "expected the {} declared at {}, got {}, whose type is another `{}`, declared at {}",
+                    name,
+                    self.declared_at(*id),
+                    describe(&v),
+                    name,
+                    self.declared_at(vid)
+                ));
+            }
+        }
         Err(format!("expected {}, got {}", ty, describe(&v)))
+    }
+
+    /// Where a type was declared ("lib/geo.cog:3:6").
+    fn declared_at(&self, id: u32) -> String {
+        match self.ctx.types.get(id as usize) {
+            Some(t) if (t.span.file as usize) < self.ctx.sm.files.len() && t.span != Span::default() => self.ctx.sm.location(t.span),
+            _ => "?".to_string(),
+        }
     }
 
     // ------------------------------------------------------------ calls
@@ -3845,5 +3881,14 @@ impl MapHelp for Ctrl {
             }
             other => other,
         }
+    }
+}
+
+/// The id of the declared type of a record or enum value.
+fn declared_type_id(v: &Value) -> Option<u32> {
+    match v {
+        Value::Record(r) => r.ty.as_ref().map(|t| t.id),
+        Value::Variant(x) => Some(x.ty.id),
+        _ => None,
     }
 }

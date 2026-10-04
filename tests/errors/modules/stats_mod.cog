@@ -1,0 +1,1 @@
+fn mean(xs: List[Float]) -> Float => xs.sum() / xs.len()

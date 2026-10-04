@@ -1,0 +1,7 @@
+# expect: E0121
+import "modules/stats_mod.cog"
+fn report(xs: List[Float]) -> Str {
+  let stats_mod = "summary"
+  "{stats_mod}: {stats_mod.mean(xs)}"
+}
+print(report([1.0, 2.0]))

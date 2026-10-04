@@ -1,0 +1,6 @@
+# expect: W0009
+fn count_words(s: Str) -> Int => s.words().len()
+let n = count_words("a b")
+if n == "2" {
+  print("two words")
+}

@@ -54,6 +54,8 @@ pub struct Ctx {
     pub types: Vec<Rc<TypeDef>>,
     pub builtins: Namespace,
     pub modules: HashMap<PathBuf, Rc<Module>>,
+    /// Modules that failed to load (their errors are reported once).
+    pub failed_modules: HashSet<PathBuf>,
     pub loading: Vec<PathBuf>,
     /// Every record field name seen so far: `x.name(...)` may call a field.
     pub known_fields: HashSet<Name>,
@@ -78,6 +80,7 @@ impl Ctx {
             types: builtin_types(),
             builtins: Namespace::default(),
             modules: HashMap::new(),
+            failed_modules: HashSet::new(),
             loading: Vec::new(),
             known_fields: HashSet::new(),
             sigs: HashMap::new(),

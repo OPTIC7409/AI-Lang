@@ -973,6 +973,35 @@ impl<'a> Checker<'a> {
                 {
                     return Ty::Any;
                 }
+                // A function found only in an imported module: method syntax
+                // finds it only for values of that module's own types.
+                if method.res == VarRes::Unresolved && self.ctx.module_fns.contains(&method.name) && !rt.is_any() && !matches!(rt, Ty::Named { .. }) {
+                    let msg = format!("{} has no method `{}`", rt, method.name);
+                    let shadowed = match &receiver.kind {
+                        ExprKind::Var(v) if !matches!(v.res, VarRes::Global(_)) => self
+                            .ctx
+                            .globals
+                            .iter()
+                            .any(|g| g.name == v.name && matches!(g.kind, crate::ctx::GlobalKind::Module(_)))
+                            .then(|| v.name.clone()),
+                        _ => None,
+                    };
+                    let d = self.error(e.span, msg, "no such method");
+                    match shadowed {
+                        Some(m) => {
+                            d.notes.push(format!("here `{}` is a local variable, which hides the imported module `{}`", m, m));
+                            d.help = Some(format!("rename the variable, so that `{}.{}(...)` calls the module's function", m, method.name));
+                        }
+                        None => {
+                            d.notes.push(format!(
+                                "`{}` is a function of an imported module; `value.{}()` finds it only when the value's type is declared in that module",
+                                method.name, method.name
+                            ));
+                            d.help = Some(format!("call it through the module: `module.{}(value)`", method.name));
+                        }
+                    }
+                    return Ty::Any;
+                }
                 self.call_named(method, Some((rt, receiver.span)), &arg_tys, e.span)
             }
             ExprKind::Unary { op, expr } => {
@@ -1336,7 +1365,25 @@ impl<'a> Checker<'a> {
             Ty::Any
         };
         match op {
-            Eq | Ne => Ty::Bool,
+            Eq | Ne => {
+                // Values of different types are never equal.
+                if !unknown(l) && !unknown(r) && !self.compatible(l, r) && !self.compatible(r, l) {
+                    let always = if op == Eq { "false" } else { "true" };
+                    let why = match (l, r) {
+                        (Ty::Named { id: x, name, .. }, Ty::Named { id: y, .. }) if x != y && l.to_string() == r.to_string() => {
+                            format!("these are two different types that are both named `{}`", name)
+                        }
+                        _ => format!("{} is never equal to {}", a(l), a(r)),
+                    };
+                    let d = Diagnostic::warning("W0009", format!("this comparison is always {}", always))
+                        .at(span)
+                        .label("values of different types")
+                        .note(why)
+                        .help("convert one side first (`str(n)`, `parse_int(s)`, `Some(x)`), or compare the right values");
+                    self.diags.push(d);
+                }
+                Ty::Bool
+            }
             Lt | Le | Gt | Ge => {
                 let comparable = unknown(l)
                     || unknown(r)
@@ -1347,9 +1394,9 @@ impl<'a> Checker<'a> {
                         (l, r),
                         (Ty::List(_), Ty::List(_))
                             | (Ty::Tuple(_), Ty::Tuple(_))
-                            | (Ty::Named { .. }, Ty::Named { .. })
                             | (Ty::Record(_), Ty::Record(_))
-                    );
+                    )
+                    || matches!((l, r), (Ty::Named { id: x, .. }, Ty::Named { id: y, .. }) if x == y);
                 if !comparable {
                     bad(self, format!("cannot compare {} with {}", a(l), a(r)));
                 }

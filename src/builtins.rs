@@ -3062,10 +3062,12 @@ impl<'a> JsonParser<'a> {
                     }
                 }
                 _ => {
-                    let rest = std::str::from_utf8(&self.s[self.pos..]).map_err(|_| "invalid UTF-8".to_string())?;
-                    let ch = rest.chars().next().unwrap();
-                    out.push(ch);
-                    self.pos += ch.len_utf8();
+                    // Copy the run of text up to the next quote or escape
+                    // (ASCII, so the run ends on a character boundary).
+                    let run = self.s[self.pos..].iter().position(|&b| b == b'"' || b == b'\\').unwrap_or(self.s.len() - self.pos);
+                    let text = std::str::from_utf8(&self.s[self.pos..self.pos + run]).map_err(|_| "invalid UTF-8".to_string())?;
+                    out.push_str(text);
+                    self.pos += run;
                 }
             }
         }

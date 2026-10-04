@@ -173,6 +173,11 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
     r.ctx.known_fields.extend(fields);
     r.program(prog);
     *ns = std::mem::take(&mut r.ns);
+    // After a failed import, this file's other errors are mostly about the
+    // names the module would have defined: report only the import's.
+    if r.import_failed {
+        r.diags.retain(|d| !d.is_error() || d.code == "E0114" || d.span.is_some_and(|s| s.file != prog.file));
+    }
     if !repl && !r.diags.iter().any(|d| d.is_error()) {
         let mut out = Vec::new();
         for item in &prog.items {
@@ -728,8 +733,30 @@ impl<'a> Resolver<'a> {
             d = Diagnostic::error("E0100", "`old(...)` can only be used in `ensures` clauses")
                 .at(span)
                 .help("in a postcondition, `old(e)` is the value `e` had when the function was called");
+        } else if let Some((alias, member)) = name.split_once('.') {
+            // `shapes.Circel`: the names the module does define.
+            let m = self.ns.values.get(alias).and_then(|s| match &self.ctx.globals[*s as usize].kind {
+                GlobalKind::Module(m) => Some(m.clone()),
+                _ => None,
+            });
+            if let Some(m) = m {
+                let mut names: Vec<&str> =
+                    m.ns.values
+                        .keys()
+                        .map(|k| &**k)
+                        .filter(|k| k.starts_with(char::is_uppercase) == member.starts_with(char::is_uppercase))
+                        .collect();
+                names.sort();
+                if let Some(s) = suggest(member, names) {
+                    let full = format!("{}.{}", alias, s);
+                    d = d.help(format!("did you mean `{}`?", full));
+                }
+            }
         } else if let Some(alias) = self.module_with(name) {
             d = d.help(format!("`{}` is defined in the imported module `{}`: write `{}.{}`", name, alias, alias, name));
+            if self.modules_with(name) == 1 {
+                d = d.fix(span, format!("{}.{}", alias, name));
+            }
         } else if let Some(h) = confusion_hint(name) {
             d = d.help(h);
             if let Some(r) = confusion_fix(name, what == "function") {
@@ -741,6 +768,15 @@ impl<'a> Resolver<'a> {
             d = d.help(format!("`{}` is a type; build values with one of its constructors", name));
         }
         self.error(d);
+    }
+
+    /// How many imported modules define `name`.
+    fn modules_with(&self, name: &str) -> usize {
+        self.ns
+            .values
+            .values()
+            .filter(|&&slot| matches!(&self.ctx.globals[slot as usize].kind, GlobalKind::Module(m) if m.ns.values.contains_key(name) || m.ns.types.contains_key(name)))
+            .count()
     }
 
     /// The alias of an imported module that defines `name` (a value or type).
@@ -1134,6 +1170,10 @@ impl<'a> Resolver<'a> {
         };
         let module = if let Some(m) = self.ctx.modules.get(&canon) {
             m.clone()
+        } else if self.ctx.failed_modules.contains(&canon) {
+            // Its errors were reported where it was first imported.
+            self.error(Diagnostic::error("E0114", format!("module `{}` has errors (shown above)", imp.path)).at(imp.path_span));
+            return;
         } else {
             if self.ctx.loading.contains(&canon) {
                 let d = Diagnostic::error("E0114", format!("import cycle: `{}` imports itself (directly or indirectly)", imp.path))
@@ -1150,13 +1190,17 @@ impl<'a> Resolver<'a> {
                     return;
                 }
             };
-            let display = canon.display().to_string();
+            // Shown relative to the current directory when it is inside it.
+            let cwd = std::env::current_dir().ok().and_then(|d| d.canonicalize().ok());
+            let display =
+                cwd.and_then(|d| canon.strip_prefix(d).ok().map(|p| p.display().to_string())).unwrap_or_else(|| canon.display().to_string());
             let file = self.ctx.sm.add(display, src.clone());
             let mut prog = match parse_program(&src, file) {
                 Ok(p) => p,
                 Err(d) => {
                     self.error(d);
                     self.error(Diagnostic::error("E0114", format!("module `{}` has syntax errors", imp.path)).at(imp.path_span));
+                    self.ctx.failed_modules.insert(canon);
                     return;
                 }
             };
@@ -1177,6 +1221,7 @@ impl<'a> Resolver<'a> {
             self.diags.extend(type_errors);
             if has_errors {
                 self.error(Diagnostic::error("E0114", format!("module `{}` has errors", imp.path)).at(imp.path_span));
+                self.ctx.failed_modules.insert(canon);
                 return;
             }
             let m = Rc::new(Module { name: alias.clone(), path: canon.clone(), program: prog, ns, executed: std::cell::Cell::new(false) });
@@ -2369,6 +2414,10 @@ impl<'a> Resolver<'a> {
                     let what = self.snippet_text(scrutinee.span);
                     for arm in arms.iter() {
                         if let Some(bad) = pattern_mismatch(&arm.pat, &t) {
+                            // (Not again for a constructor reported as undefined.)
+                            if self.diags.iter().any(|d| d.code == "E0100" && d.span == Some(bad.span)) {
+                                continue;
+                            }
                             let d = Diagnostic::error("E0119", format!("this pattern can never match: `{}` is declared as `{}`", what, t))
                                 .at(bad.span)
                                 .label("a pattern for a different type");
