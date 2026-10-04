@@ -1344,28 +1344,7 @@ impl Interp {
                 let v = self.eval(target, env)?;
                 self.get_field(&v, name, *name_span)
             }
-            ExprKind::Index { target, index } => {
-                // `xs[i]` on a local list: no copy of the list's handle. (Only
-                // for an index that cannot change the list while it is computed.)
-                if let ExprKind::Var(Var { res: VarRes::Local(s), .. }) = &target.kind {
-                    if !simple_index(index) {
-                        let v = env.locals[*s as usize].clone();
-                        let i = self.eval(index, env)?;
-                        return self.index_general(v, i, index, e.span);
-                    }
-                    let i = self.operand(index, env)?;
-                    if let (Value::List(xs), Value::Int(i)) = (&env.locals[*s as usize], &i) {
-                        if let Some(j) = norm_index(*i, xs.len()) {
-                            return Ok(xs[j].clone());
-                        }
-                    }
-                    let v = env.locals[*s as usize].clone();
-                    return self.index_value(v, i, e.span);
-                }
-                let v = self.eval(target, env)?;
-                let i = self.eval(index, env)?;
-                self.index_general(v, i, index, e.span)
-            }
+            ExprKind::Index { target, index } => self.eval_index(target, index, e.span, env),
             ExprKind::Call { callee, args } => {
                 let f = self.eval(callee, env)?;
                 if let Value::Func(c) = &f {
@@ -1380,21 +1359,9 @@ impl Interp {
                         return self.call_simple(c, args, env, e.span);
                     }
                 }
-                let (pos, named) = self.eval_args(args, env, None)?;
-                self.call_value(&f, pos, named, e.span)
+                self.call_general(&f, args, env, e.span)
             }
-            ExprKind::Unary { op, expr } => {
-                let v = self.eval(expr, env)?;
-                match (op, v) {
-                    (UnOp::Neg, Value::Int(i)) => {
-                        i.checked_neg().map(Value::Int).ok_or_else(|| self.err(e.span, "E0207", "integer overflow in negation"))
-                    }
-                    (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
-                    (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-                    (UnOp::Not, other) => Err(self.fail(self.not_bool(expr.span, "the operand of `not`", &other))),
-                    (UnOp::Neg, other) => Err(self.err(e.span, "E0211", format!("cannot negate {}", describe(&other)))),
-                }
-            }
+            ExprKind::Unary { op, expr } => self.eval_unary(*op, expr, e.span, env),
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.operand(lhs, env)?;
                 let b = self.operand(rhs, env)?;
@@ -1447,6 +1414,52 @@ impl Interp {
                 Err(Ctrl::Return(v))
             }
             _ => self.eval_cold(e, env),
+        }
+    }
+
+    /// `xs[i]` (kept out of `eval`, whose stack frame every nested
+    /// expression pays for).
+    #[inline(never)]
+    fn eval_index(&mut self, target: &Expr, index: &Expr, span: Span, env: &mut Env) -> R {
+        // `xs[i]` on a local list: no copy of the list's handle. (Only for an
+        // index that cannot change the list while it is computed.)
+        if let ExprKind::Var(Var { res: VarRes::Local(s), .. }) = &target.kind {
+            if !simple_index(index) {
+                let v = env.locals[*s as usize].clone();
+                let i = self.eval(index, env)?;
+                return self.index_general(v, i, index, span);
+            }
+            let i = self.operand(index, env)?;
+            if let (Value::List(xs), Value::Int(i)) = (&env.locals[*s as usize], &i) {
+                if let Some(j) = norm_index(*i, xs.len()) {
+                    return Ok(xs[j].clone());
+                }
+            }
+            let v = env.locals[*s as usize].clone();
+            return self.index_value(v, i, span);
+        }
+        let v = self.eval(target, env)?;
+        let i = self.eval(index, env)?;
+        self.index_general(v, i, index, span)
+    }
+
+    /// A call that `call_simple` does not handle (named arguments, contracts,
+    /// built-ins, ...).
+    #[inline(never)]
+    fn call_general(&mut self, f: &Value, args: &[Arg], env: &mut Env, span: Span) -> R {
+        let (pos, named) = self.eval_args(args, env, None)?;
+        self.call_value(f, pos, named, span)
+    }
+
+    #[inline(never)]
+    fn eval_unary(&mut self, op: UnOp, expr: &Expr, span: Span, env: &mut Env) -> R {
+        let v = self.eval(expr, env)?;
+        match (op, v) {
+            (UnOp::Neg, Value::Int(i)) => i.checked_neg().map(Value::Int).ok_or_else(|| self.err(span, "E0207", "integer overflow in negation")),
+            (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
+            (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+            (UnOp::Not, other) => Err(self.fail(self.not_bool(expr.span, "the operand of `not`", &other))),
+            (UnOp::Neg, other) => Err(self.err(span, "E0211", format!("cannot negate {}", describe(&other)))),
         }
     }
 
