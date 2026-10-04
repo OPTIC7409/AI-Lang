@@ -1620,15 +1620,33 @@ impl<'a> Resolver<'a> {
     /// Warn when an expression statement throws away the result of a
     /// built-in that has no side effects (`xs.sort()` instead of `xs.sort!()`).
     fn check_discarded(&mut self, e: &Expr) {
-        let (name, res) = match &e.kind {
-            ExprKind::MethodCall { method, mutating: false, .. } => (&method.name, method.res),
+        let (name, res, mutating) = match &e.kind {
+            ExprKind::MethodCall { method, mutating, .. } => (&method.name, method.res, *mutating),
             ExprKind::Call { callee, .. } => match &callee.kind {
-                ExprKind::Var(v) => (&v.name, v.res),
+                ExprKind::Var(v) => (&v.name, v.res, v.name.ends_with('!')),
                 _ => return,
             },
             _ => return,
         };
         let VarRes::Global(slot) = res else { return };
+        // A user function that returns a Result: dropping it drops the error.
+        if matches!(self.ctx.globals[slot as usize].kind, GlobalKind::Fn) {
+            let returns_result =
+                self.ctx.sigs.get(&slot).is_some_and(|sigs| {
+                    !sigs.is_empty() && sigs.iter().all(|s| matches!(&s.ret, Some(Ty::Named { name, .. }) if &**name == "Result"))
+                });
+            if returns_result {
+                let d = Diagnostic::warning("W0006", format!("the Result of `{}` is ignored", name))
+                    .at(e.span)
+                    .label("an error here would go unnoticed")
+                    .help("handle it with `match` or `?`, stop on an error with `.unwrap()`, or say it may be ignored with `let _ = ...`");
+                self.diags.push(d);
+            }
+            return;
+        }
+        if mutating {
+            return;
+        }
         let GlobalKind::Builtin(idx) = self.ctx.globals[slot as usize].kind else { return };
         let b = &crate::builtins::BUILTINS[idx as usize];
         const EFFECTS: &[&str] = &[

@@ -1,0 +1,4 @@
+# expect: W0006
+fn save(x: Int) -> Result[Int, Str] => if x > 0 { Ok(x) } else { Err("negative") }
+save(1)
+print("done")

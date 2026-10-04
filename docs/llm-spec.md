@@ -483,8 +483,10 @@ and argument names for known functions and constructors; exhaustiveness of
 matches; misplaced `break`/`continue`/`return`/`?`; `?` mixing Option and
 Result; side effects in contracts; unknown types; duplicate definitions.
 Warnings: unused variables, unreachable code, ignored results of pure
-built-ins (`xs.sort()`), and `?`/`return` inside anonymous functions
-(`cogito FILE` shows these warnings too, except unused variables).
+built-ins (`xs.sort()`), `?`/`return` inside anonymous functions, an
+ignored `Result` of your own function (use `let _ = f()` if that is
+intended), and a function named like a built-in that calls itself by
+mistake (`cogito FILE` shows these warnings too, except unused variables).
 
 **Types before running (E0121).** Types are inferred from literals,
 annotations, and the signatures of functions, constructors and common
