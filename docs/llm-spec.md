@@ -60,8 +60,10 @@ program's `args()`.
   trailing newline), and the common indentation of the lines is removed.
 - Raw strings have no escapes and no interpolation (use them for JSON,
   regexes, Windows paths): `r"..."` (cannot contain `"`), `r#"{"a": 1}"#`
-  (may contain `"`; add more `#` if the text contains `"#`), and
-  `r"""..."""` (dedented like other triple strings).
+  (may contain `"`, and span lines without being dedented; add more `#` if
+  the text contains `"#`), and `r"""..."""` (dedented like other triple
+  strings). A `"""` inside a triple-quoted string ends it: write `\"` for
+  quotes there, or use `r#"""..."""#`.
 
 ## Values and types
 
@@ -244,7 +246,7 @@ match value {
   0 => "zero"
   1 | 2 => "one or two"                    # or-patterns, also nested: `(A | B, Some(n))`
   n if n < 0 => "negative"                 # guard (tried for each alternative of an or-pattern)
-  3..=9 => "small"                         # range (also "a"..="z")
+  3..=9 => "small"                         # range (also "a"..="z"); both ends are needed
   "hello" => "greeting"
   [] => "empty list"
   [x] => "one element"
@@ -265,8 +267,9 @@ match value {
 anything: `slots.count(fn(s) => s is Full(_))`, `if r is Err(_) { ... }`.
 It cannot bind names (use `match` for that).
 
-Arms are separated by newlines or commas. A `match` must be exhaustive (or
-have `_`). This is checked before the program runs, for enums, Bools,
+Arms are separated by newlines or commas, and tried in order: an arm after
+`_` or a bare name (which matches anything, and binds it) never runs (W0010).
+A `match` must be exhaustive (or have `_`). This is checked before the program runs, for enums, Bools,
 tuples, records, list lengths and literals (a literal never covers all
 numbers or strings), including nested patterns, and the error names a
 missing case. Arms with guards (`if ...`) do not count toward
@@ -281,7 +284,8 @@ match.
 
 Only `var` bindings change. Assignment forms: `x = v`, `x += v` (also `-= *= /= %= //= **=`),
 `xs[i] = v`, `m[k] = v` (inserts), `p.field = v`, `t[0] = v`, nested
-`grid[r][c] = v`. Mutating functions end in `!` and require a `var` (or
+`grid[r][c] = v`. Mutating functions end in `!`, are declared at the top
+level (not inside another function: E0116), and require a `var` (or
 field/index of one) as first argument: `xs.push!(4)`, `xs.sort!()`,
 `m.insert!(k, v)`. Non-mutating twins return new values: `ys = xs.push(4)`,
 `xs.sort()`. User-defined `fn grow!(xs: List[Int], n: Int) { xs.push!(n) }`
@@ -333,7 +337,9 @@ fn push_twice!(xs: List[Int], x: Int)
 
 Contracts must not change anything: no assignments or `!` calls inside
 `requires`, `ensures` or `old(...)` (E0118). `result` and `old(...)` exist only
-in `ensures`.
+in `ensures`. A violation's message, as `catch` returns it, is
+``precondition of `withdraw` violated: `amount > 0` `` (or ``postcondition
+... violated``, for `ensures`).
 
 **Type invariants.** A record type may state conditions on its fields, which
 every value of the type satisfies:
@@ -374,7 +380,9 @@ with `test` blocks or a `property` that builds valid inputs. Generated values
 of a type with an invariant always satisfy it: bounds in the clauses steer
 the generator, a field defined by a clause `field == expr` (`n == adj.len()`)
 is computed from the others, and the rest is retried, so a well-formed
-structure is usually best described as a type invariant.
+structure is usually best described as a type invariant. Generated sizes
+can reach the language's limits (a list of 100 million elements, the step
+budget): bound them with `requires n <= 1000` where that matters.
 
 ## Tests
 
@@ -478,7 +486,10 @@ are no namespaces such as `Math.` or `math.`: write `floor(x)`, `pi`.
   Sorting is stable. `sort_with(cmp)` takes a function returning an
   Ordering, as `compare(a, b)` does. Negative indexes count from the end
   (`get(-1)` is the last element; `insert(i, x)` puts `x` at index `i`, so
-  `insert(-1, x)` appends). `first`/`last` of a set follow insertion order.
+  `insert(-1, x)` appends). `first`/`last` of a set or map follow insertion
+  order (on a map they give `(key, value)` tuples, as `take`, `entries` and
+  `for` do). Removing from a map or set takes constant time; `take`, `drop`
+  and slices copy only what they return.
   On a Str, functions that pick or reorder characters give a Str (`take
   drop slice take_while drop_while filter sort unique reverse`, and the
   pieces of `chunks`/`windows`); `map` gives a List.

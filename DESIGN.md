@@ -629,6 +629,30 @@ invariants (`s.starts_with(p)`) and relations between fields, so that
 record types with invariants are tested on full values rather than mostly
 discarded ones.
 
+In the tenth round, one agent wrote eight programs of the kind people ask
+for: a CSV reconciler, a Markdown converter, a sudoku solver, an LRU cache,
+a dependency resolver, a rate limiter, a matrix library and a URL parser.
+All of them worked, three on the first attempt. There were no wrong answers
+and no false errors from `check`. One construct was silently wrong:
+`[for x in xs { x * x }]`, a loop inside list brackets, built `[()]`. It is
+now an error, and the fix rewrites it as the comprehension
+`[x * x for x in xs]`. The agent also found that removing from a map was
+O(n), which made an LRU cache quadratic; maps now leave holes on removal
+and compact them occasionally, as Python's dictionaries do.
+
+A second agent attacked the new fixes and found ten that changed meaning:
+- A line `// size` under an expression may be meant as floor division
+  continuing it.
+- `Math.E` became `e` where a loop variable named `e` hid the built-in.
+- `Math.round` breaks ties differently from `round`.
+- `console.log("%s", x)` formats its arguments.
+- `parseInt` returns a number in JavaScript, where `parse_int` returns an
+  Option.
+
+Each fix now checks for its case, or became help text. The lesson is that
+a fix is a claim about intent, and a claim needs evidence. "Prose after
+`//`" is evidence only when the first word is not a name the program uses.
+
 ## Future directions
 
 - Deeper static checking: the parameter types of functions passed to user
