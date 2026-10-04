@@ -238,8 +238,9 @@ Run everything with `cargo test`.
 
 Cogito is a young, experimental language (version 0.1). It is a
 tree-walking interpreter: fast enough for scripts, puzzles, teaching and
-experiments, not for performance-critical work. Type annotations are checked
-at runtime at function boundaries, not by a static type checker. There is no
+experiments, not for performance-critical work. Typing is gradual: a static
+checker rejects type errors it can prove before the program runs, and every
+annotation is also checked at runtime. There is no
 concurrency, no package manager, and the standard library is small.
 Contributions and experiments are welcome.
 

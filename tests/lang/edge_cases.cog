@@ -1,5 +1,9 @@
 # Regression tests for edge cases found by adversarial testing.
 
+# Hides a value's type from the static checker, so that tests can check
+# what happens at runtime when a value of the wrong type arrives.
+fn opaque(x) => x
+
 test "integer edge cases are errors, not wraparound" {
   assert catch(fn() => gcd(min_int, 0)).is_err()
   assert catch(fn() => lcm(min_int, 2)).is_err()
@@ -132,7 +136,7 @@ test "anonymous records convert to declared record types" {
 test "declared types are enforced on every write" {
   assert catch(fn() {
     var n: Int = 1
-    n = "s"
+    n = opaque("s")
   }).is_err()
   assert catch(fn() {
     var xs: List[Int] = []
@@ -140,7 +144,7 @@ test "declared types are enforced on every write" {
   }).is_err()
   assert catch(fn() {
     var p = P(1, 2.0)
-    p.x = "s"
+    p.x = opaque("s")
   }).is_err()
   var q = P(1, 2.0)
   q.y = 3

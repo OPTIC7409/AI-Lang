@@ -1,5 +1,9 @@
 # User-defined types, Option/Result, and runtime type checks.
 
+# Hides a value's type from the static checker, so that tests can check
+# what happens at runtime when a value of the wrong type arrives.
+fn opaque(x) => x
+
 type Point = { x: Int, y: Int }
 
 type Shape =
@@ -40,7 +44,7 @@ test "records" {
 }
 
 test "record fields are type-checked" {
-  assert catch(fn() => Point(x: "a", y: 2)).is_err()
+  assert catch(fn() => Point(x: opaque("a"), y: 2)).is_err()
 }
 
 test "enums with named and positional fields" {
@@ -111,14 +115,14 @@ fn typed(x: Int, names: List[Str], m: Map[Str, Int], t: (Int, Str), r: { a: Int 
 
 test "annotations are checked at call boundaries" {
   assert typed(1, ["a"], ["k": 1], (1, "s"), { a: 1, b: 2 }) == "ok"
-  assert catch(fn() => typed("1", ["a"], ["k": 1], (1, "s"), { a: 1 })).is_err()
+  assert catch(fn() => typed(opaque("1"), ["a"], ["k": 1], (1, "s"), { a: 1 })).is_err()
   assert catch(fn() => typed(1, ["a", 2], ["k": 1], (1, "s"), { a: 1 })).is_err()
-  assert catch(fn() => typed(1, ["a"], ["k": "v"], (1, "s"), { a: 1 })).is_err()
-  assert catch(fn() => typed(1, ["a"], ["k": 1], (1, 2), { a: 1 })).is_err()
-  assert catch(fn() => typed(1, ["a"], ["k": 1], (1, "s"), { b: 1 })).is_err()
+  assert catch(fn() => typed(1, ["a"], opaque(["k": "v"]), (1, "s"), { a: 1 })).is_err()
+  assert catch(fn() => typed(1, ["a"], ["k": 1], opaque((1, 2)), { a: 1 })).is_err()
+  assert catch(fn() => typed(1, ["a"], ["k": 1], (1, "s"), opaque({ b: 1 }))).is_err()
 }
 
-fn bad_return(x: Int) -> Str => x
+fn bad_return(x) -> Str => x
 
 test "return types are checked" {
   assert catch(fn() => bad_return(1)).is_err()
@@ -126,7 +130,7 @@ test "return types are checked" {
 
 test "let annotations are checked" {
   assert catch(fn() {
-    let x: Str = 5
+    let x: Str = opaque(5)
     x
   }).is_err()
 }

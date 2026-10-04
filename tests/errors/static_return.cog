@@ -1,0 +1,8 @@
+# expect: E0121
+fn label(n: Int) -> Str {
+  if n > 0 {
+    return n
+  }
+  "none"
+}
+print(label(1))

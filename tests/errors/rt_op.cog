@@ -1,2 +1,3 @@
 # expect: E0211
-print("a" + 1)
+let x = parse_json("1").unwrap()
+print("a" + x)

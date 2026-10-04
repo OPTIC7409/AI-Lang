@@ -218,9 +218,31 @@ the meaning of correct programs.
 
 *Cost, and how it is paid:* checking `xs: List[Int]` naively costs O(n) per
 call, which turns a recursive function over a list into O(n²). Each list and
-map therefore remembers the last annotation it was verified against; any
-mutation clears that memo. `push!` and `+=` only check the new elements. In
+map therefore remembers the last annotation it was verified against. A write
+that is checked against the declared type keeps that memo valid, so
+`push!`, `+=`, `xs[i] = v` and `swap!` only check what they change. In
 practice annotation checks are close to free.
+
+### ...and before running, wherever the types are known
+
+A gradual static checker runs before the program does. It infers types from
+literals, annotations, and the signatures of functions, constructors and
+common built-ins, and it rejects a program only when a value's type is known
+and can never fit what is expected: `area("3", 4.0)` where `area` takes
+Floats, `let total: Int = 1.5`, `if count { ... }`, `"a" + 1`, a field a
+record type does not have. Anything it cannot work out is `Any`, which is
+never an error.
+
+*Why gradual, and why only "can never fit":* the runtime checks already give
+every annotation a precise meaning, so the static checker must not change
+which programs are correct; it only moves failures earlier. Requiring that a
+type be *known* to be wrong means it never rejects a working program. A
+`var` without an annotation may hold different types over time, so its type
+is unknown, except when it holds a value of a declared record or enum type
+and is never assigned as a whole: writes to its fields are checked against
+the declared field types at runtime, so they can be checked early too.
+Tests that exercise the runtime checks on purpose pass values through an
+unannotated function (`fn opaque(x) => x`) to hide their types.
 
 ### Static checks that need no types
 
@@ -394,7 +416,8 @@ README.
 - A third round of dogfooding, to see whether the first-try success rate
   keeps rising now that the remaining failures are the agents' own mistakes.
 
-- A static type checker that uses the existing annotations.
+- Deeper static checking: arguments of built-ins, the parameter types of
+  passed-in functions, and flow-sensitive types for reassigned `var`s.
 - A bytecode compiler for speed.
 - A formatter (`cogito fmt`) to make the "one obvious way" principle
   extend to layout.

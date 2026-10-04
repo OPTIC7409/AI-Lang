@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 /// Where a variable lives at runtime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VarRes {
     Unresolved,
     /// A slot in the current function's frame.
@@ -593,6 +593,114 @@ pub fn for_each_child_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
                 f(&mut d.body);
             }
         }
+        ExprKind::While { cond, body } => {
+            f(cond);
+            f(body);
+        }
+        ExprKind::For { iter, body, .. } => {
+            f(iter);
+            f(body);
+        }
+        ExprKind::Loop { body } => f(body),
+        ExprKind::Break(v) | ExprKind::Return(v) => {
+            if let Some(x) = v {
+                f(x);
+            }
+        }
+    }
+}
+
+/// Visit every direct sub-expression of `e` (descending into lambdas).
+pub fn for_each_child(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    match &e.kind {
+        ExprKind::Unit | ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Var(_) | ExprKind::Continue => {}
+        ExprKind::Interp(parts) => {
+            for p in parts.iter() {
+                if let InterpPart::Expr(x, _) = p {
+                    f(x);
+                }
+            }
+        }
+        ExprKind::List(items) => items.iter().for_each(|i| f(&i.expr)),
+        ExprKind::Comprehension { body, clauses } => {
+            for c in clauses.iter() {
+                match c {
+                    CompClause::For(_, x) | CompClause::If(x) => f(x),
+                }
+            }
+            f(body);
+        }
+        ExprKind::Map(es) => es.iter().for_each(|(k, v)| {
+            f(k);
+            f(v);
+        }),
+        ExprKind::Tuple(items) => items.iter().for_each(&mut *f),
+        ExprKind::Record { values, spread, .. } => {
+            values.iter().for_each(&mut *f);
+            if let Some(s) = spread {
+                f(s);
+            }
+        }
+        ExprKind::Field { target, .. } => f(target),
+        ExprKind::Index { target, index } => {
+            f(target);
+            f(index);
+        }
+        ExprKind::Call { callee, args } => {
+            f(callee);
+            args.iter().for_each(|a| f(&a.value));
+        }
+        ExprKind::MethodCall { receiver, args, .. } => {
+            f(receiver);
+            args.iter().for_each(|a| f(&a.value));
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Try(expr) | ExprKind::Is { expr, .. } => f(expr),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::And(lhs, rhs) | ExprKind::Or(lhs, rhs) => {
+            f(lhs);
+            f(rhs);
+        }
+        ExprKind::Range { start, end, .. } => {
+            f(start);
+            if let Some(x) = end {
+                f(x);
+            }
+        }
+        ExprKind::If { cond, then, els } => {
+            f(cond);
+            f(then);
+            if let Some(x) = els {
+                f(x);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            f(scrutinee);
+            for a in arms.iter() {
+                if let Some(g) = &a.guard {
+                    f(g);
+                }
+                f(&a.body);
+            }
+        }
+        ExprKind::Block(stmts) => {
+            for s in stmts.iter() {
+                match &s.kind {
+                    StmtKind::Let { value, .. } => f(value),
+                    StmtKind::Assign { target, value, .. } => {
+                        f(target);
+                        f(value);
+                    }
+                    StmtKind::Fn { .. } => {}
+                    StmtKind::Assert { cond, msg } => {
+                        f(cond);
+                        if let Some(m) = msg {
+                            f(m);
+                        }
+                    }
+                    StmtKind::Expr(x) => f(x),
+                }
+            }
+        }
+        ExprKind::Lambda(def) => f(&def.body),
         ExprKind::While { cond, body } => {
             f(cond);
             f(body);

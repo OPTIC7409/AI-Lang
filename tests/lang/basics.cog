@@ -1,5 +1,9 @@
 # Core values and operators.
 
+# Hides a value's type from the static checker, so that tests can check
+# what happens at runtime when a value of the wrong type arrives.
+fn opaque(x) => x
+
 test "integer arithmetic" {
   assert 1 + 2 * 3 == 7
   assert (1 + 2) * 3 == 9
@@ -51,8 +55,8 @@ test "number literals" {
 test "booleans are strict" {
   assert true and not false
   assert (false or true) == true
-  assert catch(fn() => if 1 { 0 } else { 1 }).is_err()
-  assert catch(fn() => not 0).is_err()
+  assert catch(fn() => if opaque(1) { 0 } else { 1 }).is_err()
+  assert catch(fn() => not opaque(0)).is_err()
 }
 
 test "short-circuit evaluation" {
@@ -66,7 +70,7 @@ test "comparisons" {
   assert [1, 2] < [1, 3]
   assert [1, 2] < [1, 2, 0]
   assert (1, "b") > (1, "a")
-  assert catch(fn() => 1 < "a").is_err()
+  assert catch(fn() => opaque(1) < "a").is_err()
 }
 
 test "membership with in" {

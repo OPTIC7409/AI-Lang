@@ -1,5 +1,6 @@
-# Cogito's messages say what went wrong and how to fix it.
-# Press Check to see what is found before the program runs, then Run.
+# Cogito's messages say what went wrong and how to fix it, and many
+# mistakes are found before the program runs. Press Run, then try fixing
+# each problem.
 
 type Point = { x: Float, y: Float }
 

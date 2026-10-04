@@ -1,0 +1,4 @@
+# expect: E0121
+type Account = { owner: Str, balance: Int }
+var acct = Account(owner: "Ada", balance: 10)
+acct.balance = "lots"

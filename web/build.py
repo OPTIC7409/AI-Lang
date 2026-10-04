@@ -17,7 +17,7 @@ EXAMPLES = [
     ("Contracts find a bug", "web/examples/contracts.cog", "verify",
      "Verify generated inputs until the promise broke, then shrank the failure to a small counterexample. Fix it as the comment says."),
     ("Errors explain themselves", "web/examples/errors.cog", "run",
-     "Warnings and errors name the problem and suggest a fix. Press Check to see what is found before anything runs."),
+     "The type error is found before the program runs, so nothing is printed until it is fixed."),
     ("Reading input", "web/examples/stdin.cog", "run",
      "This program reads the Standard input box below the editor."),
     ("Bank transfers", "examples/bank.cog", "run",

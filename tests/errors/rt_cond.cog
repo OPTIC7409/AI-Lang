@@ -1,3 +1,4 @@
 # expect: E0209
-let n = 1
+# The value's type is only known when the program runs.
+let n = parse_json("1").unwrap()
 if n { print(n) }

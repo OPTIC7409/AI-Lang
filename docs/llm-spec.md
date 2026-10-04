@@ -1,7 +1,8 @@
 # Cogito language specification (compact)
 
-Cogito is a small, expression-oriented, dynamically typed language with
-optional type annotations that are checked at runtime, value semantics,
+Cogito is a small, expression-oriented, gradually typed language: type
+annotations are optional, checked before the program runs wherever the types
+are known, and always checked when it runs. It has value semantics,
 contracts, and built-in tests. This document is complete enough to write
 correct programs; it is written to fit in a language model's context window.
 
@@ -413,9 +414,20 @@ matches; misplaced `break`/`continue`/`return`/`?`; `?` mixing Option and
 Result; side effects in contracts; unknown types; duplicate definitions.
 Warnings: unused variables, unreachable code, ignored results of pure
 built-ins (`xs.sort()`), and `?`/`return` inside anonymous functions
-(`cogito FILE` shows these warnings too, except unused variables). It does
-not check the types of values; annotations are checked when the program
-runs (a `fn(A) -> B` annotation checks the number of parameters).
+(`cogito FILE` shows these warnings too, except unused variables).
+
+**Types before running (E0121).** Types are inferred from literals,
+annotations, and the signatures of functions, constructors and common
+built-ins. Where a value's type is known and can never fit what is
+expected, the program is rejected before it runs: a call argument against a
+parameter annotation, a returned value against the return type, a `let` or
+assignment against its annotation (including record fields and elements of
+declared collections), a non-Bool condition, operators on the wrong kinds
+(`"a" + 1`), and fields a record type lacks. Anything unknown (an
+unannotated parameter, a `var` that is reassigned, the result of
+`parse_json`) is not checked early; every annotation is still checked when
+the program runs (E0200). A `fn(A) -> B` annotation checks the number of
+parameters.
 
 ## Style notes for writing Cogito
 

@@ -1,5 +1,9 @@
 # Regression tests for issues found by the second round of AI dogfooding.
 
+# Hides a value's type from the static checker, so that tests can check
+# what happens at runtime when a value of the wrong type arrives.
+fn opaque(x) => x
+
 import "lib/queue.cog"
 
 type Heap = { items: List[Int] }
@@ -63,7 +67,7 @@ test "writes through a nominal record field are checked without an annotation" {
   assert h.items == [3, 2, 10]
   let r = catch(fn() => {
     var g = Heap(items: [1])
-    g.items[0] = "x"
+    g.items[0] = opaque("x")
     g
   })
   assert r.is_err()
@@ -177,7 +181,7 @@ test "annotations on destructuring bindings are enforced" {
   var (a, b): (Int, Str) = (1, "x")
   a = 2
   assert a == 2 and b == "x"
-  assert catch(fn() => { var (c, _d): (Int, Int) = (1, 2); c = "no"; c }).is_err()
+  assert catch(fn() => { var (c, _d): (Int, Int) = (1, 2); c = opaque("no"); c }).is_err()
 }
 
 test "inclusive slices may end at a negative index" {

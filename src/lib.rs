@@ -60,6 +60,7 @@ pub mod repl;
 pub mod resolver;
 pub mod span;
 pub mod testing;
+pub mod typecheck;
 pub mod types;
 pub mod value;
 
@@ -82,7 +83,10 @@ pub fn load_source(
 ) -> Result<(Program, Vec<Diagnostic>), Vec<Diagnostic>> {
     let file = it.ctx.sm.add(name, src);
     let mut prog = parser::parse_program(src, file).map_err(|d| vec![d])?;
-    let diags = resolver::resolve_program(&mut it.ctx, &mut prog, ns, dir, repl);
+    let mut diags = resolver::resolve_program(&mut it.ctx, &mut prog, ns, dir, repl);
+    if !diags.iter().any(|d| d.is_error()) {
+        diags.extend(typecheck::check_program(&it.ctx, &prog));
+    }
     if diags.iter().any(|d| d.is_error()) {
         Err(diags)
     } else {
