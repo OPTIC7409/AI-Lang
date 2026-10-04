@@ -20,7 +20,7 @@ var names = scores.keys()
 names.sort()
 for name in names {
   let s = scores[name]
-  print(f"{name}: {s:.1f} -> {grade(s)}")
+  print(f"{name}: {s} -> {grade(s)}")
 }
 // who passed, and the class average
 let passed = names.filter(n => grade(scores[n]) != "C")

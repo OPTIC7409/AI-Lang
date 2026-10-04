@@ -621,10 +621,10 @@ impl<'a> Lexer<'a> {
                     | Tok::False
                     | Tok::RParen
                     | Tok::RBracket
-                    | Tok::RBrace
                     | Tok::Question
             )
         );
+        // (Nor after a block's `}`: a statement ends there.)
         if !operand_before {
             return true;
         }
@@ -637,8 +637,13 @@ impl<'a> Lexer<'a> {
         }
         let mut words = line.split([' ', '\t']).filter(|w| !w.is_empty());
         let (Some(first), Some(second)) = (words.next(), words.next()) else { return false };
-        let word = |w: &str| w.chars().all(|c| c.is_ascii_alphabetic()) && !KEYWORDS.contains(&w);
-        line.starts_with([' ', '\t']) && word(first) && word(second) && whole_word_count(self.src, first) == 1
+        // (A word may end with punctuation: `// who passed, and why`.)
+        let word = |w: &str| {
+            let w = w.trim_end_matches([',', '.', ':', ';', '!', '?']);
+            !w.is_empty() && w.chars().all(|c| c.is_ascii_alphabetic()) && !KEYWORDS.contains(&w)
+        };
+        let first_word = first.trim_end_matches([',', '.', ':', ';', '!', '?']);
+        line.starts_with([' ', '\t']) && word(first) && word(second) && whole_word_count(self.src, first_word) == 1
     }
 
     fn continuation_ahead(&self) -> bool {
