@@ -1,0 +1,6 @@
+# expect: E0201
+# The argument turns the set into a list before `insert!` runs.
+fn main() {
+  var used = to_set()
+  used.insert!({ used = [5]; 2 })
+}

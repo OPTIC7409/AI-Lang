@@ -1,0 +1,5 @@
+# expect: E0010 `type` is a keyword and cannot be used as a variable name
+fn main() {
+  let type = "circle"
+  print(type)
+}

@@ -1,0 +1,7 @@
+# Comprehensions written with the value last, or as a loop.
+fn main() {
+  let squares = [for i in 0..5 => i * i]
+  let sums = [for (a, b) in [(1, 2), (3, 4)] => a + b]
+  let cubes = [for n in squares { n * n }]
+  print(squares, sums, cubes)
+}

@@ -237,6 +237,7 @@ src/
   parser.rs      recursive-descent parser producing the AST
   resolver.rs    static checks: names, mutability, exhaustiveness, arity, types
   interp.rs      tree-walking interpreter with value semantics and contracts
+  compile.rs     function bodies compiled into closures on their first call
   builtins.rs    the standard library (~170 functions)
   proptest.rs    random generation and shrinking from type annotations
   testing.rs     `cogito test` and `cogito verify`
@@ -259,9 +260,11 @@ Run everything with `cargo test`.
 
 ## Status
 
-Cogito is a young, experimental language (version 0.1). It is a
-tree-walking interpreter: fast enough for scripts, puzzles, teaching and
-experiments, not for performance-critical work. Typing is gradual: a static
+Cogito is a young, experimental language (version 0.1). It is an
+interpreter (function bodies are compiled into closures, not machine code):
+within a factor of two of CPython on most small benchmarks, so fast enough
+for scripts, puzzles, teaching and experiments, but not for
+performance-critical work. Typing is gradual: a static
 checker rejects type errors it can prove before the program runs, and every
 annotation is also checked at runtime. There is no
 concurrency, no package manager, and the standard library is small.

@@ -3,6 +3,7 @@ const xs = [3, 1, 2]
 let doubled = xs.map(x => x * 2)
 let total = xs.reduce((a, b) => a + b)
 let answer = () => 42
+let scale = (x: Int, k: Int) => x * k
 console.log(doubled, total, answer())
 console.log(xs.length, "abc".length)   // lengths
 console.log(Math.max(1, 2), Math.floor(2.5), Math.abs(-1))

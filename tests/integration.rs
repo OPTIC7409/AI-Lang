@@ -2,7 +2,8 @@
 //!
 //! * `tests/lang/*.cog`   — the language's own test suite, written in Cogito.
 //! * `tests/errors/*.cog` — programs that must fail; the first line says which
-//!   error code (`# expect: E0101`), or the exact message (`# expect: error: ...`).
+//!   error code (`# expect: E0101`, or with the start of its message:
+//!   `# expect: E0101 undefined name`), or the exact message (`# expect: error: ...`).
 //! * `tests/warnings/*.cog` — programs that `check` accepts with exactly the
 //!   warning on the first line (`# expect: W0003`, or `# expect: nothing`).
 //! * `tests/verify/*.cog` — programs that `verify` must reject, with a line
@@ -56,8 +57,13 @@ fn error_codes() {
         let out = cogito(&["run", f.to_str().unwrap()]);
         let stderr = text(&out.stderr);
         // `# expect: error: text` is an exact message (as `main` returning
-        // `Err` prints); otherwise the line names an error code.
-        let wanted = if expect.starts_with("error: ") { expect.to_string() } else { format!("error[{}]", expect.trim()) };
+        // `Err` prints); otherwise the line names an error code, perhaps
+        // followed by the start of its message.
+        let wanted = match expect.trim().split_once(' ') {
+            _ if expect.starts_with("error: ") => expect.to_string(),
+            Some((code, message)) => format!("error[{}]: {}", code, message),
+            None => format!("error[{}]", expect.trim()),
+        };
         if out.status.success() || !stderr.contains(&wanted) {
             failures.push(format!("{}: expected error {}, got:\n{}", f.display(), expect, stderr));
         }
@@ -213,11 +219,12 @@ fn imported_main_is_not_run() {
 fn explain_knows_every_code_used() {
     for f in files("tests/errors", "cog") {
         let src = std::fs::read_to_string(&f).unwrap();
-        let code = src.lines().next().unwrap().trim_start_matches("# expect: ").trim().to_string();
-        if code.starts_with("error: ") {
+        let expect = src.lines().next().unwrap().trim_start_matches("# expect: ").trim();
+        if expect.starts_with("error: ") {
             continue;
         }
-        let out = cogito(&["explain", &code]);
+        let code = expect.split(' ').next().unwrap_or(expect);
+        let out = cogito(&["explain", code]);
         assert!(out.status.success(), "`cogito explain {}` failed", code);
     }
 }

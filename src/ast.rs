@@ -95,6 +95,8 @@ pub struct FnDef {
     /// For a top-level function that shares its name with a built-in: the
     /// built-in's global slot, used as the last overload candidate.
     pub overload_fallback: Option<u32>,
+    /// The body compiled into closures, on the first call (see `compile`).
+    pub code: crate::compile::Cache,
 }
 
 impl FnDef {

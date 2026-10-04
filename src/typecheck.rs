@@ -421,7 +421,7 @@ fn result(t: Ty, e: Ty) -> Ty {
 }
 
 fn list(t: Ty) -> Ty {
-    Ty::List(Box::new(t))
+    Ty::List(Rc::new(t))
 }
 
 /// The element type of a collection, for `for` loops and comprehensions.
@@ -621,7 +621,7 @@ impl<'a> Checker<'a> {
 
     fn fn_type(&self, def: &FnDef) -> Ty {
         let ps = def.params.iter().map(|p| p.ty.as_ref().map_or(Ty::Any, |t| t.ty.clone())).collect();
-        Ty::Fn(ps, Box::new(def.ret.as_ref().map_or(Ty::Any, |t| t.ty.clone())))
+        Ty::Fn(ps, Rc::new(def.ret.as_ref().map_or(Ty::Any, |t| t.ty.clone())))
     }
 
     fn capture_types(&self, def: &FnDef) -> Vec<Ty> {
@@ -740,8 +740,8 @@ impl<'a> Checker<'a> {
                         };
                         match t {
                             Ty::List(_) if kept => list(Ty::Any),
-                            Ty::Map(..) if kept => Ty::Map(Box::new(Ty::Any), Box::new(Ty::Any)),
-                            Ty::Set(_) if kept => Ty::Set(Box::new(Ty::Any)),
+                            Ty::Map(..) if kept => Ty::Map(Rc::new(Ty::Any), Rc::new(Ty::Any)),
+                            Ty::Set(_) if kept => Ty::Set(Rc::new(Ty::Any)),
                             _ => Ty::Any,
                         }
                     }
@@ -1032,7 +1032,7 @@ impl<'a> Checker<'a> {
                     kt = Some(kt.map_or(a.clone(), |p| join(p, a)));
                     vt = Some(vt.map_or(b.clone(), |p| join(p, b)));
                 }
-                Ty::Map(Box::new(kt.unwrap_or(Ty::Any)), Box::new(vt.unwrap_or(Ty::Any)))
+                Ty::Map(Rc::new(kt.unwrap_or(Ty::Any)), Rc::new(vt.unwrap_or(Ty::Any)))
             }
             ExprKind::Tuple(items) => Ty::Tuple(items.iter().map(|x| self.expr(x)).collect()),
             ExprKind::Record { names, values, spread } => {
@@ -1434,7 +1434,7 @@ impl<'a> Checker<'a> {
                 // result's (unless a `return` or `?` may leave early).
                 if let Ty::Fn(_, r) = &mut t {
                     if def.ret.is_none() && !leaves_early(&def.body) {
-                        **r = body;
+                        *r = Rc::new(body);
                     }
                 }
                 t
@@ -1503,7 +1503,7 @@ impl<'a> Checker<'a> {
                     GlobalKind::Fn if self.ctx.builtins.values.contains_key(&info.name) => Ty::Any,
                     GlobalKind::Fn => match self.ctx.sigs.get(&s).map(|v| v.as_slice()) {
                         Some([sig]) => {
-                            Ty::Fn(sig.params.iter().map(|p| p.2.clone().unwrap_or(Ty::Any)).collect(), Box::new(sig.ret.clone().unwrap_or(Ty::Any)))
+                            Ty::Fn(sig.params.iter().map(|p| p.2.clone().unwrap_or(Ty::Any)).collect(), Rc::new(sig.ret.clone().unwrap_or(Ty::Any)))
                         }
                         _ => Ty::Any,
                     },
@@ -1578,7 +1578,7 @@ impl<'a> Checker<'a> {
             _ => false,
         };
         match t {
-            Ty::Fn(ps, _) if !trusted => Ty::Fn(ps, Box::new(Ty::Any)),
+            Ty::Fn(ps, _) if !trusted => Ty::Fn(ps, Rc::new(Ty::Any)),
             t => t,
         }
     }
@@ -1929,11 +1929,11 @@ fn erase_params(t: &Ty) -> Ty {
     match t {
         Ty::Param(..) => Ty::Any,
         Ty::List(x) => list(erase_params(x)),
-        Ty::Map(k, v) => Ty::Map(Box::new(erase_params(k)), Box::new(erase_params(v))),
-        Ty::Set(x) => Ty::Set(Box::new(erase_params(x))),
+        Ty::Map(k, v) => Ty::Map(Rc::new(erase_params(k)), Rc::new(erase_params(v))),
+        Ty::Set(x) => Ty::Set(Rc::new(erase_params(x))),
         Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(erase_params).collect()),
         Ty::Record(fs) => Ty::Record(fs.iter().map(|(n, t)| (n.clone(), erase_params(t))).collect()),
-        Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(erase_params).collect(), Box::new(erase_params(r))),
+        Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(erase_params).collect(), Rc::new(erase_params(r))),
         Ty::Named { id, name, args } => Ty::Named { id: *id, name: name.clone(), args: args.iter().map(erase_params).collect() },
         other => other.clone(),
     }
@@ -2215,12 +2215,12 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
         },
         "to_set" => match &first {
             Ty::Set(_) => first.clone(),
-            Ty::List(_) | Ty::Str | Ty::Range => Ty::Set(Box::new(elem)),
-            _ if args.is_empty() => Ty::Set(Box::new(Ty::Any)),
+            Ty::List(_) | Ty::Str | Ty::Range => Ty::Set(Rc::new(elem)),
+            _ if args.is_empty() => Ty::Set(Rc::new(Ty::Any)),
             _ => Ty::Any,
         },
         "union" => match (&first, args.get(1).map(|a| &a.1)) {
-            (Ty::Set(a), Some(Ty::Set(b))) => Ty::Set(Box::new(join((**a).clone(), (**b).clone()))),
+            (Ty::Set(a), Some(Ty::Set(b))) => Ty::Set(Rc::new(join((**a).clone(), (**b).clone()))),
             _ => Ty::Any,
         },
         "intersection" | "difference" => match &first {

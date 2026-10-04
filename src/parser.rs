@@ -98,6 +98,7 @@ fn new_fn(name: Option<Name>, name_span: Span, span: Span, params: Vec<Param>, b
         olds: vec![],
         global_slot: None,
         overload_fallback: None,
+        code: Default::default(),
     }
 }
 
@@ -229,7 +230,7 @@ impl<'s> Parser<'s> {
             let line = before.matches('\n').count() + 1;
             let col = before.chars().rev().take_while(|c| *c != '\n').count() + 1;
             let d = self.unexpected(what).note(format!("the `{}` that needs closing is at line {}, column {}", open, line, col));
-            Err(self.python_lambda(self.arrow_function(d)))
+            Err(self.typed_arrow_function(open_span, self.python_lambda(self.arrow_function(d))))
         }
     }
 
@@ -287,6 +288,39 @@ impl<'s> Parser<'s> {
         }
         let span = self.toks[at].span.to(self.toks[i].span);
         d.fix(span, format!("fn({}) =>", names.join(", ")))
+    }
+
+    /// At the `:` of `(x: Int) => x * 2`, an arrow function with typed
+    /// parameters (TypeScript): with `fn` in front, it is Cogito's.
+    fn typed_arrow_function(&self, open_span: Span, d: Diagnostic) -> Diagnostic {
+        if self.peek() != &Tok::Colon || !d.fixes.is_empty() {
+            return d;
+        }
+        let Some(open) = self.toks[..self.pos].iter().rposition(|t| t.span == open_span && t.tok == Tok::LParen) else { return d };
+        let starts = open > 0 && matches!(self.toks[open - 1].tok, Tok::Assign | Tok::LParen | Tok::Comma | Tok::LBracket | Tok::Return);
+        // The matching `)`, on the same line, followed by `=>`.
+        let mut depth = 0;
+        let mut i = open;
+        while i < self.toks.len() {
+            match self.toks[i].tok {
+                Tok::LParen | Tok::LBracket => depth += 1,
+                Tok::RParen | Tok::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Tok::Newline | Tok::Eof | Tok::LBrace | Tok::RBrace | Tok::Assign | Tok::FatArrow => return d,
+                _ => {}
+            }
+            i += 1;
+        }
+        let arrow = self.toks.get(i + 1).is_some_and(|t| t.tok == Tok::FatArrow);
+        if !starts || !arrow || self.toks[i].tok != Tok::RParen {
+            return d;
+        }
+        let at = self.toks[open].span;
+        d.help("an anonymous function is written `fn(x: Int) => x * 2`").fix(Span { end: at.start, ..at }, "fn")
     }
 
     /// At a `=>` after `x` or `(a, b)` that starts an expression: an arrow
@@ -1773,6 +1807,11 @@ impl<'s> Parser<'s> {
             let close = self.bump().span;
             return Ok(mk(ExprKind::Map(vec![]), open.to(close)));
         }
+        if self.at(&Tok::For) {
+            if let Some(d) = self.arrow_comprehension() {
+                return Err(d);
+            }
+        }
         let first_spread = self.eat(&Tok::DotDot);
         let first = self.value_expr()?;
         if !first_spread && self.at(&Tok::Colon) {
@@ -1840,6 +1879,39 @@ impl<'s> Parser<'s> {
         }
         let close = self.expect_closing(&Tok::RBracket, open, "`,` or `]` in list")?;
         Ok(mk(ExprKind::List(items), open.to(close)))
+    }
+
+    /// At the `for` of `[for x in xs => x * x]`: a comprehension written
+    /// with its value last. (Reads ahead without moving.)
+    fn arrow_comprehension(&mut self) -> Option<Diagnostic> {
+        let (pos, depth, open) = (self.pos, self.depth, self.open_blocks.len());
+        let found = self.arrow_comprehension_ahead();
+        (self.pos, self.depth) = (pos, depth);
+        self.open_blocks.truncate(open);
+        found
+    }
+
+    fn arrow_comprehension_ahead(&mut self) -> Option<Diagnostic> {
+        let start = self.bump().span;
+        let pat = self.pattern().ok()?;
+        self.expect(&Tok::In, "`in`").ok()?;
+        let iter = self.expr().ok()?;
+        if !self.at(&Tok::FatArrow) {
+            return None;
+        }
+        self.bump();
+        let value = self.value_expr().ok()?;
+        if !self.at(&Tok::RBracket) {
+            return None;
+        }
+        let text = |sp: Span| &self.src[sp.start as usize..sp.end as usize];
+        let span = start.to(value.span);
+        Some(
+            Diagnostic::error("E0010", "a list comprehension puts the value first")
+                .at(span)
+                .help("write `[x * x for x in xs]` (with an optional filter: `[x for x in xs if x > 0]`)")
+                .fix(span, format!("{} for {} in {}", text(value.span), text(pat.span), text(iter.span))),
+        )
     }
 
     /// A match-arm body: an expression, or an assignment (`x += 1`), which
@@ -2330,6 +2402,18 @@ impl<'s> Parser<'s> {
                 }
                 self.expect_closing(&Tok::RBrace, start, "`,` or `}` in record pattern")?;
                 Ok(Pattern { kind: PatKind::Record { fields, rest }, span: start.to(self.prev_span()) })
+            }
+            // `let type = ...`, `for match in ...`: a keyword as a name.
+            t if crate::lexer::KEYWORDS.contains(&t.text())
+                && !matches!(t, Tok::True | Tok::False)
+                && matches!(
+                    self.toks.get(self.pos + 1).map(|t| &t.tok),
+                    Some(Tok::Assign | Tok::Colon | Tok::In | Tok::Comma | Tok::RParen | Tok::RBracket | Tok::FatArrow)
+                ) =>
+            {
+                Err(Diagnostic::error("E0010", format!("`{}` is a keyword and cannot be used as a variable name", t.text()))
+                    .at(self.span())
+                    .help(format!("choose a different name, e.g. `{}_`", t.text())))
             }
             _ => Err(self.unexpected("a pattern")),
         }

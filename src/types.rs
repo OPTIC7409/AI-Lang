@@ -15,12 +15,12 @@ pub enum Ty {
     Float,
     Str,
     Range,
-    List(Box<Ty>),
-    Map(Box<Ty>, Box<Ty>),
-    Set(Box<Ty>),
+    List(Rc<Ty>),
+    Map(Rc<Ty>, Rc<Ty>),
+    Set(Rc<Ty>),
     Tuple(Vec<Ty>),
     Record(Vec<(Name, Ty)>),
-    Fn(Vec<Ty>, Box<Ty>),
+    Fn(Vec<Ty>, Rc<Ty>),
     /// `Fn`: any function, whatever its parameters.
     AnyFn,
     /// A user-declared (or built-in Option/Result) type.
@@ -40,12 +40,12 @@ impl Ty {
     pub fn subst(&self, args: &[Ty]) -> Ty {
         match self {
             Ty::Param(i, _) => args.get(*i as usize).cloned().unwrap_or(Ty::Any),
-            Ty::List(t) => Ty::List(Box::new(t.subst(args))),
-            Ty::Map(k, v) => Ty::Map(Box::new(k.subst(args)), Box::new(v.subst(args))),
-            Ty::Set(t) => Ty::Set(Box::new(t.subst(args))),
+            Ty::List(t) => Ty::List(Rc::new(t.subst(args))),
+            Ty::Map(k, v) => Ty::Map(Rc::new(k.subst(args)), Rc::new(v.subst(args))),
+            Ty::Set(t) => Ty::Set(Rc::new(t.subst(args))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| t.subst(args)).collect()),
             Ty::Record(fs) => Ty::Record(fs.iter().map(|(n, t)| (n.clone(), t.subst(args))).collect()),
-            Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|t| t.subst(args)).collect(), Box::new(r.subst(args))),
+            Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|t| t.subst(args)).collect(), Rc::new(r.subst(args))),
             Ty::Named { id, name, args: a } => Ty::Named { id: *id, name: name.clone(), args: a.iter().map(|t| t.subst(args)).collect() },
             other => other.clone(),
         }

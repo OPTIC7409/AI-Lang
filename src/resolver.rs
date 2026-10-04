@@ -1490,7 +1490,7 @@ impl<'a> Resolver<'a> {
             TypeExprKind::Fn(params, ret) => {
                 let ps = params.iter_mut().map(|t| self.resolve_type(t, type_params)).collect();
                 let r = self.resolve_type(ret, type_params);
-                Ty::Fn(ps, Box::new(r))
+                Ty::Fn(ps, Rc::new(r))
             }
             TypeExprKind::Named(name, args) => {
                 let name = name.clone();
@@ -1523,7 +1523,7 @@ impl<'a> Resolver<'a> {
                         if targs.len() > 1 {
                             arity_err(self, 1);
                         }
-                        Ty::List(Box::new(targs.pop().unwrap_or(Ty::Any)))
+                        Ty::List(Rc::new(targs.pop().unwrap_or(Ty::Any)))
                     }
                     "Map" => {
                         if targs.len() == 1 || targs.len() > 2 {
@@ -1531,13 +1531,13 @@ impl<'a> Resolver<'a> {
                         }
                         let v = targs.pop().unwrap_or(Ty::Any);
                         let k = targs.pop().unwrap_or(Ty::Any);
-                        Ty::Map(Box::new(k), Box::new(v))
+                        Ty::Map(Rc::new(k), Rc::new(v))
                     }
                     "Set" => {
                         if targs.len() > 1 {
                             arity_err(self, 1);
                         }
-                        Ty::Set(Box::new(targs.pop().unwrap_or(Ty::Any)))
+                        Ty::Set(Rc::new(targs.pop().unwrap_or(Ty::Any)))
                     }
                     "Fn" => Ty::AnyFn,
                     _ => {
@@ -1639,6 +1639,7 @@ impl<'a> Resolver<'a> {
             olds: vec![],
             global_slot: None,
             overload_fallback: None,
+            code: Default::default(),
         };
         // `self.lo` is a natural guess from other languages.
         for c in &def.requires {

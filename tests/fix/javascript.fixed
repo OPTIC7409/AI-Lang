@@ -3,6 +3,7 @@ let xs = [3, 1, 2]
 let doubled = xs.map(fn(x) => x * 2)
 let total = xs.reduce(fn(a, b) => a + b)
 let answer = fn() => 42
+let scale = fn(x: Int, k: Int) => x * k
 print(doubled, total, answer())
 print(xs.len(), "abc".len())   # lengths
 print(max(1, 2), floor(2.5), abs(-1))

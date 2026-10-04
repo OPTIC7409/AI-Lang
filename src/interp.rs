@@ -121,7 +121,7 @@ pub struct Interp {
     pub budget: Option<u64>,
     pub ticks: u64,
     /// Where the most recent `?` returned early (for error messages).
-    try_span: Option<Span>,
+    pub(crate) try_span: Option<Span>,
     /// For the most recently finished call: the `?` that made it return early.
     pub last_try_return: Option<Span>,
     /// The first argument of a mutating function that failed (so the
@@ -833,7 +833,7 @@ impl Interp {
         self.assign_value(target, op, rhs, decl, env)
     }
 
-    fn assign_value(&mut self, target: &Expr, op: Option<BinOp>, mut rhs: Value, decl: Option<&Ty>, env: &mut Env) -> R<()> {
+    pub(crate) fn assign_value(&mut self, target: &Expr, op: Option<BinOp>, mut rhs: Value, decl: Option<&Ty>, env: &mut Env) -> R<()> {
         let span = target.span;
         // `i += 1` on a local Int.
         if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), Some(op), None | Some(Ty::Int)) = (&target.kind, op, decl) {
@@ -871,6 +871,12 @@ impl Interp {
                             let Some(cur) = self.globals[s].as_mut() else {
                                 return Err(self.err(span, "E0214", format!("`{}` is used before it is initialized", v.name)));
                             };
+                            if let (Value::Int(x), Value::Int(y)) = (&*cur, &rhs) {
+                                if let Some(v @ Value::Int(_)) = int_binop(op, *x, *y) {
+                                    *cur = v;
+                                    return Ok(());
+                                }
+                            }
                             if !append_in_place(op, cur, &rhs) {
                                 let cur = cur.clone();
                                 let nv = self.binop(op, cur, rhs, span)?;
@@ -912,6 +918,15 @@ impl Interp {
         }
         let (root, steps) = self.eval_place(target, env)?;
         self.assign_at(root, steps, op, rhs, decl, span, env)
+    }
+
+    /// `xs[i] = v` (or `op=`) on the local in `slot`, which has no declared
+    /// type: `rhs` and the index already computed, in that order.
+    pub(crate) fn assign_index_local(&mut self, slot: u32, idx: Value, op: Option<BinOp>, rhs: Value, span: Span, env: &mut Env) -> R<()> {
+        if let Some(done) = self.fast_index_assign(slot as usize, &idx, op, &rhs, None, None, span, env)? {
+            return Ok(done);
+        }
+        self.assign_at(PlaceRoot::Local(slot), vec![Step::Index(idx)], op, rhs, None, span, env)
     }
 
     /// `a[i][j] = v` (or `op=`, or deeper) on a local list of lists, or
@@ -1352,7 +1367,7 @@ impl Interp {
     // ------------------------------------------------------------ expressions
 
     #[inline]
-    fn load(&self, v: &Var, span: Span, env: &Env) -> R {
+    pub(crate) fn load(&self, v: &Var, span: Span, env: &Env) -> R {
         match v.res {
             VarRes::Local(s) => Ok(env.locals[s as usize].clone()),
             VarRes::Capture(i) => Ok(env.closure.as_ref().expect("closure").captures[i as usize].clone()),
@@ -1409,7 +1424,16 @@ impl Interp {
         }
     }
 
-    fn not_bool(&self, span: Span, what: &str, v: &Value) -> Diagnostic {
+    /// The error for a `match` none of whose arms matched `v`.
+    #[cold]
+    pub(crate) fn no_arm(&self, span: Span, v: &Value) -> Ctrl {
+        self.fail(
+            self.diag(span, "E0208", format!("no match arm matched the value {}", short_repr(v)))
+                .help("add an arm for this value, or a catch-all arm `_ => ...`"),
+        )
+    }
+
+    pub(crate) fn not_bool(&self, span: Span, what: &str, v: &Value) -> Diagnostic {
         let help = match v {
             Value::Int(_) | Value::Float(_) => "compare explicitly, e.g. `x != 0`",
             Value::Str(_) => "compare explicitly, e.g. `s != \"\"`",
@@ -1463,7 +1487,7 @@ impl Interp {
     /// back runs through that element; the stored exclusive end, -1 + 1 = 0,
     /// would otherwise mean the front.)
     #[inline(never)]
-    fn index_general(&mut self, v: Value, mut i: Value, index: &Expr, span: Span) -> R {
+    pub(crate) fn index_general(&mut self, v: Value, mut i: Value, index: &Expr, span: Span) -> R {
         if let (ExprKind::Range { inclusive: true, end: Some(_), .. }, Value::Range(r)) = (&index.kind, &i) {
             if let Some(end) = r.end.filter(|end| *end <= 0) {
                 let len = match &v {
@@ -1659,7 +1683,7 @@ impl Interp {
     /// A call that `call_simple` does not handle (named arguments, contracts,
     /// built-ins, ...).
     #[inline(never)]
-    fn call_general(&mut self, f: &Value, args: &[Arg], env: &mut Env, span: Span) -> R {
+    pub(crate) fn call_general(&mut self, f: &Value, args: &[Arg], env: &mut Env, span: Span) -> R {
         let (pos, named) = self.eval_args(args, env, None)?;
         self.call_value(f, pos, named, span)
     }
@@ -1667,11 +1691,16 @@ impl Interp {
     #[inline(never)]
     fn eval_unary(&mut self, op: UnOp, expr: &Expr, span: Span, env: &mut Env) -> R {
         let v = self.eval(expr, env)?;
+        self.unary_value(op, v, span, expr.span)
+    }
+
+    /// `-v` or `not v` (`operand` is where `v` was written, for errors).
+    pub(crate) fn unary_value(&mut self, op: UnOp, v: Value, span: Span, operand: Span) -> R {
         match (op, v) {
             (UnOp::Neg, Value::Int(i)) => i.checked_neg().map(Value::Int).ok_or_else(|| self.err(span, "E0207", "integer overflow in negation")),
             (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
             (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-            (UnOp::Not, other) => Err(self.fail(self.not_bool(expr.span, "the operand of `not`", &other))),
+            (UnOp::Not, other) => Err(self.fail(self.not_bool(operand, "the operand of `not`", &other))),
             (UnOp::Neg, other) => Err(self.err(span, "E0211", format!("cannot negate {}", describe(&other)))),
         }
     }
@@ -1871,10 +1900,7 @@ impl Interp {
                         return self.eval(&arm.body, env);
                     }
                 }
-                Err(self.fail(
-                    self.diag(scrutinee.span, "E0208", format!("no match arm matched the value {}", short_repr(&v)))
-                        .help("add an arm for this value, or a catch-all arm `_ => ...`"),
-                ))
+                Err(self.no_arm(scrutinee.span, &v))
             }
             ExprKind::While { cond, body } => {
                 while self.eval_cond(cond, env, "the `while` condition")? {
@@ -1948,7 +1974,7 @@ impl Interp {
         Ok(())
     }
 
-    fn bind_loop(&mut self, pat: &Pattern, v: Value, env: &mut Env) -> R<()> {
+    pub(crate) fn bind_loop(&mut self, pat: &Pattern, v: Value, env: &mut Env) -> R<()> {
         if let PatKind::Bind { res: VarRes::Local(s), sub: None, .. } = &pat.kind {
             env.locals[*s as usize] = v;
             return Ok(());
@@ -1962,7 +1988,7 @@ impl Interp {
         Ok(())
     }
 
-    fn exec_for(&mut self, pat: &Pattern, it: Value, body: &Expr, env: &mut Env, span: Span) -> R {
+    pub(crate) fn exec_for(&mut self, pat: &Pattern, it: Value, body: &Expr, env: &mut Env, span: Span) -> R {
         macro_rules! run_body {
             () => {
                 self.tick(span)?;
@@ -2841,6 +2867,22 @@ impl Interp {
 
     pub fn call_value(&mut self, f: &Value, args: Vec<Value>, named: Vec<(Name, Value)>, span: Span) -> R {
         match f {
+            // A plain function (as a direct call of one): the arguments go
+            // straight into its frame.
+            Value::Func(c)
+                if named.is_empty()
+                    && args.len() == c.def.params.len()
+                    && !c.def.mutating
+                    && c.def.requires.is_empty()
+                    && c.def.ensures.is_empty()
+                    && c.def.params.iter().all(|p| p.pat.is_none()) =>
+            {
+                let mut args = args;
+                let mut env = Env { locals: Vec::new(), closure: None };
+                let r = self.call_simple_with(c, &mut env, span, |_, i, _| Ok(std::mem::take(&mut args[i])));
+                self.give_vec(args);
+                r
+            }
             Value::Func(c) => self.call_closure(c, args, named, span),
             Value::Builtin(idx) => {
                 let b = &BUILTINS[*idx as usize];
@@ -3153,7 +3195,11 @@ impl Interp {
     fn run_body(&mut self, def: &Rc<FnDef>, env: &mut Env) -> R {
         let mut from_try = None;
         self.last_try_return = None;
-        let mut result = match self.eval(&def.body, env) {
+        let r = match crate::compile::enabled().then(|| def.code.get(&def.body)).flatten() {
+            Some(code) => code(self, env),
+            None => self.eval(&def.body, env),
+        };
+        let mut result = match r {
             Ok(v) => v,
             Err(Ctrl::Return(v)) => {
                 from_try = self.try_span.take();
@@ -3204,11 +3250,17 @@ impl Interp {
     /// to `call_closure_full`, which reports it in the usual way.
     #[inline(never)]
     fn call_simple(&mut self, c: &Rc<Closure>, args: &[Arg], env: &mut Env, span: Span) -> R {
+        self.call_simple_with(c, env, span, |it, i, env| it.operand(&args[i].value, env))
+    }
+
+    /// A call of a function without contracts, defaults or patterns, with
+    /// all arguments by position: `arg(it, i, env)` computes argument `i`.
+    pub(crate) fn call_simple_with(&mut self, c: &Rc<Closure>, env: &mut Env, span: Span, mut arg: impl FnMut(&mut Self, usize, &mut Env) -> R) -> R {
         let def = c.def.clone();
         let mut locals = self.take_vec(def.num_slots as usize);
         locals.resize(def.num_slots as usize, Value::Unit);
-        for (p, a) in def.params.iter().zip(args) {
-            match self.operand(&a.value, env) {
+        for (i, p) in def.params.iter().enumerate() {
+            match arg(self, i, env) {
                 Ok(v) => locals[p.slot as usize] = v,
                 Err(e) => {
                     self.give_vec(locals);
@@ -3404,73 +3456,99 @@ impl Interp {
         Ok(result)
     }
 
+    /// The fast paths of `mutating_call` for a built-in `!` function on the
+    /// local in `slot` (declared with `decl`), with `nargs` arguments by
+    /// position, which `arg(it, k, env)` computes: `None`, before computing
+    /// any, when the general path is needed.
     #[allow(clippy::too_many_arguments)]
-    fn mutating_call(&mut self, receiver: &Expr, method: &Var, method_span: Span, args: &[Arg], span: Span, decl: Option<&Ty>, env: &mut Env) -> R {
-        // Fast path: the built-in `xs.push!(x)` on a local list.
-        if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), [arg], VarRes::Global(g)) = (&receiver.kind, args, method.res) {
-            let builtin_push = matches!(self.ctx.globals[g as usize].kind, GlobalKind::Builtin(i) if BUILTINS[i as usize].name == "push!");
-            let slot = *s as usize;
+    pub(crate) fn mutating_local_with(
+        &mut self,
+        slot: usize,
+        g: u32,
+        nargs: usize,
+        decl: Option<&Ty>,
+        receiver_span: Span,
+        span: Span,
+        env: &mut Env,
+        mut arg: impl FnMut(&mut Self, usize, &mut Env) -> R,
+    ) -> Option<R> {
+        let GlobalKind::Builtin(i) = self.ctx.globals[g as usize].kind else { return None };
+        let kind = simple_mut_kind(i);
+        // `xs.push!(x)` on a list, declared with a type or without.
+        if kind == SimpleMut::Push && nargs == 1 && matches!(env.locals[slot], Value::List(_)) {
             let elem = match decl {
-                None => Some(None),
-                Some(Ty::List(et)) => Some(Some((**et).clone())),
-                _ => None,
+                None => None,
+                Some(Ty::List(et)) => Some(&**et),
+                Some(_) => return None,
             };
-            if let (true, None, Some(elem), Value::List(_)) = (builtin_push, &arg.name, elem, &env.locals[slot]) {
-                let mut v = self.eval(&arg.value, env)?;
-                if let Some(et) = &elem {
-                    if !self.has_type(&v, et, false) {
-                        v = self.conform(v, et).map_err(|m| {
-                            self.fail(
-                                self.diag(
-                                    span,
-                                    "E0200",
-                                    format!("`push!` would break the declared type of `{}`: {}", self.snippet(receiver.span), m),
-                                )
-                                .help("the variable (or field) was declared with a type, and every change must respect it; nothing was changed"),
-                            )
-                        })?;
-                    }
-                }
-                let fp = decl.map(|t| t.fingerprint());
-                return match &mut env.locals[slot] {
-                    Value::List(xs) => {
-                        let valid = fp.is_some_and(|f| xs.checked() == f);
-                        Rc::make_mut(xs).push(v);
-                        if let (true, Some(f)) = (valid, fp) {
-                            xs.set_checked(f);
-                        }
-                        Ok(Value::Unit)
-                    }
-                    other => Err(self.err(span, "E0200", format!("argument 1 of `push!` must be a List, got {}", describe(other)))),
-                };
+            return Some(arg(self, 0, env).and_then(|v| self.push_local(slot, v, elem, decl, receiver_span, span, env)));
+        }
+        // Any other simple built-in (one that calls no function of yours) on
+        // a list, set or map declared without a type: there is no type to
+        // check and no invariant to keep.
+        let BFn::Mut(fp) = BUILTINS[i as usize].f else { return None };
+        if kind == SimpleMut::No || decl.is_some() || !matches!(env.locals[slot], Value::List(_) | Value::Set(_) | Value::Map(_)) {
+            return None;
+        }
+        let mut vals = Vec::with_capacity(nargs);
+        for k in 0..nargs {
+            match arg(self, k, env) {
+                Ok(v) => vals.push(v),
+                Err(e) => return Some(Err(e)),
             }
         }
-        // Fast path: a simple built-in `!` function (one that calls no
-        // function of yours) on a local list, set or map declared without a
-        // type: there is no type to check and no invariant to keep.
-        if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), VarRes::Global(g), None) = (&receiver.kind, method.res, decl) {
-            let slot = *s as usize;
-            if let GlobalKind::Builtin(i) = self.ctx.globals[g as usize].kind {
-                let b = &BUILTINS[i as usize];
-                let simple = matches!(b.name, "push!" | "insert!" | "remove!" | "pop!" | "extend!" | "clear!" | "swap!" | "sort!" | "reverse!");
-                let collection = matches!(env.locals[slot], Value::List(_) | Value::Set(_) | Value::Map(_));
-                if let (BFn::Mut(fp), true, true, true) = (b.f, simple, collection, args.iter().all(|a| a.name.is_none())) {
-                    // (The commonest, on a set: without building an argument list.)
-                    if let ([arg], "insert!" | "remove!", Value::Set(_)) = (args, b.name, &env.locals[slot]) {
-                        let v = self.operand(&arg.value, env)?;
-                        let Value::Set(m) = &mut env.locals[slot] else { unreachable!() };
-                        let m = Rc::make_mut(m);
-                        let changed = if b.name == "insert!" { m.insert(v, Value::Unit).is_none() } else { m.remove(&v).is_some() };
-                        return Ok(Value::Bool(changed));
-                    }
-                    let mut vals = Vec::with_capacity(args.len());
-                    for a in args {
-                        vals.push(self.operand(&a.value, env)?);
-                    }
-                    self.check_builtin_arity(i, vals.len() + 1, span)?;
-                    let mut target = std::mem::take(&mut env.locals[slot]);
-                    let r = fp(self, &mut target, vals, span);
-                    env.locals[slot] = target;
+        // (The commonest, on a set: directly.)
+        if let ([_], SimpleMut::Insert | SimpleMut::Remove, Value::Set(m)) = (&vals[..], kind, &mut env.locals[slot]) {
+            let v = vals.pop().unwrap_or_default();
+            let m = Rc::make_mut(m);
+            let changed = if kind == SimpleMut::Insert { m.insert(v, Value::Unit).is_none() } else { m.remove(&v).is_some() };
+            return Some(Ok(Value::Bool(changed)));
+        }
+        if let Err(e) = self.check_builtin_arity(i, nargs + 1, span) {
+            return Some(Err(e));
+        }
+        // (The arguments may have changed the variable: `fp` checks it.)
+        let mut target = std::mem::take(&mut env.locals[slot]);
+        let r = fp(self, &mut target, vals, span);
+        env.locals[slot] = target;
+        Some(r)
+    }
+
+    /// `push!` of `v` onto the list in `slot` (declared with `decl`, whose
+    /// elements are `elem`).
+    #[allow(clippy::too_many_arguments)]
+    fn push_local(&mut self, slot: usize, mut v: Value, elem: Option<&Ty>, decl: Option<&Ty>, receiver_span: Span, span: Span, env: &mut Env) -> R {
+        if let Some(et) = elem {
+            if !self.has_type(&v, et, false) {
+                v = self.conform(v, et).map_err(|m| {
+                    self.fail(
+                        self.diag(span, "E0200", format!("`push!` would break the declared type of `{}`: {}", self.snippet(receiver_span), m))
+                            .help("the variable (or field) was declared with a type, and every change must respect it; nothing was changed"),
+                    )
+                })?;
+            }
+        }
+        let fp = decl.map(|t| t.fingerprint());
+        match &mut env.locals[slot] {
+            Value::List(xs) => {
+                let valid = fp.is_some_and(|f| xs.checked() == f);
+                Rc::make_mut(xs).push(v);
+                if let (true, Some(f)) = (valid, fp) {
+                    xs.set_checked(f);
+                }
+                Ok(Value::Unit)
+            }
+            other => Err(self.err(span, "E0200", format!("argument 1 of `push!` must be a List, got {}", describe(other)))),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mutating_call(&mut self, receiver: &Expr, method: &Var, method_span: Span, args: &[Arg], span: Span, decl: Option<&Ty>, env: &mut Env) -> R {
+        // Fast paths for a built-in on a local list, set or map.
+        if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), VarRes::Global(g)) = (&receiver.kind, method.res) {
+            if args.iter().all(|a| a.name.is_none()) {
+                let arg = |it: &mut Self, k: usize, env: &mut Env| it.operand(&args[k].value, env);
+                if let Some(r) = self.mutating_local_with(*s as usize, g, args.len(), decl, receiver.span, span, env, arg) {
                     return r;
                 }
             }
@@ -3542,10 +3620,15 @@ impl Interp {
         } else {
             None
         };
+        // (The expected type's fingerprint, computed once.)
+        let efp = match (&expected, &target) {
+            (Some(t), Value::List(_) | Value::Map(_) | Value::Set(_)) => t.fingerprint(),
+            _ => 0,
+        };
         let pre = match (&expected, &target) {
-            (Some(t @ Ty::List(_)), Value::List(xs)) => Some((xs.checked() == t.fingerprint(), xs.len())),
-            (Some(t @ Ty::Map(..)), Value::Map(m)) => Some((m.checked() == t.fingerprint(), m.len())),
-            (Some(t @ Ty::Set(..)), Value::Set(m)) => Some((m.checked() == t.fingerprint(), m.len())),
+            (Some(Ty::List(_)), Value::List(xs)) => Some((xs.checked() == efp, xs.len())),
+            (Some(Ty::Map(..)), Value::Map(m)) => Some((m.checked() == efp, m.len())),
+            (Some(Ty::Set(..)), Value::Set(m)) => Some((m.checked() == efp, m.len())),
             _ => None,
         };
         // A user function whose parameter is not declared with the same type
@@ -3586,29 +3669,29 @@ impl Interp {
                 (Some((true, _)), Value::List(xs), _)
                     if matches!(builtin, "pop!" | "remove!" | "swap!" | "sort!" | "sort_by!" | "reverse!" | "shuffle!" | "clear!") =>
                 {
-                    xs.set_checked(t.fingerprint());
+                    xs.set_checked(efp);
                     true
                 }
                 (Some((true, _)), Value::Map(m), Ty::Map(_, vt)) if builtin == "update!" => {
                     let ok = updated_key.as_ref().and_then(|k| m.get(k)).is_some_and(|v| self.has_type(v, vt, false));
                     if ok {
-                        m.set_checked(t.fingerprint());
+                        m.set_checked(efp);
                     }
                     ok
                 }
                 (Some((true, _)), Value::Map(m), _) if matches!(builtin, "remove!" | "clear!") => {
-                    m.set_checked(t.fingerprint());
+                    m.set_checked(efp);
                     true
                 }
                 // (The element `insert!` adds was checked before the call.)
                 (Some((true, _)), Value::Set(m), _) if matches!(builtin, "insert!" | "remove!" | "clear!") => {
-                    m.set_checked(t.fingerprint());
+                    m.set_checked(efp);
                     true
                 }
                 (Some((true, pre_len)), Value::List(xs), Ty::List(et)) if matches!(builtin, "push!" | "extend!") && xs.len() >= *pre_len => {
                     let ok = xs[*pre_len..].iter().all(|x| self.has_type(x, et, false));
                     if ok {
-                        xs.set_checked(t.fingerprint());
+                        xs.set_checked(efp);
                     }
                     ok
                 }
@@ -3807,6 +3890,32 @@ fn mentions_generic(t: &Ty) -> bool {
     }
 }
 
+/// Built-in `!` functions with a fast path on a local collection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SimpleMut {
+    No,
+    Push,
+    Insert,
+    Remove,
+    Other,
+}
+
+fn simple_mut_kind(i: u16) -> SimpleMut {
+    thread_local! {
+        static KINDS: Vec<SimpleMut> = BUILTINS
+            .iter()
+            .map(|b| match b.name {
+                "push!" => SimpleMut::Push,
+                "insert!" => SimpleMut::Insert,
+                "remove!" => SimpleMut::Remove,
+                "pop!" | "extend!" | "clear!" | "swap!" | "sort!" | "reverse!" => SimpleMut::Other,
+                _ => SimpleMut::No,
+            })
+            .collect();
+    }
+    KINDS.with(|k| k[i as usize])
+}
+
 /// An index expression made only of locals, Int literals and arithmetic.
 /// An index computed from variables, Int literals and arithmetic: it has
 /// no effects, so computing it twice is harmless.
@@ -3819,7 +3928,7 @@ fn pure_index(e: &Expr) -> bool {
     }
 }
 
-fn simple_index(e: &Expr) -> bool {
+pub(crate) fn simple_index(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Var(Var { res: VarRes::Local(_), .. }) | ExprKind::Int(_) => true,
         ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloorDiv | BinOp::Mod, lhs, rhs } => {
@@ -3833,7 +3942,7 @@ fn simple_index(e: &Expr) -> bool {
 /// Int arithmetic and comparisons that need no error: `None` for overflow
 /// (and for operators handled only by `binop`).
 #[inline(always)]
-fn int_binop(op: BinOp, x: i64, y: i64) -> Option<Value> {
+pub(crate) fn int_binop(op: BinOp, x: i64, y: i64) -> Option<Value> {
     Some(match op {
         BinOp::Add => Value::Int(x.checked_add(y)?),
         BinOp::Sub => Value::Int(x.checked_sub(y)?),

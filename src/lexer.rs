@@ -712,12 +712,27 @@ impl<'a> Lexer<'a> {
                     continue;
                 }
             }
+            // Other prefixes from Python: `R"..."`, `u"..."`, `b"..."`,
+            // `rf"..."`.
+            if let Some(d) = self.python_prefix(c) {
+                self.substituted.push(d);
+                if matches!(self.peek_at(1), b'f' | b'F' | b'r' | b'R') {
+                    // (`rf"\d{n}"`: read as the raw string it starts with.)
+                    self.pos += 1;
+                    self.raw_string()?;
+                } else if matches!(c, b'R') {
+                    self.raw_string()?;
+                } else {
+                    self.pos += 1;
+                }
+                continue;
+            }
             // `f"..."` from Python: every Cogito string interpolates.
-            if c == b'f' && self.peek_at(1) == b'"' && !self.b[self.pos..self.end].starts_with(b"f\"\"\"") {
+            if matches!(c, b'f' | b'F') && self.peek_at(1) == b'"' && !self.b[self.pos + 1..self.end].starts_with(b"\"\"\"") {
                 let line = &self.src[start..self.end];
                 let line = &line[..line.find('\n').unwrap_or(line.len())];
                 let mut d = self
-                    .err("E0001", "strings need no `f` prefix", start, start + 1)
+                    .err("E0001", format!("strings need no `{}` prefix", c as char), start, start + 1)
                     .help("every string interpolates: \"total: {n}\" (write `\\{` for a literal brace)");
                 // (Not when a spec rounds: Python rounds exact halves to even,
                 // Cogito away from zero, as `round` does.)
@@ -1231,6 +1246,61 @@ impl<'a> Lexer<'a> {
         }
         let spec = spec_start.map(|s| self.src[s + 1..close].to_string());
         Ok(StrPart::Expr { start: expr_start as u32, end: expr_end as u32, spec })
+    }
+
+    /// At `c`, a string prefix from Python that Cogito does not have
+    /// (`f` has its own case): the error to report, if there is one.
+    fn python_prefix(&self, c: u8) -> Option<Diagnostic> {
+        let start = self.pos;
+        let two = matches!((c, self.peek_at(1)), (b'r' | b'R', b'f' | b'F') | (b'f' | b'F', b'r' | b'R')) && self.peek_at(2) == b'"';
+        if two {
+            let prefix = &self.src[start..start + 2];
+            return Some(
+                self.err("E0001", format!("Cogito has no `{}` strings: a raw string does not interpolate", prefix), start, start + 2)
+                    .help("use an ordinary string, with each backslash doubled: \"\\\\d{n}\""),
+            );
+        }
+        if self.peek_at(1) != b'"' {
+            return None;
+        }
+        // The rest of the line, for the string's own text.
+        let line = &self.src[start + 1..self.end];
+        let line = &line[..line.find('\n').unwrap_or(line.len())];
+        let span = Span::new(self.file, start, start + 1);
+        match c {
+            b'R' => Some(self.err("E0001", "a raw string is written `r\"...\"`", start, start + 1).fix(span, "r")),
+            b'u' | b'U' => {
+                let d = self
+                    .err("E0001", format!("strings need no `{}` prefix", c as char), start, start + 1)
+                    .help("every Cogito string is Unicode text");
+                // (Braces interpolate in Cogito, but not in Python.)
+                let mut braces = true;
+                let mut escaped = false;
+                if let Some(body) = self.src[start + 1..self.end].strip_prefix("\"\"\"") {
+                    // (A triple-quoted string may span lines.)
+                    braces = body.split("\"\"\"").next().unwrap_or(body).contains(['{', '}']);
+                    return Some(if braces { d } else { d.fix(span, "") });
+                }
+                for ch in line.chars().skip(1) {
+                    match ch {
+                        _ if escaped => escaped = false,
+                        '\\' => escaped = true,
+                        '{' | '}' => break,
+                        '"' => {
+                            braces = false;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                Some(if braces { d } else { d.fix(span, "") })
+            }
+            b'b' | b'B' => Some(
+                self.err("E0001", "Cogito has no byte strings", start, start + 1)
+                    .help("use a string; `s.bytes()` gives its UTF-8 encoding as a list of Ints"),
+            ),
+            _ => None,
+        }
     }
 
     /// The end of a one-line raw string starting at `at` (`r"..."` or

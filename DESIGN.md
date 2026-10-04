@@ -377,29 +377,48 @@ The implementation is a single dependency-free Rust crate:
 - a recursive-descent parser with precedence climbing;
 - a resolver that turns names into frame slots, captured-value indexes and
   global slots, and performs the static checks above;
-- a tree-walking interpreter whose values use `Rc` with copy-on-write;
+- a tree-walking interpreter whose values use `Rc` with copy-on-write,
+  with function bodies compiled into closures on their first call;
 - a standard library of about 170 functions;
 - a property-testing engine (generation from types, shrinking) shared by
   `property` blocks and `cogito verify`.
 
-Speed was not a goal, but it should not get in the way. On three small
-programs, compared with CPython 3.11 on the same machine (best of three
+Speed was not a goal, but it should not get in the way. On five small
+programs, compared with CPython 3.11 on the same machine (best of five
 runs):
 
 | Program | Cogito | CPython |
 |---|---|---|
-| `fib(30)`, recursive | 0.26 s | 0.11 s |
-| sieve of Eratosthenes to 2,000,000 | 0.50 s | 0.22 s |
-| sum of multiples of 3 below 3,000,000 | 0.17 s | 0.17 s |
+| `fib(30)`, recursive | 0.23 s | 0.12 s |
+| sieve of Eratosthenes to 2,000,000 | 0.37 s | 0.23 s |
+| sum of multiples of 3 below 3,000,000 | 0.11 s | 0.19 s |
+| 200,000 records built, summed and sorted | 0.26 s | 0.19 s |
+| counting 180,000 words with `update!` | 0.14 s | 0.04 s |
 
 Cogito does more work per operation than Python: every Int operation
 checks for overflow, annotations are checked on every call and return, and
-`verify` and `test` count steps against a budget. The interpreter keeps the
-common cases cheap: plain calls bind arguments straight into the new frame,
-Int arithmetic and comparisons skip the general operator code, and a local
-list is indexed without copying its handle. Each of these was checked by
-running about 1,300 programs on the old and new interpreter and comparing
-their output.
+`verify` and `test` count steps against a budget. Two things keep the
+common cases cheap. First, on a function's first call its body is
+compiled into a tree of closures (`src/compile.rs`), each specialized for
+its node: `n < 2` on a local Int becomes a closure that compares two
+machine integers, and `xs[i] = v` on a local list writes in place. Only
+the constructs that matter in loops are compiled (arithmetic,
+comparisons, `if`, `while`, `for`, `match`, calls, indexing, `push!` and
+the other built-in `!` functions on local collections); anything else
+becomes a closure that hands its node back to the tree-walking
+interpreter, so the two cannot disagree about what a program means.
+Second, the interpreter itself has fast paths: plain calls bind arguments
+straight into the new frame, maps hash with a fast non-cryptographic
+hash, and type annotations are interned so that a collection remembers
+which type it was last checked against.
+
+Every change of this kind was checked by running about 1,250 programs
+(examples, tests, and everything the dogfooding agents wrote) with the
+old and new interpreter, and with compiling on and off
+(`COGITO_NO_COMPILE=1`), and comparing their output and exit codes.
+The comparison found one real bug along the way: a fast path assumed that
+computing the argument of `s.insert!(x)` could not change `s`, which an
+argument such as `{ s = [1]; 2 }` can.
 
 ## How it was tested: dogfooding by AI agents
 
@@ -658,7 +677,9 @@ a fix is a claim about intent, and a claim needs evidence. "Prose after
 - Deeper static checking: the parameter types of functions passed to user
   functions (those passed to built-ins are inferred), the element types
   built-ins return, and flow-sensitive types for reassigned `var`s.
-- A bytecode compiler for speed.
+- Compiling more of the language (method calls, comprehensions, string
+  interpolation) and storing locals in registers rather than a frame
+  vector, for the remaining factor of two on call-heavy code.
 - Richer contract-guided generation: today simple numeric bounds in `requires`
   steer the generator; more general constraints could be solved instead of
   filtered.

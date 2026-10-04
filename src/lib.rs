@@ -49,6 +49,7 @@ macro_rules! err_outln {
 
 pub mod ast;
 pub mod builtins;
+pub mod compile;
 pub mod ctx;
 pub mod diagnostic;
 pub mod docgen;
@@ -126,13 +127,20 @@ pub fn run_with_value(it: &mut Interp, prog: &Program, ns: &Namespace) -> Result
         let mut env = interp::Env::new(prog.num_slots);
         let n = prog.items.len();
         let mut last = None;
+        let compiled = compile::enabled();
         for (i, item) in prog.items.iter().enumerate() {
             if let ast::Item::Stmt(s) = item {
                 if let (true, ast::StmtKind::Expr(e)) = (i + 1 == n, &s.kind) {
-                    last = Some(it.eval(e, &mut env)?);
+                    last = Some(if compiled { compile::expr(e)(it, &mut env)? } else { it.eval(e, &mut env)? });
                     continue;
                 }
-                it.exec_stmt(s, &mut env)?;
+                // (Compiled for its loops: `prog` outlives the code.)
+                if compiled && matches!(&s.kind, ast::StmtKind::Expr(ast::Expr { kind: ast::ExprKind::For { .. } | ast::ExprKind::While { .. }, .. }))
+                {
+                    compile::stmt(s)(it, &mut env)?;
+                } else {
+                    it.exec_stmt(s, &mut env)?;
+                }
             }
         }
         // Only a function declared with `fn main()` is the entry point.
