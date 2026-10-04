@@ -188,31 +188,11 @@ impl Server {
         ])
     }
 
-    /// The source of a top-level function or type declared in this file,
-    /// with the comment lines right above it.
+    /// The signature and comment of a top-level function or type declared
+    /// in this file.
     fn declaration_doc(&self, text: &str, word: &str) -> Option<String> {
         let prog = crate::parser::parse_program(text, 0).ok()?;
-        let (start, name_end) = prog.items.iter().find_map(|item| match item {
-            Item::Fn(def) if def.name.as_deref() == Some(word) => Some((def.span.start as usize, def.name_span.end as usize)),
-            Item::Type(td) if &*td.name == word => Some((td.span.start as usize, td.name_span.end as usize)),
-            _ => None,
-        })?;
-        // The declaration's first line, up to the body.
-        let line_end = text[name_end..].find('\n').map_or(text.len(), |i| name_end + i);
-        let mut sig = text[start..line_end].trim_end().to_string();
-        if let Some(i) = sig.find(" =>") {
-            sig.truncate(i);
-        }
-        let sig = sig.trim_end_matches('{').trim_end().to_string();
-        let mut comments = Vec::new();
-        for l in text[..start].lines().rev() {
-            match l.trim().strip_prefix('#') {
-                Some(c) => comments.push(c.trim().to_string()),
-                None => break,
-            }
-        }
-        comments.reverse();
-        Some(format!("```cogito\n{}\n```\n{}", sig, comments.join("\n")))
+        crate::docgen::declarations(text, &prog).iter().find(|d| d.name == word).map(crate::docgen::markdown)
     }
 
     fn symbols(&self, uri: &str) -> Json {

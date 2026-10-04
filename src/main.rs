@@ -25,7 +25,7 @@ USAGE:
     cogito lsp                      run the language server (for editors) on stdin/stdout
     cogito eval \"CODE\"              run a snippet of code
     cogito explain CODE             explain an error code (e.g. E0101)
-    cogito doc [NAME]               documentation for built-in functions
+    cogito doc [NAME | FILE.cog]    documentation for built-in functions, or a Markdown reference for a file
     cogito spec                     print the compact language specification (for humans and LLMs)
     cogito version                  print the version
 
@@ -338,6 +338,29 @@ fn cmd_check(paths: &[String], color: bool) -> ExitCode {
 
 fn cmd_doc(name: Option<&str>) -> ExitCode {
     use cogito::builtins::BUILTINS;
+    // `cogito doc FILE.cog`: a reference for the file's own declarations.
+    if let Some(path) = name.filter(|n| n.ends_with(".cog") || Path::new(n).is_file()) {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                cogito::err_outln!("error: cannot read `{}`: {}", path, e);
+                return ExitCode::from(2);
+            }
+        };
+        let title = Path::new(path).file_name().map_or(path.to_string(), |f| f.to_string_lossy().to_string());
+        return match cogito::docgen::document(&src, &title) {
+            Ok(md) => {
+                cogito::out!("{}", md);
+                ExitCode::SUCCESS
+            }
+            Err(d) => {
+                let mut it = Interp::new();
+                it.ctx.sm.add(path, src);
+                cogito::err_out!("{}", d.render(&it.ctx.sm, false));
+                ExitCode::from(2)
+            }
+        };
+    }
     match name {
         Some(n) => {
             let n = n.trim_end_matches("()");

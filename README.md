@@ -186,6 +186,7 @@ Hello, world!
 | `cogito eval "CODE"` | run a snippet |
 | `cogito explain E0101` | explain an error code |
 | `cogito doc [NAME]` | built-in function reference |
+| `cogito doc FILE.cog` | a Markdown reference for a file: signatures, contracts and comments |
 | `cogito spec` | print the compact language specification |
 
 Editor support: `cogito lsp` is a language server (errors and warnings as

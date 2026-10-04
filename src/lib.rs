@@ -51,6 +51,7 @@ pub mod ast;
 pub mod builtins;
 pub mod ctx;
 pub mod diagnostic;
+pub mod docgen;
 pub mod format;
 pub mod interp;
 pub mod json;
