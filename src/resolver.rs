@@ -186,12 +186,11 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
     }
     if !repl && !r.diags.iter().any(|d| d.is_error()) {
         let mut out = Vec::new();
-        for item in &prog.items {
+        let n = prog.items.len();
+        for (i, item) in prog.items.iter().enumerate() {
             match item {
-                Item::Stmt(s) => unused_in_stmt(s, false, &mut out),
+                Item::Stmt(s) => unused_in_stmt(s, r.ctx.prints_last && i + 1 == n, &mut out),
                 Item::Fn(def) => unused_values(&def.body, true, false, &mut out),
-                // (A test's last line is not its result: a condition there
-                // needs `assert`.)
                 // (A test's last value is used: an `Err` fails the test. But a
                 // condition there checks nothing without `assert`.)
                 Item::Test(t) => {
@@ -1109,7 +1108,8 @@ impl<'a> Resolver<'a> {
                     if def.name.as_deref() == Some("main") && def.ret.is_none() {
                         self.check_tail_discarded(&def.body);
                     }
-                    if def.name.as_deref() == Some("main") && def.required_params() > 0 && !self.repl {
+                    // (An imported module's `main` is not called.)
+                    if def.name.as_deref() == Some("main") && def.required_params() > 0 && !self.repl && self.ctx.loading.is_empty() {
                         let d = Diagnostic::error("E0201", "`main` is called without arguments, so it cannot have parameters")
                             .at(def.name_span)
                             .help("read the command-line arguments with `args()` (a List[Str], without the program name): `fn main() { let argv = args() ... }`");
@@ -2516,6 +2516,7 @@ impl<'a> Resolver<'a> {
             }
             ExprKind::Match { scrutinee, arms } => {
                 self.expr(scrutinee);
+                self.check_unreachable_arms(arms);
                 let errors_before = self.diags.iter().filter(|d| d.is_error()).count();
                 for arm in arms.iter_mut() {
                     self.push_scope();
@@ -2817,6 +2818,39 @@ impl<'a> Resolver<'a> {
                 VarRes::Unresolved
             }
         }
+    }
+
+    /// W0010: arms after one that matches every value (`_`, or a name
+    /// without a guard) never run.
+    fn check_unreachable_arms(&mut self, arms: &[Arm]) {
+        let Some(i) = arms.iter().position(|a| a.guard.is_none() && a.pat.is_irrefutable()) else { return };
+        let Some(next) = arms.get(i + 1) else { return };
+        let catch_all = &arms[i].pat;
+        let what = match &catch_all.kind {
+            PatKind::Bind { name, .. } => format!("`{}`", name),
+            _ => "`_`".to_string(),
+        };
+        let mut d = Diagnostic::warning("W0010", "this arm is never reached")
+            .at(next.pat.span)
+            .label(format!("the arm {} above matches every value", what))
+            .help("arms are tried in order: move the catch-all arm last");
+        // A name meant as a constant: `null`, or a constructor in lowercase.
+        if let PatKind::Bind { name, .. } = &catch_all.kind {
+            let mut chars = name.chars();
+            let upper: String = chars.next().map(|c| c.to_ascii_uppercase()).into_iter().chain(chars).collect();
+            let is_ctor = |n: &str| self.global_slot(n).is_some_and(|s| matches!(self.ctx.globals[s as usize].kind, GlobalKind::Ctor(_)));
+            let help = if matches!(&**name, "null" | "nil" | "undefined" | "NULL") {
+                Some("Cogito has no null: write `None` to match a missing Option value".to_string())
+            } else if &*upper != &**name && is_ctor(&upper) {
+                Some(format!("to match the constructor, write `{}`: constructors start with an uppercase letter", upper))
+            } else {
+                None
+            };
+            if let Some(h) = help {
+                d = d.note(format!("`{}` in a pattern is a new variable that matches any value", name)).help(h);
+            }
+        }
+        self.diags.push(d);
     }
 
     fn check_exhaustive(&mut self, arms: &[Arm], span: Span) {

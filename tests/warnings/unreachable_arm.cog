@@ -1,0 +1,9 @@
+# expect: W0010
+fn describe(o: Option[Int]) -> Str {
+  match o {
+    _ => "something"
+    None => "nothing"
+  }
+}
+
+print(describe(None))

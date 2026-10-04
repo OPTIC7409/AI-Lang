@@ -192,6 +192,21 @@ fn eval_and_exit_codes() {
     assert_eq!(out.status.code(), Some(2), "static errors exit with 2");
     let out = cogito(&["eval", "print(1 // 0)"]);
     assert_eq!(out.status.code(), Some(1), "runtime errors exit with 1");
+    // The last expression's value is printed, so it is not "unused".
+    let out = cogito(&["eval", "1 == 1\n\"a\" + 1"]);
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("E0121") && stderr.matches("W0008").count() == 1 && stderr.contains("<eval>:1:1"), "{}", stderr);
+}
+
+#[test]
+fn imported_main_is_not_run() {
+    let dir = std::env::temp_dir().join(format!("cogito-main-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("lib.cog"), "fn main(n: Int) { print(\"lib {n}\") }\nfn helper() -> Int => 1\n").unwrap();
+    std::fs::write(dir.join("app.cog"), "import \"lib.cog\"\nprint(lib.helper())\nlib.main(4)\n").unwrap();
+    let out = cogito(&[dir.join("app.cog").to_str().unwrap()]);
+    assert_eq!(text(&out.stdout), "1\nlib 4\n", "{}", text(&out.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

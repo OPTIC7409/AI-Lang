@@ -576,10 +576,12 @@ fn sort_values(it: &Interp, xs: Vec<Value>, sp: Span) -> R<Vec<Value>> {
     merge_sort(xs, &mut |a, b| cmp_values(it, a, b, sp))
 }
 
-fn sort_by_key(it: &mut Interp, xs: Vec<Value>, key: &Value, sp: Span) -> R<Vec<Value>> {
+/// `two`: the elements are map entries, and `key` takes `(k, v)` as two
+/// arguments.
+fn sort_by_key(it: &mut Interp, xs: Vec<Value>, key: &Value, two: bool, sp: Span) -> R<Vec<Value>> {
     let mut keys = Vec::with_capacity(xs.len());
     for x in &xs {
-        keys.push(it.call1(key, x.clone(), sp)?);
+        keys.push(call_entry(it, key, x.clone(), two, sp)?);
     }
     // Sort the positions by key (stable), then pick the elements in order.
     let itr: &Interp = it;
@@ -1793,10 +1795,11 @@ fn b_product(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 fn extreme_by(it: &mut Interp, mut a: Vec<Value>, sp: Span, want: Ordering, name: &str) -> R {
     let f = fn_arg(it, &a, 1, name, sp)?;
     let v = take_arg(&mut a, 0);
+    let two = matches!(v, Value::Map(_)) && wants_two(&f);
     let xs = items(it, v, name, 0, sp)?;
     let mut best: Option<(Value, Value)> = None;
     for x in xs {
-        let k = it.call1(&f, x.clone(), sp)?;
+        let k = call_entry(it, &f, x.clone(), two, sp)?;
         best = Some(match best {
             None => (k, x),
             Some((bk, bx)) => {
@@ -1840,8 +1843,9 @@ fn m_sort(it: &mut Interp, t: &mut Value, _: Vec<Value>, sp: Span) -> R {
 fn b_sort_by(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let f = fn_arg(it, &a, 1, "sort_by", sp)?;
     let v = take_arg(&mut a, 0);
+    let two = matches!(v, Value::Map(_)) && wants_two(&f);
     let xs = items(it, v, "sort_by", 0, sp)?;
-    Ok(Value::list(sort_by_key(it, xs, &f, sp)?))
+    Ok(Value::list(sort_by_key(it, xs, &f, two, sp)?))
 }
 
 fn m_sort_by(it: &mut Interp, t: &mut Value, a: Vec<Value>, sp: Span) -> R {
@@ -1855,7 +1859,7 @@ fn m_sort_by(it: &mut Interp, t: &mut Value, a: Vec<Value>, sp: Span) -> R {
             return Err(e);
         }
     };
-    match sort_by_key(it, xs, &f, sp) {
+    match sort_by_key(it, xs, &f, false, sp) {
         Ok(sorted) => {
             *t = Value::list(sorted);
             Ok(Value::Unit)
@@ -2169,10 +2173,11 @@ fn b_unique(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 fn b_group_by(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let f = fn_arg(it, &a, 1, "group_by", sp)?;
     let v = take_arg(&mut a, 0);
+    let two = matches!(v, Value::Map(_)) && wants_two(&f);
     let xs = items(it, v, "group_by", 0, sp)?;
     let mut m = MapVal::new();
     for x in xs {
-        let k = it.call1(&f, x.clone(), sp)?;
+        let k = call_entry(it, &f, x.clone(), two, sp)?;
         match m.get_mut(&k) {
             Some(Value::List(g)) => Rc::make_mut(g).push(x),
             _ => {

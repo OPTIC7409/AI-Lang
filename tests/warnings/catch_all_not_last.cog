@@ -1,0 +1,11 @@
+# expect: nothing
+# A catch-all with a guard does not hide the arms after it.
+fn describe(o: Option[Int]) -> Str {
+  match o {
+    x if x == None => "nothing"
+    Some(n) => "{n}"
+    None => "unreachable in practice, but not provably"
+  }
+}
+
+print(describe(Some(3)))

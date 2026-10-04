@@ -138,7 +138,20 @@ fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>, record: boo
                 c.function(def, &[]);
             }
             Item::Test(t) => {
-                c.function(&t.func, &[]);
+                // A test passes unless it fails an `assert` or ends with an
+                // `Err`: a Bool at the end checks nothing. (Operators there
+                // are reported by the resolver.)
+                let tail = tail_expr(&t.func.body);
+                let reported =
+                    matches!(tail.kind, ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::And(..) | ExprKind::Or(..) | ExprKind::Bool(_));
+                if c.function(&t.func, &[]) == Ty::Bool && !reported {
+                    // (No fix: the test may expect `false`.)
+                    let d = Diagnostic::warning("W0008", "this test ends with a Bool, which checks nothing")
+                        .at(tail.span)
+                        .label("a `false` here would still pass")
+                        .help("to check it, write `assert` (or `assert !`) before it");
+                    c.diags.push(d);
+                }
             }
             Item::Property(p) => {
                 c.function(&p.func, &[]);
@@ -985,6 +998,12 @@ impl<'a> Checker<'a> {
                     (Ty::List(_) | Ty::Str, Ty::Range) => t,
                     (Ty::List(e), Ty::Int) => (**e).clone(),
                     (Ty::Str, Ty::Int) => Ty::Str,
+                    // (Fails at run time: a position is an Int.)
+                    (Ty::List(_) | Ty::Str, Ty::Float | Ty::Str | Ty::Bool) => {
+                        let msg = format!("{} is indexed by an Int (or a range), but this is {}", a(&t), a(&i));
+                        self.mismatch(index.span, msg, "not an Int", &Ty::Int);
+                        Ty::Any
+                    }
                     (Ty::Map(_, v), _) => (**v).clone(),
                     (Ty::Tuple(ts), _) => match &index.kind {
                         ExprKind::Int(n) => usize::try_from(*n).ok().and_then(|n| ts.get(n).cloned()).unwrap_or(Ty::Any),
@@ -1076,6 +1095,17 @@ impl<'a> Checker<'a> {
                         if !self.compatible(t, e) {
                             let msg = format!("`{}` would add {} to {}", b, a(t), a(&rt));
                             self.mismatch(*sp, msg, "wrong type", e);
+                        }
+                    }
+                }
+                // Most `!` built-ins change the variable and return nothing.
+                if let (true, Some(b)) = (*mutating, builtin) {
+                    if !self.has_home(&rt) && !self.ctx.module_fns.contains(&method.name) {
+                        match (b, &rt) {
+                            ("push!" | "extend!" | "clear!" | "swap!" | "update!" | "sort!" | "sort_by!" | "reverse!", _)
+                            | ("insert!", Ty::List(_) | Ty::Map(..)) => return Ty::Unit,
+                            ("insert!", Ty::Set(_)) => return Ty::Bool,
+                            _ => {}
                         }
                     }
                 }
@@ -1352,7 +1382,7 @@ impl<'a> Checker<'a> {
     /// different number of arguments (`[1, 2].map(fn(a, b) => a)`).
     fn callback_arity(&mut self, b: &str, coll: &Ty, pos: usize, arg: &Expr) {
         let ExprKind::Lambda(def) = &arg.kind else { return };
-        let Some(n) = callback_count(b, coll, pos) else { return };
+        let Some(n) = callback_count(b, coll, pos, def.params.len()) else { return };
         if n < def.required_params() || n > def.params.len() {
             let takes = if def.required_params() == def.params.len() {
                 def.params.len().to_string()
@@ -1364,7 +1394,11 @@ impl<'a> Checker<'a> {
                 format!("`{}` calls this function with {} argument{}, but it takes {}", b, n, if n == 1 { "" } else { "s" }, takes),
                 "wrong number of parameters",
             );
+            let map = matches!(coll, Ty::Map(..));
             d.help = Some(match (b, n) {
+                ("map_values", _) if map => "the function gets each value: `fn(v) => ...`".into(),
+                ("update", _) if map => "the function gets the current value: `fn(v) => ...`".into(),
+                _ if map => "the function gets each entry, as `fn(k, v) => ...` or as one `(k, v)` tuple: `fn(entry) => ...`".into(),
                 ("fold", _) => "the function gets the result so far and the next element: `fn(acc, x) => acc + x`".into(),
                 ("reduce" | "sort_with", _) => "the function gets two values: `fn(a, b) => ...`".into(),
                 ("map" | "filter" | "each" | "any" | "all" | "find" | "count", 1) => {
@@ -1626,6 +1660,17 @@ fn erase_params(t: &Ty) -> Ty {
 }
 
 /// The span of the expression that gives a function body its value.
+/// The expression that gives a block its value (`e` itself if not a block).
+fn tail_expr(e: &Expr) -> &Expr {
+    match &e.kind {
+        ExprKind::Block(stmts) => match stmts.last() {
+            Some(Stmt { kind: StmtKind::Expr(x), .. }) => tail_expr(x),
+            _ => e,
+        },
+        _ => e,
+    }
+}
+
 fn tail_span(e: &Expr) -> Span {
     match &e.kind {
         ExprKind::Block(stmts) => match stmts.last() {
@@ -1690,6 +1735,18 @@ fn callback_params(name: &str, coll: &Ty, pos: usize) -> Option<Vec<Ty>> {
         ) if seq => {
             vec![elem]
         }
+        ("filter" | "each" | "find" | "min_by" | "max_by" | "sort_by" | "group_by" | "partition" | "any" | "all" | "count", 1)
+            if matches!(coll, Ty::Map(..)) =>
+        {
+            match coll {
+                Ty::Map(k, v) => vec![(**k).clone(), (**v).clone()],
+                _ => return None,
+            }
+        }
+        ("map_values", 1) | ("update", 3) => match coll {
+            Ty::Map(_, v) => vec![(**v).clone()],
+            _ => return None,
+        },
         ("fold", 2) if seq => vec![Ty::Any, elem],
         ("reduce", 1) if seq => vec![Ty::Any, elem],
         ("sort_with", 1) if seq => vec![elem.clone(), elem],
@@ -1705,9 +1762,20 @@ fn callback_params(name: &str, coll: &Ty, pos: usize) -> Option<Vec<Ty>> {
 
 /// How many arguments a built-in passes to the function at position `pos`,
 /// when that is certain (a map's entries may be passed as one or two).
-fn callback_count(name: &str, coll: &Ty, pos: usize) -> Option<usize> {
+fn callback_count(name: &str, coll: &Ty, pos: usize, params: usize) -> Option<usize> {
     let seq = matches!(coll, Ty::List(_) | Ty::Set(_) | Ty::Range | Ty::Str);
+    let map = matches!(coll, Ty::Map(..));
     Some(match (name, pos) {
+        // A map's entries: `(k, v)` as one tuple, or as two arguments to a
+        // function that takes exactly two.
+        ("filter" | "each" | "find" | "min_by" | "max_by" | "sort_by" | "group_by" | "partition" | "any" | "all" | "count", 1) if map => {
+            if params == 2 {
+                2
+            } else {
+                1
+            }
+        }
+        ("map_values", 1) | ("update", 3) if map => 1,
         (
             "map" | "filter" | "each" | "find" | "find_index" | "take_while" | "drop_while" | "flat_map" | "min_by" | "max_by" | "sort_by"
             | "group_by" | "partition" | "any" | "all" | "count",
@@ -1890,6 +1958,15 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
         },
         "to_list" => match &first {
             Ty::List(_) | Ty::Str | Ty::Range => list(elem),
+            _ => Ty::Any,
+        },
+        "zip" => match (&first, args.get(1).map(|a| &a.1)) {
+            (Ty::List(_) | Ty::Str | Ty::Range, Some(other @ (Ty::List(_) | Ty::Str | Ty::Range))) => list(Ty::Tuple(vec![elem, element(other)])),
+            _ => Ty::Any,
+        },
+        "windows" | "chunks" => match &first {
+            Ty::List(_) => list(first.clone()),
+            Ty::Str => list(Ty::Str),
             _ => Ty::Any,
         },
         // (With a step, `range` gives a list.)

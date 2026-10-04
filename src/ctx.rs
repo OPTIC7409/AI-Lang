@@ -70,6 +70,8 @@ pub struct Ctx {
     /// function whose parameters are the fields and whose `requires` are the
     /// type's `where` clauses.
     pub invariants: HashMap<u32, Rc<FnDef>>,
+    /// `cogito eval`: the value of the last top-level expression is printed.
+    pub prints_last: bool,
 }
 
 impl Ctx {
@@ -87,6 +89,7 @@ impl Ctx {
             type_home: HashMap::new(),
             module_fns: HashSet::new(),
             invariants: HashMap::new(),
+            prints_last: false,
         };
         let types = ctx.types.clone();
         for td in &types {

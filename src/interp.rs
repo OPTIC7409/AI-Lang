@@ -1966,7 +1966,7 @@ impl Interp {
                     }
                 }
             }
-            Value::List(xs) => {
+            Value::List(xs) | Value::Tuple(xs) => {
                 for x in xs.iter() {
                     self.bind_loop(pat, x.clone(), env)?;
                     run_body!();
@@ -2000,7 +2000,7 @@ impl Interp {
         d = match v {
             Value::Int(_) => d.help("to count, iterate over a range: `for i in 0..n`"),
             Value::Variant(vv) if vv.ty.id == OPTION_ID => d.help("match on the Option instead, or use `.unwrap_or(...)`"),
-            _ => d.help("lists, ranges, strings and maps can be iterated"),
+            _ => d.help("lists, ranges, strings, maps, sets and tuples can be iterated"),
         };
         d
     }

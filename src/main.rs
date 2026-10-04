@@ -184,6 +184,7 @@ fn cmd_eval(code: &str, prog_args: Vec<String>, color: bool) -> ExitCode {
     let mut it = Interp::new();
     it.contracts = contracts_on();
     it.args = prog_args;
+    it.ctx.prints_last = true;
     let mut ns = Namespace::default();
     let (prog, _) = match cogito::load_source(&mut it, "<eval>", code, Path::new("."), &mut ns, false) {
         Ok(p) => p,

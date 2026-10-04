@@ -187,3 +187,14 @@ test "string indexing gives one-character strings" {
   assert t == "hi" and s[0] == "h"
   assert [c for c in "ab"] == ["a", "b"]
 }
+
+test "every entry function over a map takes fn(k, v) or one (k, v) tuple" {
+  let m = ["a": 2, "b": 1, "c": 3]
+  assert m.sort_by(fn(k, v) => v) == [("b", 1), ("a", 2), ("c", 3)]
+  assert m.sort_by(fn(kv) => kv.1) == m.sort_by(fn(_k, v) => v)
+  assert m.min_by(fn(_k, v) => v) == Some(("b", 1))
+  assert m.max_by(fn((_k, v)) => v) == Some(("c", 3))
+  assert m.group_by(fn(_k, v) => v % 2) == [0: [("a", 2)], 1: [("b", 1), ("c", 3)]]
+  assert m.filter(fn(k, _v) => k != "a") == ["b": 1, "c": 3]
+  assert m.count(fn(_k, v) => v > 1) == 2
+}
