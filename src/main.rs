@@ -68,7 +68,9 @@ fn load(it: &mut Interp, path: &Path, color: bool, show_warnings: bool) -> Optio
             Some((prog, ns))
         }
         Err(diags) => {
-            print_diags(it, &diags, color);
+            // With errors to fix, unused variables are noise too.
+            let shown: Vec<Diagnostic> = diags.iter().filter(|d| d.code != "W0001").cloned().collect();
+            print_diags(it, &shown, color);
             let n = diags.iter().filter(|d| d.is_error()).count();
             let c = Colors::new(color);
             cogito::err_outln!(

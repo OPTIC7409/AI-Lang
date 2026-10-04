@@ -56,7 +56,9 @@ fn items<'a>(src: &str, toks: &'a [Token]) -> Vec<Item<'a>> {
         while let Some(rel) = gap[i..].find('#') {
             let start = i + rel;
             let end = gap[start..].find('\n').map_or(gap.len(), |e| start + e);
-            out.push(Item { tok: None, start: from + start, end: from + end });
+            // (Without a `\r` of a Windows line ending: lines end in `\n`.)
+            let text_end = start + gap[start..end].trim_end().len();
+            out.push(Item { tok: None, start: from + start, end: from + text_end });
             i = end;
         }
     };
@@ -153,10 +155,10 @@ fn space_between(before: Option<&Tok>, prev: &Tok, next: &Tok) -> bool {
         (Dot, _) | (_, Dot) => false,
         (DotDot | DotDotEq, LBrace) => true,
         (DotDot | DotDotEq, _) => false,
-        (_, DotDot | DotDotEq) => !matches!(prev, Int(_) | Ident(_) | Upper(_) | RParen | RBracket | Float(_)),
+        (_, DotDot | DotDotEq) => !matches!(prev, Int(_) | Ident(_) | Upper(_) | RParen | RBracket | Float(_) | Str(_)),
         // Calls, generic arguments and indexing.
         (Ident(_) | Upper(_) | RParen | RBracket | Fn | Question, LParen) => false,
-        (Ident(_) | Upper(_) | RParen | RBracket | Str(_), LBracket) => false,
+        (Ident(_) | Upper(_) | RParen | RBracket | Str(_) | Question, LBracket) => false,
         // Unary minus: no space between it and its operand.
         (Minus, _) => before.is_some_and(ends_operand),
         _ => true,
@@ -183,7 +185,10 @@ fn layout(src: &str, items: &[Item]) -> String {
     let mut line_match = false;
     // How many brackets were open when the last line of code began.
     let mut line_depth = 0;
-    for it in items {
+    // For each open bracket, whether it is `(` or `[` (newlines inside
+    // them do not end statements, so a `-` starting a line is binary).
+    let mut in_parens: Vec<bool> = Vec::new();
+    for (idx, it) in items.iter().enumerate() {
         let gap = match prev {
             Some(p) => &src[p.end..it.start],
             None => &src[..it.start],
@@ -213,8 +218,11 @@ fn layout(src: &str, items: &[Item]) -> String {
             if it.tok.is_some() {
                 line_depth = stack.len();
             }
+            // A comment line is indented like the line of code after it.
+            let next_code = if it.tok.is_none() { items[idx + 1..].iter().find_map(|x| x.tok) } else { None };
             let continuation = match it.tok {
                 _ if opened => false,
+                None if next_code.is_some_and(continues_line) => true,
                 Some(t) if is_closer(t) => false,
                 Some(t) if continues_line(t) => true,
                 // `else` lines up with a `}` that ends the line above, and is
@@ -247,7 +255,9 @@ fn layout(src: &str, items: &[Item]) -> String {
                     }
                 }
                 (Some(a), Some(b)) => {
-                    let before = if prev_first { None } else { before_prev };
+                    // A `-` that starts a line is unary, except inside `(`/`[`.
+                    let binary_minus = *a == Tok::Minus && in_parens.last() == Some(&true);
+                    let before = if prev_first && !binary_minus { None } else { before_prev };
                     if space_between(before, a, b) {
                         out.push(' ');
                     }
@@ -259,8 +269,10 @@ fn layout(src: &str, items: &[Item]) -> String {
         if let Some(t) = it.tok {
             if is_opener(t) {
                 stack.push(if header_line && !line_match && *t == Tok::LBrace { level - 1 } else { level });
+                in_parens.push(*t != Tok::LBrace);
             } else if is_closer(t) {
                 stack.pop();
+                in_parens.pop();
             }
             line_match |= *t == Tok::Match;
             last_code = Some(t);
@@ -309,6 +321,11 @@ mod tests {
         // `else` lines up with a `}` above it, and continues anything else.
         let src = "if a {\nx\n}\nelse {\ny\n}\nlet v = if a { 1 }\nelse if b { 2 }\nelse { 3 }\n";
         assert_eq!(fmt(src), "if a {\n  x\n}\nelse {\n  y\n}\nlet v = if a { 1 }\n  else if b { 2 }\n  else { 3 }\n");
+        // Comment lines inside a continuation; a binary minus starting a line.
+        let src = "let t = xs\n|> sort\n# then add\n|> sum\nlet n = (a\n- b\n+ 1)\n";
+        assert_eq!(fmt(src), "let t = xs\n  |> sort\n  # then add\n  |> sum\nlet n = (a\n  - b\n  + 1)\n");
+        assert_eq!(fmt("let x = p()?[0]\nlet r = \"a\"..=\"z\"\n"), "let x = p()?[0]\nlet r = \"a\"..=\"z\"\n");
+        assert_eq!(fmt("let x = 1 # one\r\nlet y = 2\r\n"), "let x = 1 # one\nlet y = 2\n");
         // One level for a bracket opened on the line above, not two.
         let src = "let ok = xs.all(fn(x) =>\nx > 0)\nprint(a +\nb)\n";
         assert_eq!(fmt(src), "let ok = xs.all(fn(x) =>\n  x > 0)\nprint(a +\n  b)\n");

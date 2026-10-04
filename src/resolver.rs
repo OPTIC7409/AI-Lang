@@ -1549,6 +1549,16 @@ impl<'a> Resolver<'a> {
         if b.name.ends_with('!') || EFFECTS.contains(&b.name) {
             return;
         }
+        // A callback with effects (`xs.any(fn(x) { print(x); ... })`) makes
+        // the call do something even when its result is dropped (but `map`
+        // used that way is still better written with `each`).
+        let args: Vec<&Expr> = match &e.kind {
+            ExprKind::MethodCall { args, .. } | ExprKind::Call { args, .. } => args.iter().map(|a| &a.value).collect(),
+            _ => vec![],
+        };
+        if &**name != "map" && args.iter().any(|a| has_effects(a, EFFECTS)) {
+            return;
+        }
         let twin = format!("{}!", name);
         let help = if self.ctx.builtins.values.contains_key(twin.as_str()) {
             format!("`{}` returns a new value and leaves its argument unchanged; to change a `var` in place, call `{}`", name, twin)
@@ -1922,6 +1932,10 @@ impl<'a> Resolver<'a> {
                 }
                 self.push_scope();
                 self.pattern(pat, BindMode::Local);
+                // (Already an error above; not also an unused variable.)
+                for l in self.cur().scopes.last_mut().unwrap().locals.iter_mut() {
+                    l.used = true;
+                }
                 self.pop_scope();
             }
             ExprKind::Try(inner) => {
@@ -2676,6 +2690,32 @@ fn pattern_mismatch<'p>(p: &'p Pattern, ty: &Ty) -> Option<&'p Pattern> {
     } else {
         Some(p)
     }
+}
+
+/// Whether an anonymous function might do something besides compute a
+/// value: print, call a `!` function or another effectful built-in, or
+/// assign to a variable.
+fn has_effects(e: &Expr, effects: &[&str]) -> bool {
+    let ExprKind::Lambda(def) = &e.kind else { return false };
+    fn walk(e: &Expr, effects: &[&str], found: &mut bool) {
+        match &e.kind {
+            ExprKind::MethodCall { mutating: true, .. } => *found = true,
+            ExprKind::MethodCall { method, .. } if effects.contains(&&*method.name) => *found = true,
+            ExprKind::Call { callee, .. } => {
+                if let ExprKind::Var(v) = &callee.kind {
+                    if v.name.ends_with('!') || effects.contains(&&*v.name) {
+                        *found = true;
+                    }
+                }
+            }
+            ExprKind::Block(stmts) if stmts.iter().any(|s| matches!(s.kind, StmtKind::Assign { .. })) => *found = true,
+            _ => {}
+        }
+        for_each_child(e, &mut |c| walk(c, effects, found));
+    }
+    let mut found = false;
+    walk(&def.body, effects, &mut found);
+    found
 }
 
 /// Whether a pattern contains a record pattern without `..`.

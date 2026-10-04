@@ -750,8 +750,14 @@ impl<'s> Parser<'s> {
 
     fn cmp_expr(&mut self) -> PResult<Expr> {
         let lhs = self.pipe_expr()?;
-        if self.eat(&Tok::Is) {
+        if self.at(&Tok::Is) {
+            let is_span = self.bump().span;
             let pat = self.pattern()?;
+            if self.cmp_op().is_some() || self.at(&Tok::Is) {
+                return Err(Diagnostic::error("E0011", "comparison operators cannot be chained")
+                    .at(is_span.to(self.span()))
+                    .help("`is` is a comparison: put the test in parentheses, `(x is Some(_)) == flag`"));
+            }
             let span = lhs.span.to(pat.span);
             return Ok(mk(ExprKind::Is { expr: Box::new(lhs), pat }, span));
         }
@@ -762,6 +768,11 @@ impl<'s> Parser<'s> {
         }
         self.skip_newlines();
         let rhs = self.pipe_expr()?;
+        if self.at(&Tok::Is) {
+            return Err(Diagnostic::error("E0011", "comparison operators cannot be chained")
+                .at(op_span.to(self.span()))
+                .help("`is` is a comparison: put the test in parentheses, `flag == (x is Some(_))`"));
+        }
         if let Some((op2, _)) = self.cmp_op() {
             return Err(Diagnostic::error("E0011", "comparison operators cannot be chained").at(op_span.to(self.span())).help(format!(
                 "write `a {} b and b {} c` instead",

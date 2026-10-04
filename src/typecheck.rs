@@ -216,9 +216,15 @@ fn element(t: &Ty) -> Ty {
 
 /// A short description of a type for messages: "a Str", "an Int".
 fn a(t: &Ty) -> String {
-    let s = t.to_string();
-    let vowel = s.starts_with(['A', 'E', 'I', 'O', 'U']);
+    let s = shown(t);
+    let vowel = s.starts_with(['A', 'E', 'I', 'O']) || (s.starts_with('U') && !s.starts_with("Uni"));
     format!("{} {}", if vowel { "an" } else { "a" }, s)
+}
+
+/// A type as messages show it: unknown parts are left out (`List`, not
+/// `List[Any]`) or written `_` (`Map[Str, _]`).
+fn shown(t: &Ty) -> String {
+    t.to_string().replace("[Any, Any]", "").replace("[Any]", "").replace("Any", "_")
 }
 
 impl<'a> Checker<'a> {
@@ -995,7 +1001,8 @@ impl<'a> Checker<'a> {
                 let comparable = unknown(l)
                     || unknown(r)
                     || (num(l) && num(r))
-                    || l == r
+                    // Ranges, maps and functions have no order.
+                    || (l == r && !matches!(l, Ty::Range | Ty::Map(..) | Ty::Fn(..)))
                     || matches!(
                         (l, r),
                         (Ty::List(_), Ty::List(_))
@@ -1114,7 +1121,7 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
             _ => Ty::Any,
         },
         "first" | "last" | "get" => match &first {
-            Ty::List(_) | Ty::Str => option(elem),
+            Ty::List(_) | Ty::Str | Ty::Range => option(elem),
             Ty::Map(_, v) if name == "get" => option((**v).clone()),
             _ => Ty::Any,
         },

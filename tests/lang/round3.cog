@@ -160,3 +160,8 @@ test "results of built-ins and function values" {
   assert first_even([3, 4]) == 4
   assert call_count({ count: fn() => 7 }) == 7
 }
+
+test "get works on ranges, as indexing does" {
+  assert (0..10).get(3) == Some(3) and (0..10).get(-1) == Some(9)
+  assert (0..10).get(10) == None and (5..).get(2) == Some(7)
+}
