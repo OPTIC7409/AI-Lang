@@ -148,3 +148,42 @@ test "first and last of a set, index_of on a range" {
   assert (5..10).index_of(7) == Some(2)
   assert (5..10).index_of(10) == None
 }
+
+var grid = [[0, 0], [0, 0]]
+
+test "nested index writes keep copies apart" {
+  var g = [[1, 2], [3, 4]]
+  let snapshot = g
+  g[0][1] = 9
+  g[1][-1] += 10
+  assert g == [[1, 9], [3, 14]]
+  assert snapshot == [[1, 2], [3, 4]]
+  var deep = [[[0]]]
+  deep[0][0][0] += 5
+  assert deep == [[[5]]]
+  assert catch(fn() => { var h = [[1]]; h[0][3] = 2; h }).is_err()
+  var s = [["a"]]
+  s[0][0] += "b"
+  assert s == [["ab"]]
+  var f = [[1.5]]
+  f[0][0] *= 2
+  assert f == [[3.0]]
+}
+
+test "nested index writes on a global" {
+  let before = grid
+  grid[1][0] = 7
+  grid[0][0] += 1
+  assert grid == [[1, 0], [7, 0]]
+  assert before == [[0, 0], [0, 0]]
+  assert grid[1][0] == 7 and grid[-1][0] == 7
+}
+
+test "string indexing gives one-character strings" {
+  let s = "héllo"
+  assert s[0] == "h" and s[1] == "é" and s[-1] == "o"
+  var t = s[0]
+  t += "i"
+  assert t == "hi" and s[0] == "h"
+  assert [c for c in "ab"] == ["a", "b"]
+}

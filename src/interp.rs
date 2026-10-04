@@ -831,7 +831,7 @@ impl Interp {
         self.assign_value(target, op, rhs, decl, env)
     }
 
-    fn assign_value(&mut self, target: &Expr, op: Option<BinOp>, rhs: Value, decl: Option<&Ty>, env: &mut Env) -> R<()> {
+    fn assign_value(&mut self, target: &Expr, op: Option<BinOp>, mut rhs: Value, decl: Option<&Ty>, env: &mut Env) -> R<()> {
         let span = target.span;
         // `i += 1` on a local Int.
         if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), Some(op), None | Some(Ty::Int)) = (&target.kind, op, decl) {
@@ -881,6 +881,13 @@ impl Interp {
                 _ => {}
             }
         }
+        // Fast path: `grid[i][j] = v` (or `op=`) on an untyped list of lists.
+        if decl.is_none() && self.ctx.invariants.is_empty() && matches!(target.kind, ExprKind::Index { .. }) {
+            match self.nested_index_assign(target, op, rhs, env)? {
+                Ok(()) => return Ok(()),
+                Err(back) => rhs = back,
+            }
+        }
         // Fast path: `xs[i] = v` or `m[k] = v` on a local list or map, with
         // no declared type or a declared `List[T]` (the common case in loops).
         if let ExprKind::Index { target: t, index } = &target.kind {
@@ -903,6 +910,83 @@ impl Interp {
         }
         let (root, steps) = self.eval_place(target, env)?;
         self.assign_at(root, steps, op, rhs, decl, span, env)
+    }
+
+    /// `a[i][j] = v` (or `op=`, or deeper) on a local list of lists, or
+    /// `a[i]...` on a global one, when the indexes are Ints in range and
+    /// computing them has no effects. Gives `rhs` back for the general path.
+    fn nested_index_assign(&mut self, target: &Expr, op: Option<BinOp>, rhs: Value, env: &mut Env) -> R<Result<(), Value>> {
+        const MAX: usize = 4;
+        let mut chain: [Option<&Expr>; MAX] = [None; MAX];
+        let mut n = 0;
+        let mut e = target;
+        while let ExprKind::Index { target: t, index } = &e.kind {
+            if n == MAX || !pure_index(index) {
+                return Ok(Err(rhs));
+            }
+            chain[n] = Some(index);
+            n += 1;
+            e = t;
+        }
+        // (A single index on a local has its own fast path.)
+        let (slot, global) = match &e.kind {
+            ExprKind::Var(Var { res: VarRes::Local(s), .. }) if n >= 2 => (*s as usize, false),
+            ExprKind::Var(Var { res: VarRes::Global(s), name }) if self.busy_error(*s, name, "changed", e.span).is_none() => (*s as usize, true),
+            _ => return Ok(Err(rhs)),
+        };
+        // The indexes, outermost first (the chain was collected innermost first).
+        let mut idx = [0i64; MAX];
+        for k in 0..n {
+            match self.eval(chain[n - 1 - k].unwrap_or(target), env)? {
+                Value::Int(i) => idx[k] = i,
+                _ => return Ok(Err(rhs)),
+            }
+        }
+        let mut root = if global {
+            match self.globals[slot].take() {
+                Some(v) => v,
+                None => return Ok(Err(rhs)),
+            }
+        } else {
+            std::mem::take(&mut env.locals[slot])
+        };
+        let r = self.write_nested(&mut root, &idx[..n], op, rhs, target.span);
+        if global {
+            self.globals[slot] = Some(root);
+        } else {
+            env.locals[slot] = root;
+        }
+        r
+    }
+
+    /// The write of `nested_index_assign`, inside `root`.
+    fn write_nested(&mut self, root: &mut Value, idx: &[i64], op: Option<BinOp>, rhs: Value, span: Span) -> R<Result<(), Value>> {
+        let mut cur = root;
+        for &i in &idx[..idx.len() - 1] {
+            match cur {
+                Value::List(xs) => match norm_index(i, xs.len()) {
+                    Some(j) => cur = &mut Rc::make_mut(xs)[j],
+                    None => return Ok(Err(rhs)),
+                },
+                _ => return Ok(Err(rhs)),
+            }
+        }
+        let Value::List(xs) = cur else { return Ok(Err(rhs)) };
+        let Some(j) = norm_index(idx[idx.len() - 1], xs.len()) else { return Ok(Err(rhs)) };
+        let quick = match (op, &xs[j], &rhs) {
+            (Some(op), Value::Int(x), Value::Int(y)) => int_binop(op, *x, *y),
+            _ => None,
+        };
+        let nv = match (quick, op) {
+            (Some(v), _) => v,
+            (None, None) => rhs,
+            (None, Some(op)) => {
+                let old = xs[j].clone();
+                self.binop(op, old, rhs, span)?
+            }
+        };
+        Rc::make_mut(xs)[j] = nv;
+        Ok(Ok(()))
     }
 
     /// `xs[i] = v` (or `xs[i] op= v`) on a local list or map. Returns `None`
@@ -1508,9 +1592,65 @@ impl Interp {
             let v = env.locals[*s as usize].clone();
             return self.index_value(v, i, span);
         }
+        if let Some(v) = self.nested_read(target, index, env)? {
+            return Ok(v);
+        }
         let v = self.eval(target, env)?;
         let i = self.eval(index, env)?;
         self.index_general(v, i, index, span)
+    }
+
+    /// `grid[i][j]` on a local list of lists, or `g[i]...` on a global
+    /// one: walk to the element without copying the handles of the lists
+    /// on the way. `None` when the general path is needed (it computes the
+    /// indexes again, which is harmless: they have no effects).
+    fn nested_read(&mut self, target: &Expr, index: &Expr, env: &mut Env) -> R<Option<Value>> {
+        const MAX: usize = 4;
+        let mut chain: [Option<&Expr>; MAX] = [Some(index), None, None, None];
+        let mut n = 1;
+        let mut e = target;
+        while let ExprKind::Index { target: t, index } = &e.kind {
+            if n == MAX {
+                return Ok(None);
+            }
+            chain[n] = Some(index);
+            n += 1;
+            e = t;
+        }
+        let (slot, global) = match &e.kind {
+            ExprKind::Var(Var { res: VarRes::Local(s), .. }) if n >= 2 => (*s as usize, false),
+            ExprKind::Var(Var { res: VarRes::Global(s), .. }) => (*s as usize, true),
+            _ => return Ok(None),
+        };
+        if !chain[..n].iter().all(|x| x.is_some_and(pure_index)) {
+            return Ok(None);
+        }
+        let mut idx = [0i64; MAX];
+        for k in 0..n {
+            match self.eval(chain[n - 1 - k].unwrap_or(index), env)? {
+                Value::Int(i) => idx[k] = i,
+                _ => return Ok(None),
+            }
+        }
+        let root = if global {
+            match &self.globals[slot] {
+                Some(v) => v,
+                None => return Ok(None),
+            }
+        } else {
+            &env.locals[slot]
+        };
+        let mut cur = root;
+        for &i in &idx[..n] {
+            match cur {
+                Value::List(xs) => match norm_index(i, xs.len()) {
+                    Some(j) => cur = &xs[j],
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some(cur.clone()))
     }
 
     /// A call that `call_simple` does not handle (named arguments, contracts,
@@ -1833,9 +1973,8 @@ impl Interp {
                 }
             }
             Value::Str(s) => {
-                let mut buf = [0u8; 4];
                 for c in s.chars() {
-                    self.bind_loop(pat, Value::str(&*c.encode_utf8(&mut buf)), env)?;
+                    self.bind_loop(pat, Value::char_str(c), env)?;
                     run_body!();
                 }
             }
@@ -1882,7 +2021,7 @@ impl Interp {
                 }
                 None => Err(self.err(span, "E0216", "cannot collect an unbounded range").map_help("give the range an end: `0..n`")),
             },
-            Value::Str(s) => Ok(s.chars().map(|c| Value::str(c.to_string())).collect()),
+            Value::Str(s) => Ok(s.chars().map(Value::char_str).collect()),
             Value::Map(m) => Ok(m.entries.iter().map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()])).collect()),
             Value::Set(m) => Ok(m.entries.iter().map(|(k, _)| k.clone()).collect()),
             other => Err(self.fail(self.not_iterable(&other, span))),
@@ -1978,7 +2117,7 @@ impl Interp {
             (Value::Str(s), Value::Int(i)) => {
                 let n = s.char_len();
                 match norm_index(*i, n) {
-                    Some(i) => Ok(Value::str(s.char_at(i).unwrap_or(""))),
+                    Some(i) => Ok(Value::str_of_char(s.char_at(i).unwrap_or(""))),
                     None => Err(self.err(span, "E0204", format!("index {} is out of bounds for a string of length {}", i, n))),
                 }
             }
@@ -3623,6 +3762,17 @@ fn mentions_generic(t: &Ty) -> bool {
 }
 
 /// An index expression made only of locals, Int literals and arithmetic.
+/// An index computed from variables, Int literals and arithmetic: it has
+/// no effects, so computing it twice is harmless.
+fn pure_index(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Var(_) | ExprKind::Int(_) => true,
+        ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloorDiv | BinOp::Mod, lhs, rhs } => pure_index(lhs) && pure_index(rhs),
+        ExprKind::Unary { op: UnOp::Neg, expr } => pure_index(expr),
+        _ => false,
+    }
+}
+
 fn simple_index(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Var(Var { res: VarRes::Local(_), .. }) | ExprKind::Int(_) => true,

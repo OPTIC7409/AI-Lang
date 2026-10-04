@@ -552,6 +552,28 @@ impl Value {
         Value::Str(Rc::new(Text::new(s.into())))
     }
 
+    /// A one-character string. The ASCII ones are shared, so that indexing
+    /// a string or looping over its characters does not allocate.
+    pub fn char_str(c: char) -> Value {
+        thread_local! {
+            static ASCII: Vec<Value> = (0u8..128).map(|b| Value::str((b as char).to_string())).collect();
+        }
+        if c.is_ascii() {
+            ASCII.with(|t| t[c as usize].clone())
+        } else {
+            Value::str(c.to_string())
+        }
+    }
+
+    /// A string that is one character (or empty): shared when it is ASCII.
+    pub fn str_of_char(s: &str) -> Value {
+        let mut cs = s.chars();
+        match (cs.next(), cs.next()) {
+            (Some(c), None) => Value::char_str(c),
+            _ => Value::str(s),
+        }
+    }
+
     pub fn list(v: Vec<Value>) -> Value {
         Value::List(Rc::new(List::new(v)))
     }

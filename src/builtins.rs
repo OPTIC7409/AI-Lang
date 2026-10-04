@@ -968,7 +968,7 @@ fn b_ord(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 fn b_chr(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let n = int_arg(it, &a, 0, "chr", sp)?;
     match u32::try_from(n).ok().and_then(char::from_u32) {
-        Some(c) => Ok(Value::str(c.to_string())),
+        Some(c) => Ok(Value::char_str(c)),
         None => Err(it.err(sp, "E0216", format!("{} is not a valid Unicode code point", n))),
     }
 }
@@ -1612,7 +1612,7 @@ fn m_swap(it: &mut Interp, t: &mut Value, a: Vec<Value>, sp: Span) -> R {
 fn get_impl(it: &mut Interp, a: &[Value], sp: Span, name: &str) -> R<Option<Value>> {
     Ok(match (&a[0], &a[1]) {
         (Value::List(xs), Value::Int(i)) | (Value::Tuple(xs), Value::Int(i)) => norm_index(*i, xs.len()).map(|j| xs[j].clone()),
-        (Value::Str(s), Value::Int(i)) => norm_index(*i, s.char_len()).map(|j| Value::str(s.char_at(j).unwrap_or(""))),
+        (Value::Str(s), Value::Int(i)) => norm_index(*i, s.char_len()).map(|j| Value::str_of_char(s.char_at(j).unwrap_or(""))),
         (Value::Map(m), k) => m.get(k).cloned(),
         (Value::Record(r), Value::Str(k)) => r.get(k).cloned(),
         (Value::Range(r), Value::Int(i)) => r.nth(*i).map(Value::Int),
@@ -1634,7 +1634,7 @@ fn b_get_or(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 fn b_first(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let r = match &a[0] {
         Value::List(xs) | Value::Tuple(xs) => xs.first().cloned(),
-        Value::Str(s) => s.chars().next().map(|c| Value::str(c.to_string())),
+        Value::Str(s) => s.chars().next().map(Value::char_str),
         Value::Range(r) => {
             if r.len() == Some(0) {
                 None
@@ -1652,7 +1652,7 @@ fn b_first(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 fn b_last(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let r = match &a[0] {
         Value::List(xs) | Value::Tuple(xs) => xs.last().cloned(),
-        Value::Str(s) => s.chars().last().map(|c| Value::str(c.to_string())),
+        Value::Str(s) => s.chars().last().map(Value::char_str),
         Value::Range(r) => match r.end {
             Some(e) if e > r.start as i128 => Some(Value::Int((e - 1) as i64)),
             Some(_) => None,
@@ -2414,7 +2414,7 @@ fn b_split(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
         let mut rest = s;
         while out.len() + 1 < n {
             let Some(c) = rest.chars().next() else { break };
-            out.push(Value::str(c.to_string()));
+            out.push(Value::char_str(c));
             rest = &rest[c.len_utf8()..];
         }
         if !rest.is_empty() {
@@ -2464,7 +2464,7 @@ fn b_words(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 
 fn b_chars(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = str_arg(it, &a, 0, "chars", sp)?;
-    Ok(Value::list(s.chars().map(|c| Value::str(c.to_string())).collect()))
+    Ok(Value::list(s.chars().map(Value::char_str).collect()))
 }
 
 fn str_map(it: &mut Interp, a: &[Value], sp: Span, name: &str, f: fn(&str) -> String) -> R {
