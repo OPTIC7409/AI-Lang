@@ -1825,7 +1825,7 @@ enum Kind {
 fn builtin_kinds(name: &str) -> &'static [Kind] {
     use Kind::*;
     match name {
-        "lines" | "words" | "chars" | "trim" | "trim_start" | "trim_end" | "upper" | "lower" | "capitalize" | "is_digit" | "is_alpha"
+        "lines" | "words" | "chars" | "bytes" | "trim" | "trim_start" | "trim_end" | "upper" | "lower" | "capitalize" | "is_digit" | "is_alpha"
         | "is_alnum" | "is_space" | "is_upper" | "is_lower" | "parse_float" | "ord" | "read_file" | "file_exists" | "list_dir" | "env"
         | "parse_json" => &[Str],
         "split_once" | "strip_prefix" | "strip_suffix" | "starts_with" | "ends_with" | "write_file" | "append_file" => &[Str, Str],
@@ -1924,6 +1924,8 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
         "is_empty" | "contains" | "starts_with" | "ends_with" | "is_digit" | "is_alpha" | "is_alnum" | "is_space" | "is_upper" | "is_lower"
         | "is_some" | "is_none" | "is_ok" | "is_err" | "has" | "any" | "all" | "file_exists" | "is_nan" => Ty::Bool,
         "split" | "lines" | "words" | "chars" | "args" => list(Ty::Str),
+        "bytes" => list(Ty::Int),
+        "from_bytes" => option(Ty::Str),
         "parse_int" | "index_of" | "find_index" => option(Ty::Int),
         "parse_float" => option(Ty::Float),
         "read_line" | "env" => option(Ty::Str),

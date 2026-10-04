@@ -98,3 +98,10 @@ test "raw strings inside interpolations" {
   assert "{r"a{b"}" == "a\{b"
   assert "{r#"a"b"#}" == "a\"b"
 }
+
+test "bytes and from_bytes convert to and from UTF-8" {
+  assert "héllo".bytes() == [104, 195, 169, 108, 108, 111]
+  assert from_bytes("héllo".bytes()) == Some("héllo")
+  assert from_bytes([255]) == None
+  assert from_bytes([]) == Some("")
+}

@@ -198,3 +198,13 @@ test "every entry function over a map takes fn(k, v) or one (k, v) tuple" {
   assert m.filter(fn(k, _v) => k != "a") == ["b": 1, "c": 3]
   assert m.count(fn(_k, v) => v > 1) == 2
 }
+
+test "a bounded range is indexed from the end with negative indexes, like a list" {
+  assert (0..10)[-1] == 9
+  assert (5..=7)[-3] == 5
+  assert (0..10).get(-10) == Some(0)
+  assert catch(fn() => (0..10)[-11]).is_err()
+  for x in (1, "a") {
+    assert x == 1 or x == "a"
+  }
+}

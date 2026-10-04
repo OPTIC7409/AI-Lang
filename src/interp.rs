@@ -2133,7 +2133,8 @@ impl Interp {
                         .help("use `m.get(key)` (returns an Option) or `m.get_or(key, default)`"),
                 )),
             },
-            (Value::Range(r), Value::Int(i)) => match r.nth(*i).filter(|_| *i >= 0) {
+            // (Negative indexes count from the end, as for lists.)
+            (Value::Range(r), Value::Int(i)) => match r.nth(*i) {
                 Some(n) => Ok(Value::Int(n)),
                 None => {
                     let mut d = self.diag(span, "E0204", format!("index {} is out of bounds for the range", i));

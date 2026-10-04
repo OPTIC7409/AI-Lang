@@ -193,12 +193,12 @@ Hello, world!
 | `cogito test [PATHS]` | run `test` and `property` blocks |
 | `cogito verify FILE.cog` | check contracts against random inputs |
 | `cogito check [PATHS]` | report errors and warnings without running |
-| `cogito fix [PATHS]` | rewrite habits from other languages (`&&`, `!x`, `x++`, `null`, `elif`, `xs.length()`, ...) into Cogito |
+| `cogito fix PATHS` | rewrite habits from other languages (`&&`, `!x`, `x++`, `null`, `elif`, `// comment`, `x => x + 1`, `Math.floor(x)`, `xs.length`, ...) into Cogito; `--dry-run` only lists them |
 | `cogito fmt [--check] [PATHS]` | format files in the one canonical layout |
 | `cogito lsp` | language server for editors (errors as you type, quick fixes, format, hover, completion, go to definition) |
 | `cogito eval "CODE"` | run a snippet |
 | `cogito explain E0101` | explain an error code |
-| `cogito doc [NAME]` | built-in function reference |
+| `cogito doc [NAME]` | built-in function reference (NAME: a function, or a category such as `math`) |
 | `cogito doc FILE.cog` | a Markdown reference for a file: signatures, contracts and comments |
 | `cogito spec` | print the compact language specification |
 

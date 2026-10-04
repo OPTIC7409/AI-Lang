@@ -736,14 +736,17 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
             }
             let digits: String = self.src[ds..self.pos].chars().filter(|c| *c != '_').collect();
-            return match i64::from_str_radix(&digits, radix) {
+            // Hex, binary and octal literals are 64-bit patterns: those
+            // above max_int are negative (`0xffffffffffffffff` is -1), as
+            // for hash constants such as FNV's `0xcbf29ce484222325`.
+            return match u64::from_str_radix(&digits, radix) {
                 Ok(n) => {
-                    self.push(Tok::Int(n), start);
+                    self.push(Tok::Int(n as i64), start);
                     Ok(())
                 }
                 Err(e) if matches!(e.kind(), std::num::IntErrorKind::PosOverflow) => Err(self
                     .err("E0003", format!("integer literal `{}` is too large", &self.src[start..self.pos]), start, self.pos)
-                    .help("Int is a signed 64-bit integer (max 0x7fffffffffffffff)")),
+                    .help("a hex, binary or octal literal has at most 64 bits (max 0xffffffffffffffff, which is -1)")),
                 Err(_) => Err(self.err("E0003", format!("invalid base-{} literal `{}`", radix, &self.src[start..self.pos]), start, self.pos)),
             };
         }

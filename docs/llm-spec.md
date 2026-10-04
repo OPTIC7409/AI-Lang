@@ -20,7 +20,8 @@ program's `args()`.
 
 ## Lexical rules
 
-- Comments start with `#` and run to the end of the line.
+- Comments start with `#` and run to the end of the line (`//` is floor
+  division, not a comment).
 - Statements end at a newline (or `;`). Newlines inside `(...)` and `[...]`
   are ignored. A line starting with `.`, `|>`, `and` or `or` continues the
   previous line. A binary operator at the end of a line also continues it.
@@ -32,7 +33,10 @@ program's `args()`.
   while for in loop break continue match type test property requires ensures
   and or not true false import as assert where is`.
 - Numbers: `42`, `1_000`, `0xff`, `0b1010`, `0o17`, `3.14`, `1e-9`. Int is
-  64-bit signed; overflow is an error (never wraps).
+  64-bit signed; overflow is an error (never wraps). A hex, binary or octal
+  literal is a 64-bit pattern: above `max_int` it is negative
+  (`0xffffffffffffffff == -1`), so hash constants such as FNV's
+  `0xcbf29ce484222325` can be written as they are published.
 - Strings: `"..."` with escapes `\n \t \r \\ \" \0 \{ \} \u{1F600}`.
   `{` starts an interpolation: `"x = {x + 1}"`. Write `\{` for a literal `{`
   (`{{` is an error, not an escape); a lone `}` is literal. A format spec may
@@ -43,7 +47,9 @@ program's `args()`.
   `s` types also work (`{x:.2f}` is `{x:.2}`, `{x:f}` has 6 decimals). Parts combine in the
   order fill+align, `+`, `0`, width, `,`, `.precision`, type: `{x:>15,.2}`
   is `   1,234,567.89`, `{n:+08}` is `+0000042`, `{10:04x}` is `000a`.
-  A precision on a string truncates it (`{s:.3}`).
+  A precision on a string truncates it (`{s:.3}`). Alignment works on any
+  value, as its printed form (`{Red:>6}`, `{[1, 2]:^10}`). An interpolation
+  may contain string literals: `"{xs.join(", ")}"`.
   Width ≤ 1000, precision ≤ 100; for a computed width
   use `pad_left`/`pad_right`. Rounding to a precision rounds halves away from
   zero, like `round` (`"{2.5:.0}" == "3"`), using the Float's exact value
@@ -69,9 +75,9 @@ program's `args()`.
 | `List[T]` | `[1, 2, 3]`, `[..xs, 4]` | `xs[0]`, `xs[-1]`, `xs[1..3]`, `xs[2..]`, `xs[..2]` |
 | `Map[K, V]` | `["a": 1, "b": 2]`, empty `[:]` | insertion-ordered; `m[k]`, `m.get(k)`; equal regardless of order |
 | `Set[T]` | `to_set([1, 2])`, empty `to_set()` | distinct elements, insertion-ordered; `x in s`; equal regardless of order |
-| tuples | `(1, "a")`, `(x,)` | `t.0`, `t[1]` |
+| tuples | `(1, "a")`, `(x,)` | `t.0`, `t[1]`; `for x in t` |
 | records | `{ x: 1, y: 2 }`, `{ ..r, y: 5 }` | see Records below |
-| `Range` | `0..10`, `0..=10`, `0..` | Int only; end exclusive (`..=` inclusive) |
+| `Range` | `0..10`, `0..=10`, `0..` | Int only; end exclusive (`..=` inclusive); `r[i]`, `r[-1]` (bounded) |
 | `Option[T]` | `Some(x)`, `None` | built-in enum |
 | `Result[T, E]` | `Ok(x)`, `Err(e)` | built-in enum |
 | `Ordering` | `Less`, `Equal`, `Greater` | returned by `compare(a, b)` |
@@ -307,6 +313,7 @@ fn parse_age(s: Str) -> Result[Int, Str] {
 Bugs (index out of bounds, division by zero, overflow, failed contracts,
 `panic(msg)`) stop the program with a diagnostic and stack trace.
 `catch(fn() => expr)` converts such an error into `Err(message)` (for tests).
+It undoes nothing: a global changed before the error keeps its new value.
 
 ## Contracts
 
@@ -415,7 +422,8 @@ fn f(p: geo.Point) -> Float => ...   # qualified types
 ```
 
 Importing runs the module's top-level statements once (a module imported by
-several files is shared). Modules cannot import each other in a cycle
+several files is shared); a module's `main` is not called (call it as
+`geo.main()` if needed), so it may take parameters. Modules cannot import each other in a cycle
 (E0114): move what both need into a third module. Unqualified names
 from a module are not visible (`check` suggests the qualified name). Types
 from different modules may share a name, but they are different types (never
@@ -426,7 +434,9 @@ checked (`cogito check .` checks every file).
 ## Built-in functions (all callable as methods: `xs.map(f)`)
 
 Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`,
-`s.replace(from: "a", to: "b")`); `cogito doc NAME` shows every signature.
+`s.replace(from: "a", to: "b")`); `cogito doc NAME` shows every signature,
+and `cogito doc math` (or `strings`, `collections`, ...) one category. There
+are no namespaces such as `Math.` or `math.`: write `floor(x)`, `pi`.
 
 - **I/O**: `print(..)` `write(..)` (no newline; both join several arguments
   with a space) `eprint(..)` `input(prompt) -> Str` (`""` at end of input)
@@ -449,7 +459,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`,
   `min(xs) -> Option` / `min(a, b, ...)`, `max` likewise
 - **Math**: `abs sqrt pow exp ln log(x, base) log2 log10 sin cos tan asin acos
   atan atan2 hypot floor ceil trunc` (floor/ceil/trunc/round return Int),
-  `round(x, digits) -> Float`, `sign -> Int clamp(x, lo, hi) gcd lcm is_nan fixed(x, digits) -> Str` (gcd and lcm are never negative),
+  `round(x, digits) -> Float`, `sign -> Int clamp(x, lo, hi) gcd lcm is_nan fixed(x, digits) -> Str` (gcd and lcm are never negative; `fixed` allows up to 100 digits),
   `bit_and bit_or bit_xor bit_not shl shr` (`shl` fails on overflow; `shr`
   keeps the sign), `wrapping_add wrapping_sub wrapping_mul wrapping_shl`
   and `shr_logical` (zero-fill) (wrap around instead of failing, for hashes,
@@ -459,7 +469,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`,
 - **Collections** (lists; most also accept ranges, strings, tuples, sets, maps):
   `len is_empty range(end) range(start, end, step) first -> Option last -> Option get(i) -> Option
   get_or(key, default) push insert(i, x) remove(i) set(i, x) map filter
-  reduce(f) fold(init, f) sum product min_by(key) -> Option max_by(key) -> Option (the first on ties) sort sort_by(key)
+  reduce(f) (an error on an empty collection: use `fold`) fold(init, f) sum product min_by(key) -> Option max_by(key) -> Option (the first on ties) sort sort_by(key)
   sort_with(cmp) reverse contains index_of -> Option find -> Option
   find_index -> Option any(pred) all(pred) count(x) take drop
   take_while drop_while slice(start, end) zip enumerate flat_map flatten join(sep)
@@ -484,18 +494,20 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`,
   `if seen.insert!(next) { ... }`.
 - **Maps**: `keys values entries -> List[(K, V)] has merge(other)
   map_values(f)`, and `m.get(k) m.get_or(k, default) m.insert(k, v) m.remove(k)`. On a map,
-  `filter each count any all find partition` pass the key and value to a
-  two-parameter function (a one-parameter function gets a `(k, v)` tuple);
+  `filter each count any all find partition sort_by min_by max_by group_by`
+  pass the key and value to a two-parameter function (a one-parameter
+  function gets a `(k, v)` tuple);
   `map` is an error (use `map_values`, or `entries().map(...)`).
   `m.update!(k, default, f)` sets `m[k]` to `f(m[k])`, starting from the
   default when `k` is missing (`counts.update!(w, 0, fn(n) => n + 1)`);
   `update(m, k, default, f)` returns a new map.
 - **Strings**: `split(sep, limit)` (at most `limit` pieces, the last holding the rest; no sep: whitespace, with no limit) `split_once(sep) -> Option[(Str, Str)]`
-  `lines words chars trim trim_start trim_end upper lower capitalize` (uppercases
+  `lines words chars bytes trim trim_start trim_end upper lower capitalize` (uppercases
   only the first character) `starts_with ends_with strip_prefix(prefix) -> Option
   strip_suffix(suffix) -> Option replace(from, to) pad_left(width, fill = " ") pad_right(width, fill = " ")
   is_digit is_alpha is_alnum is_space is_upper is_lower (false for "") reverse repeat
-  count(x) index_of(x)`, slicing `s[1..3]`. A fill is one character;
+  count(x) index_of(x)`, slicing `s[1..3]`. `bytes()` is the UTF-8
+  encoding as Ints (0–255); `from_bytes(xs) -> Option[Str]` decodes it. A fill is one character;
   `split("")` gives the characters; `replace` and `split_once` with an empty pattern are errors.
 - **Option/Result**: `unwrap expect(message) unwrap_or(default) unwrap_or_else(f)
   is_some is_none is_ok is_err map(f) and_then(f) map_err(f) ok_or(err) ok err
@@ -518,7 +530,10 @@ Warnings: unused variables, unreachable code, ignored results of pure
 built-ins (`xs.sort()`), `?`/`return` inside anonymous functions, an
 ignored `Result` of your own function (use `let _ = f()` if that is
 intended), a value computed and dropped (`y == x + 1` on a line of its
-own, a test's last line without `assert`), and a function named like a
+own, a test's last line without `assert`, including a Bool from a call), a
+`match` arm after `_` or a bare name (which matches everything: W0010), a
+comparison that is always false because the types differ (W0009), and a
+function named like a
 built-in that calls itself by mistake (`cogito FILE` shows these warnings too, except unused variables).
 `cogito test --json` and `cogito verify --json` print one JSON object per
 test, property or function (`file`, `kind`, `name`, `status`, and for a
@@ -527,8 +542,10 @@ failure the `counterexample` and `diagnostic`), then a summary object.
 `severity`, `code`, `message`, `notes` and `fixes` always; `file`, `line`, `column`,
 `end_line`, `end_column`, `label` and `help` when the diagnostic has them.
 Each fix is an edit (`file`, `line`, `column`, `end_line`, `end_column`,
-`replacement`) that certainly fixes the problem; `cogito fix FILE` applies
-them all (checking again until none are left) and prints what it changed.
+`replacement`) that certainly fixes the problem; `cogito fix PATH...` applies
+them all (checking again until none are left; in imported modules too) and
+prints what it changed. `cogito fix --dry-run PATH...` only prints them, and
+exits with 1 when there is something to fix.
 Code inside a function passed to `catch` is not reported for failing:
 tests use `catch` to check that something fails.
 
@@ -565,13 +582,19 @@ These are the mistakes AI agents made most often while learning Cogito from
 this document. Each one is an error with a hint, but avoiding it saves a run.
 `cogito fix FILE` rewrites most of them (`&&`, `!x`, `x++`, `'text'`,
 `f"..."`, `null`, `True`, `elif`, `def`, `let mut`, `List<Int>`, `{"a": 1}`,
-`xs.length()`, `s.startsWith(p)`, a dropped `xs.sort()` on a `var`, ...).
+`xs.length()`, `xs.length`, `s.startsWith(p)`, `// comment`, `x => x + 1`,
+`Math.floor(x)`, `math.sqrt(x)`, `console.log(x)`, ...).
 
 - `if let` / `while let`: use `match`, or `is` for a test (`if r is Ok(_)`).
 - `c ? a : b`: use `if c { a } else { b }`. `?` only propagates errors.
 - `&&`, `||`, `!x`: use `and`, `or`, `not x`. `x++`: use `x += 1`.
 - `null`/`nil`: use `None` (an `Option`).
-- `let MAX = 10`: names of values start lowercase; uppercase is for types.
+- `let MAX = 10`, `const MAX = 10`: names of values start lowercase
+  (`let max_size = 10`); uppercase is for types and constructors.
+- `// comment`: comments start with `#`; `//` is floor division.
+- `x => x * 2`, `lambda x: x * 2`: write `fn(x) => x * 2`.
+- `match o { null => ..., Some(x) => ... }`: a lowercase name in a pattern
+  is a new variable that matches anything, so the arms after it never run.
 - `var m: Map[Str, Int] = {}`: `{}` is an empty block (an error as a
   `let`/`var` value). An empty map is `[:]`; a map literal is `["a": 1]`.
 - `"{"` in a string starts an interpolation; write `"\{"` for a brace.

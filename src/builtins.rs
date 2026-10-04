@@ -215,6 +215,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("strings", "lines", 1, 1, b_lines, "lines(s: Str) -> List[Str]\nSplit into lines."),
     b!("strings", "words", 1, 1, b_words, "words(s: Str) -> List[Str]\nSplit on whitespace."),
     b!("strings", "chars", 1, 1, b_chars, "chars(s: Str) -> List[Str]\nThe characters, as one-character strings."),
+    b!("strings", "bytes", 1, 1, b_bytes, "bytes(s: Str) -> List[Int]\nThe UTF-8 encoding of s, as Ints from 0 to 255."),
+    b!("strings", "from_bytes", 1, 1, b_from_bytes, "from_bytes(xs: List[Int]) -> Option[Str]\nThe string whose UTF-8 encoding is xs; None if xs is not valid UTF-8."),
     b!("strings", "trim", 1, 1, b_trim, "trim(s: Str) -> Str\nRemove leading and trailing whitespace."),
     b!("strings", "trim_start", 1, 1, b_trim_start, "trim_start(s: Str) -> Str\nRemove leading whitespace."),
     b!("strings", "trim_end", 1, 1, b_trim_end, "trim_end(s: Str) -> Str\nRemove trailing whitespace."),
@@ -1188,7 +1190,10 @@ fn b_is_nan(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 }
 
 fn b_fixed(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
-    let d = usize_arg(it, &a, 1, "fixed", sp)?.min(100);
+    let d = usize_arg(it, &a, 1, "fixed", sp)?;
+    if d > 100 {
+        return Err(it.err(sp, "E0200", format!("`fixed` shows at most 100 digits after the point, not {}", d)));
+    }
     if let Value::Int(n) = a[0] {
         return Ok(Value::str(if d == 0 { n.to_string() } else { format!("{}.{}", n, "0".repeat(d)) }));
     }
@@ -2470,6 +2475,25 @@ fn b_words(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 fn b_chars(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = str_arg(it, &a, 0, "chars", sp)?;
     Ok(Value::list(s.chars().map(Value::char_str).collect()))
+}
+
+fn b_bytes(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let s = str_arg(it, &a, 0, "bytes", sp)?;
+    Ok(Value::list(s.bytes().map(|b| Value::Int(b as i64)).collect()))
+}
+
+fn b_from_bytes(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
+    let v = take_arg(&mut a, 0);
+    let xs = items(it, v, "from_bytes", 0, sp)?;
+    let mut out = Vec::with_capacity(xs.len());
+    for x in &xs {
+        match x {
+            Value::Int(b @ 0..=255) => out.push(*b as u8),
+            Value::Int(_) => return Ok(it.option(None)),
+            other => return Err(it.err(sp, "E0200", format!("`from_bytes` needs a list of Ints, but found {}", describe(other)))),
+        }
+    }
+    Ok(it.option(String::from_utf8(out).ok().map(Value::str)))
 }
 
 fn str_map(it: &mut Interp, a: &[Value], sp: Span, name: &str, f: fn(&str) -> String) -> R {

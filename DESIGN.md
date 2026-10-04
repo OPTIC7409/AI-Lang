@@ -609,6 +609,26 @@ Diagnostics carry those corrections as edits: `check --json` lists them,
 the language server offers them as quick fixes. An agent can apply the
 edits itself instead of reading the help text and retyping the line.
 
+The ninth round attacked the fixes themselves. A fix is applied without
+being read, so a wrong one is worse than none: it silently changes what
+the program means. Adversarial agents found several. `!a == b` became
+`not a == b`, which parses as `not (a == b)`. `xs.indexOf(x)` became
+`xs.index_of(x)`, which returns an Option where JavaScript returns -1,
+so `== -1` checks changed meaning. Some escapes in single-quoted strings
+were not converted. A `main()` call that was not the last statement was
+deleted, which moved output around.
+Each such fix now either checks its context (the precedence around `!`,
+the escapes in the string, the position of the call) or was removed and
+left as help text. The rule is that a fix appears only where the
+correction is certain. A test whose last line is a call returning a Bool
+gets a warning but no `assert` fix, because the test may expect `false`.
+The same round added fixes for JavaScript and Python habits: `// comment`,
+`x => x * 2`, `xs.length`, `Math.floor(x)`, `math.sqrt(x)` and
+`console.log`. It also made `verify` generate values that satisfy text
+invariants (`s.starts_with(p)`) and relations between fields, so that
+record types with invariants are tested on full values rather than mostly
+discarded ones.
+
 ## Future directions
 
 - Deeper static checking: the parameter types of functions passed to user
