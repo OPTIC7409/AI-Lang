@@ -1,0 +1,3 @@
+# expect: W0005
+fn sort(xs: List[Int]) -> List[Int] => xs.sort().reverse()
+print(sort([1, 3, 2]))

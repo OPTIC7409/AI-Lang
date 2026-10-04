@@ -136,3 +136,18 @@ test "functions are values" {
   let ops = [add, fn(a, b) => a * b]
   assert ops.map(fn(f) => f(3, 4)) == [7, 12]
 }
+
+test "Fn accepts functions of any arity" {
+  let h: Fn = fn(a, b) => a + b
+  assert h(1, 2) == 3
+  fn call2(f: Fn, a: Int, b: Int) -> Int => f(a, b)
+  assert call2(max, 3, 4) == 4
+}
+
+fn total!(xs: List[Float]) -> Float => xs.sum()
+
+test "a ! function that only reads keeps the caller's value" {
+  var ints: List[Int] = [1, 2]
+  assert total!(ints) == 3.0
+  assert ints == [1, 2] and type_of(ints[0]) == "Int"
+}

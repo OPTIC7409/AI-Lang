@@ -1603,11 +1603,7 @@ fn get_impl(it: &mut Interp, a: &[Value], sp: Span, name: &str) -> R<Option<Valu
         (Value::Str(s), Value::Int(i)) => norm_index(*i, s.char_len()).map(|j| Value::str(s.char_at(j).unwrap_or(""))),
         (Value::Map(m), k) => m.get(k).cloned(),
         (Value::Record(r), Value::Str(k)) => r.get(k).cloned(),
-        (Value::Range(r), Value::Int(i)) => match r.len() {
-            Some(n) => norm_index(*i, n).and_then(|j| r.start.checked_add(j as i64)).map(Value::Int),
-            // An endless range has every index from 0 up.
-            None => u64::try_from(*i).ok().and_then(|j| r.start.checked_add(j as i64)).map(Value::Int),
-        },
+        (Value::Range(r), Value::Int(i)) => r.nth(*i).map(Value::Int),
         (Value::List(_) | Value::Str(_) | Value::Range(_), other) => return Err(type_err(it, name, 1, "an Int index", other, sp)),
         (v, _) => return Err(type_err(it, name, 0, "a List, Str, Range or Map", v, sp)),
     })
@@ -2002,7 +1998,9 @@ fn b_take(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     match v {
         Value::Str(s) => Ok(Value::str(s.chars().take(n).collect::<String>())),
         Value::Range(r) => {
-            let count = r.len_u128().map_or(n as u128, |l| l.min(n as u128));
+            // (An endless range stops at max_int.)
+            let len = r.len_u128().unwrap_or((i64::MAX as i128 + 1 - r.start as i128) as u128);
+            let count = len.min(n as u128);
             if count > 100_000_000 {
                 return Err(it.err(sp, "E0216", format!("`take` of {} elements would be too large", count)));
             }

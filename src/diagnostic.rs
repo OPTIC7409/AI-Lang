@@ -152,6 +152,11 @@ impl Diagnostic {
         edits.join(", ")
     }
 
+    pub fn notes_from(mut self, note: Option<String>) -> Diagnostic {
+        self.notes.extend(note);
+        self
+    }
+
     pub fn maybe_help(mut self, help: Option<String>) -> Diagnostic {
         if help.is_some() {
             self.help = help;

@@ -186,7 +186,21 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
                 Item::Fn(def) => unused_values(&def.body, true, false, &mut out),
                 // (A test's last line is not its result: a condition there
                 // needs `assert`.)
-                Item::Test(t) => unused_values(&t.func.body, false, true, &mut out),
+                // (A test's last value is used: an `Err` fails the test. But a
+                // condition there checks nothing without `assert`.)
+                Item::Test(t) => {
+                    unused_values(&t.func.body, true, true, &mut out);
+                    if let ExprKind::Block(stmts) = &t.func.body.kind {
+                        if let Some(Stmt { kind: StmtKind::Expr(last), .. }) = stmts.last() {
+                            if matches!(
+                                last.kind,
+                                ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::And(..) | ExprKind::Or(..) | ExprKind::Bool(_)
+                            ) {
+                                unused_values(last, false, true, &mut out);
+                            }
+                        }
+                    }
+                }
                 Item::Property(p) => unused_values(&p.func.body, false, true, &mut out),
                 _ => {}
             }
@@ -247,25 +261,29 @@ fn unused_values(e: &Expr, used: bool, in_test: bool, out: &mut Vec<Diagnostic>)
         }
         _ => {}
     }
-    // (Only for a value that is not used: `has_calls` walks the subtree.)
-    let pure = !used
-        && matches!(
-            e.kind,
-            ExprKind::Int(_)
-                | ExprKind::Float(_)
-                | ExprKind::Str(_)
-                | ExprKind::Bool(_)
-                | ExprKind::Var(_)
-                | ExprKind::Field { .. }
-                | ExprKind::Index { .. }
-                | ExprKind::Binary { .. }
-                | ExprKind::Unary { .. }
-                | ExprKind::And(..)
-                | ExprKind::Or(..)
-                | ExprKind::Tuple(_)
-                | ExprKind::List(_)
-        )
-        && !has_calls(e);
+    // An operator's result is dropped even when its operands call
+    // functions (`add(2, 2) == 5`). (Otherwise only for a value that is not
+    // used: `has_calls` walks the subtree.)
+    let dropped_op = !used && matches!(e.kind, ExprKind::Binary { .. } | ExprKind::Unary { .. });
+    let pure = dropped_op
+        || !used
+            && matches!(
+                e.kind,
+                ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Str(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::Var(_)
+                    | ExprKind::Field { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Unary { .. }
+                    | ExprKind::And(..)
+                    | ExprKind::Or(..)
+                    | ExprKind::Tuple(_)
+                    | ExprKind::List(_)
+            )
+            && !has_calls(e);
     if !used && pure {
         let comparison = matches!(&e.kind, ExprKind::Binary { op: BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, .. });
         let d = match &e.kind {
@@ -1069,6 +1087,10 @@ impl<'a> Resolver<'a> {
                     let def = Rc::get_mut(def).unwrap();
                     self.resolve_fn(def, FnKind::Function, false, None);
                     self.check_hidden_builtin(def);
+                    // `main`'s value is dropped (unless it reports an error).
+                    if def.name.as_deref() == Some("main") && def.ret.is_none() {
+                        self.check_tail_discarded(&def.body);
+                    }
                 }
                 Item::Test(t) => {
                     let def = Rc::get_mut(&mut t.func).unwrap();
@@ -1373,7 +1395,7 @@ impl<'a> Resolver<'a> {
                         }
                         Ty::Set(Box::new(targs.pop().unwrap_or(Ty::Any)))
                     }
-                    "Fn" => Ty::Fn(vec![], Box::new(Ty::Any)),
+                    "Fn" => Ty::AnyFn,
                     _ => {
                         if let Some(i) = type_params.iter().position(|p| *p == name) {
                             Ty::Param(i as u32, name.clone())
@@ -1665,6 +1687,30 @@ impl<'a> Resolver<'a> {
     /// built-in.
     fn check_hidden_builtin(&mut self, def: &FnDef) {
         let (Some(name), Some(slot)) = (&def.name, def.global_slot) else { return };
+        // `fn sort(xs: List[Int]) => xs.sort().reverse()`: the call on the
+        // parameter itself comes back here, forever.
+        if def.overload_fallback.is_some() && def.params.first().is_some_and(|p| p.pat.is_none()) {
+            let fits = |n: usize| n >= def.required_params() && n <= def.params.len();
+            let param = VarRes::Local(def.params[0].slot);
+            if let Some(at) = find_call_on(&def.body, name, param, &|res, n| res == VarRes::Global(slot) && fits(n)) {
+                let p = &def.params[0];
+                let what = match &p.ty {
+                    Some(t) => format!("`{}` is {} {}, which your `{}` accepts", p.name, crate::diagnostic::a_an(&t.ty.to_string()), t.ty, name),
+                    None => format!("`{}` has no type, so your `{}` accepts every value", p.name, name),
+                };
+                let d = Diagnostic::warning("W0005", format!("this calls your `{}` again, not the built-in `{}`", name, name))
+                    .at(at)
+                    .label("calls this function again, with the same value")
+                    .note(format!("{}, so the call never reaches the built-in and never ends", what))
+                    .help(format!(
+                        "give your function another name (such as `my_{}`), so that `{}` here means the built-in",
+                        name.trim_end_matches('!'),
+                        name
+                    ));
+                self.diags.push(d);
+                return;
+            }
+        }
         if !def.mutating || def.overload_fallback.is_none() || def.params.iter().any(|p| p.ty.is_some() || p.pat.is_some()) {
             return;
         }
@@ -1837,7 +1883,7 @@ impl<'a> Resolver<'a> {
                     self.diags.push(d);
                 }
                 if let StmtKind::Expr(e) = &s.kind {
-                    self.check_discarded(e);
+                    self.check_tail_discarded(e);
                 }
             }
         }
@@ -1900,6 +1946,29 @@ impl<'a> Resolver<'a> {
 
     /// Warn when an expression statement throws away the result of a
     /// built-in that has no side effects (`xs.sort()` instead of `xs.sort!()`).
+    /// `e`'s value is dropped: check the calls whose results it drops
+    /// (the last line of a block, the arms of a `match`, ...).
+    fn check_tail_discarded(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Block(stmts) => {
+                if let Some(Stmt { kind: StmtKind::Expr(x), .. }) = stmts.last() {
+                    self.check_tail_discarded(x);
+                }
+            }
+            // (An `if` without `else` checks its own branch.)
+            ExprKind::If { then, els: Some(els), .. } => {
+                self.check_tail_discarded(then);
+                self.check_tail_discarded(els);
+            }
+            ExprKind::Match { arms, .. } => {
+                for a in arms.iter() {
+                    self.check_tail_discarded(&a.body);
+                }
+            }
+            _ => self.check_discarded(e),
+        }
+    }
+
     fn check_discarded(&mut self, e: &Expr) {
         let (name, res, mutating) = match &e.kind {
             ExprKind::MethodCall { method, mutating, .. } => (&method.name, method.res, *mutating),
@@ -2395,6 +2464,9 @@ impl<'a> Resolver<'a> {
                 self.expr(then);
                 if let Some(e) = els {
                     self.expr(e);
+                } else {
+                    // (Without `else`, the branch's value is dropped.)
+                    self.check_tail_discarded(then);
                 }
             }
             ExprKind::Match { scrutinee, arms } => {
@@ -2448,6 +2520,7 @@ impl<'a> Resolver<'a> {
                 self.cur().loops.push(false);
                 self.expr(body);
                 self.cur().loops.pop();
+                self.check_tail_discarded(body);
             }
             ExprKind::For { pat, iter, body } => {
                 self.expr(iter);
@@ -2456,12 +2529,14 @@ impl<'a> Resolver<'a> {
                 self.cur().loops.push(false);
                 self.expr(body);
                 self.cur().loops.pop();
+                self.check_tail_discarded(body);
                 self.pop_scope();
             }
             ExprKind::Loop { body } => {
                 self.cur().loops.push(true);
                 self.expr(body);
                 self.cur().loops.pop();
+                self.check_tail_discarded(body);
             }
             ExprKind::Break(v) => {
                 let has_value = v.is_some();
@@ -3202,6 +3277,35 @@ fn has_effects(e: &Expr, effects: &[&str]) -> bool {
 /// The first use of a variable with one of these names in an expression.
 /// A call `x.f.name(...)` or `name(x.f, ...)` (on a field) inside `e` for
 /// which `calls(resolution, argument count)` holds.
+/// A call of `name` on the variable `param` itself: `xs.sort()` or
+/// `sort(xs)`.
+fn find_call_on(e: &Expr, name: &str, param: VarRes, calls: &dyn Fn(VarRes, usize) -> bool) -> Option<Span> {
+    let is_param = |x: &Expr| matches!(&x.kind, ExprKind::Var(v) if v.res == param);
+    match &e.kind {
+        ExprKind::MethodCall { receiver, method, method_span, args, .. }
+            if &*method.name == name && is_param(receiver) && calls(method.res, args.len() + 1) =>
+        {
+            return Some(*method_span)
+        }
+        ExprKind::Call { callee, args }
+            if matches!(&callee.kind, ExprKind::Var(v) if &*v.name == name && calls(v.res, args.len()))
+                && args.first().is_some_and(|a| a.name.is_none() && is_param(&a.value)) =>
+        {
+            return Some(callee.span)
+        }
+        // (Inside a function value, the call may never happen.)
+        ExprKind::Lambda(_) => return None,
+        _ => {}
+    }
+    let mut found = None;
+    for_each_child(e, &mut |c| {
+        if found.is_none() {
+            found = find_call_on(c, name, param, calls);
+        }
+    });
+    found
+}
+
 fn find_field_call(e: &Expr, name: &str, calls: &dyn Fn(VarRes, usize) -> bool) -> Option<Span> {
     match &e.kind {
         ExprKind::MethodCall { receiver, method, method_span, args, .. }

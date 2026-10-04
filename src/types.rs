@@ -21,6 +21,8 @@ pub enum Ty {
     Tuple(Vec<Ty>),
     Record(Vec<(Name, Ty)>),
     Fn(Vec<Ty>, Box<Ty>),
+    /// `Fn`: any function, whatever its parameters.
+    AnyFn,
     /// A user-declared (or built-in Option/Result) type.
     Named {
         id: u32,
@@ -107,6 +109,7 @@ impl fmt::Display for Ty {
                 }
                 write!(f, " }}")
             }
+            Ty::AnyFn => write!(f, "Fn"),
             Ty::Fn(ps, r) => {
                 write!(f, "fn(")?;
                 for (i, t) in ps.iter().enumerate() {

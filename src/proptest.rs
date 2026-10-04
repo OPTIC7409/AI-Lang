@@ -353,7 +353,7 @@ impl<'a> Gen<'a> {
                 let td = self.it.ctx.types[*id as usize].clone();
                 self.named(&td, args, size as u32, depth)?
             }
-            Ty::Fn(..) => return Err(format!("cannot generate random functions (type `{}`)", ty)),
+            Ty::Fn(..) | Ty::AnyFn => return Err(format!("cannot generate random functions (type `{}`)", ty)),
             // Generic type parameters are instantiated with Int.
             Ty::Generic(_) | Ty::Param(..) => return self.value(&Ty::Int, size as u32, depth),
             Ty::Any => return Err(format!("cannot generate values of type `{}`; give the input a concrete type such as Int or List[Str]", ty)),

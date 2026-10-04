@@ -28,3 +28,10 @@ test "shifts" {
   assert wrapping_shl(3, 62) == -4611686018427387904
   assert shr(-8, 1) == -4 and shr_logical(-1, 60) == 15
 }
+
+test "an endless range stops at max_int" {
+  assert (max_int..).take(3) == [max_int]
+  assert (max_int..).get(1) == None
+  assert (-5..max_int).get(max_int) == Some(max_int - 5)
+  assert catch(fn() => (max_int..)[1]).is_err()
+}

@@ -1961,15 +1961,16 @@ impl Interp {
                         .help("use `m.get(key)` (returns an Option) or `m.get_or(key, default)`"),
                 )),
             },
-            (Value::Range(r), Value::Int(i)) => {
-                let len = r.len_u128();
-                let ok = *i >= 0 && len.is_none_or(|n| (*i as u128) < n);
-                if ok {
-                    Ok(Value::Int((r.start as i128 + *i as i128) as i64))
-                } else {
-                    Err(self.err(span, "E0204", format!("index {} is out of bounds for the range", i)))
+            (Value::Range(r), Value::Int(i)) => match r.nth(*i).filter(|_| *i >= 0) {
+                Some(n) => Ok(Value::Int(n)),
+                None => {
+                    let mut d = self.diag(span, "E0204", format!("index {} is out of bounds for the range", i));
+                    if r.end.is_none() && *i >= 0 {
+                        d = d.note("an endless range stops at max_int");
+                    }
+                    Err(self.fail(d))
                 }
-            }
+            },
             _ => Err(self.err(span, "E0211", format!("cannot index {} with {}", describe(&v), describe(&idx)))),
         }
     }
@@ -2451,6 +2452,7 @@ impl Interp {
             // A function type checks that the value can be called with that
             // many arguments; its parameter and result types are checked when
             // it is called.
+            (Ty::AnyFn, v) => v.is_callable(),
             (Ty::Fn(ps, _), v) => {
                 let n = ps.len();
                 match v {
@@ -2927,12 +2929,22 @@ impl Interp {
             }
         }
         self.stack.push(Frame { name: def.display_name(), call_span: span });
-        let r = self.call_body(&def, &mut env, filled, span);
+        let mut converted = want_first.then_some(None);
+        let r = self.call_body(&def, &mut env, filled, span, converted.as_mut());
         self.stack.pop();
         if r.is_err() && want_first && nparams > 0 {
             self.salvaged = Some(std::mem::take(&mut env.locals[def.params[0].slot as usize]));
         }
-        let first = if want_first && nparams > 0 && r.is_ok() { std::mem::take(&mut env.locals[def.params[0].slot as usize]) } else { Value::Unit };
+        let mut first =
+            if want_first && nparams > 0 && r.is_ok() { std::mem::take(&mut env.locals[def.params[0].slot as usize]) } else { Value::Unit };
+        // The first argument was converted to the parameter's type (Ints to
+        // Floats, a record to a declared record type) but not changed: the
+        // caller keeps its own value.
+        if let Some(Some((orig, conv))) = converted {
+            if same_value_ref(&first, &conv) {
+                first = orig;
+            }
+        }
         let locals = std::mem::take(&mut env.locals);
         self.give_vec(locals);
         Ok((r?, first))
@@ -3032,7 +3044,9 @@ impl Interp {
         r
     }
 
-    fn call_body(&mut self, def: &Rc<FnDef>, env: &mut Env, filled: u64, span: Span) -> R {
+    /// `converted`, for a `!` function: set to the first argument and its
+    /// conversion when it had to be converted to the parameter's type.
+    fn call_body(&mut self, def: &Rc<FnDef>, env: &mut Env, filled: u64, span: Span, mut converted: Option<&mut Option<(Value, Value)>>) -> R {
         for (i, p) in def.params.iter().enumerate() {
             if filled & (1 << i) == 0 {
                 match &p.default {
@@ -3073,8 +3087,14 @@ impl Interp {
                 };
                 if !fits {
                     let v = std::mem::take(&mut env.locals[p.slot as usize]);
+                    let orig = (i == 0 && converted.is_some()).then(|| v.clone());
                     match self.conform(v, &t.ty) {
-                        Ok(v) => env.locals[p.slot as usize] = v,
+                        Ok(v) => {
+                            if let (Some(o), Some(c)) = (orig, converted.as_deref_mut()) {
+                                *c = Some((o, v.clone()));
+                            }
+                            env.locals[p.slot as usize] = v
+                        }
                         Err(m) => {
                             let pname = match &p.pat {
                                 Some(pat) => self.snippet(pat.span),
@@ -3369,6 +3389,16 @@ impl Interp {
                 match self.conform(target.clone(), t) {
                     Ok(v) => target = v,
                     Err(m) => {
+                        // (The argument was converted to the parameter's type.)
+                        let param_note = match &f {
+                            Value::Func(c) => c.def.params.first().and_then(|p| p.ty.as_ref()).filter(|pt| Some(&pt.ty) != Some(t)).map(|pt| {
+                                format!(
+                                    "`{}` declares its first parameter as `{}`, so the value was converted to that type when the call started",
+                                    method.name, pt.ty
+                                )
+                            }),
+                            _ => None,
+                        };
                         let restored = match (backup, &updated_key, &old_entry, &mut target) {
                             (Some(old), ..) => {
                                 target = old;
@@ -3391,6 +3421,7 @@ impl Interp {
                                     "E0200",
                                     format!("`{}` broke the declared type of `{}`: {}", method.name, self.snippet(receiver.span), m),
                                 )
+                                .notes_from(param_note)
                                 .help(format!("the variable (or field) was declared with a type, and every change must respect it{}", restored)),
                             ),
                         )
@@ -3890,5 +3921,21 @@ fn declared_type_id(v: &Value) -> Option<u32> {
         Value::Record(r) => r.ty.as_ref().map(|t| t.id),
         Value::Variant(x) => Some(x.ty.id),
         _ => None,
+    }
+}
+
+/// Whether `a` is still `b`: the same allocation for a heap value (a write
+/// through a second reference copies it first), equal for a scalar.
+fn same_value_ref(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x.to_bits() == y.to_bits(),
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => Rc::ptr_eq(x, y),
+        (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => Rc::ptr_eq(x, y),
+        (Value::Map(x), Value::Map(y)) | (Value::Set(x), Value::Set(y)) => Rc::ptr_eq(x, y),
+        (Value::Record(x), Value::Record(y)) => Rc::ptr_eq(x, y),
+        (Value::Variant(x), Value::Variant(y)) => Rc::ptr_eq(x, y),
+        _ => false,
     }
 }

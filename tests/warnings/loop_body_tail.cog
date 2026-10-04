@@ -1,0 +1,5 @@
+# expect: W0006
+fn save(x: Int) -> Result[Unit, Str] => if x < 0 { Err("negative") } else { Ok(()) }
+for x in [1, -2] {
+  save(x)
+}

@@ -257,7 +257,7 @@ pub fn compatible(ctx: &Ctx, a: &Ty, e: &Ty) -> bool {
         }
         // A declared record is checked field by field against a structural annotation.
         (Ty::Named { .. }, Ty::Record(_)) => true,
-        (Ty::Fn(..), Ty::Fn(..)) => true,
+        (Ty::Fn(..) | Ty::AnyFn, Ty::Fn(..) | Ty::AnyFn) => true,
         _ => false,
     }
 }
@@ -1389,7 +1389,7 @@ impl<'a> Checker<'a> {
                     || unknown(r)
                     || (num(l) && num(r))
                     // Ranges, maps and functions have no order.
-                    || (l == r && !matches!(l, Ty::Range | Ty::Map(..) | Ty::Set(..) | Ty::Fn(..)))
+                    || (l == r && !matches!(l, Ty::Range | Ty::Map(..) | Ty::Set(..) | Ty::Fn(..) | Ty::AnyFn))
                     || matches!(
                         (l, r),
                         (Ty::List(_), Ty::List(_))
@@ -1589,7 +1589,7 @@ impl Kind {
                 Kind::Str => matches!(t, Ty::Str),
                 Kind::Int => matches!(t, Ty::Int),
                 Kind::Num => matches!(t, Ty::Int | Ty::Float),
-                Kind::Fn => matches!(t, Ty::Fn(..)),
+                Kind::Fn => matches!(t, Ty::Fn(..) | Ty::AnyFn),
                 Kind::Set => matches!(t, Ty::Set(_)),
                 // (`len` of a record is its number of fields.)
                 Kind::Sized => {

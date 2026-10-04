@@ -268,6 +268,15 @@ impl RangeVal {
         self.len() == Some(0)
     }
 
+    /// The `i`-th element (counting from the end when negative, for a
+    /// bounded range). An endless range stops at `max_int`.
+    pub fn nth(&self, i: i64) -> Option<i64> {
+        let end = self.end.unwrap_or(i64::MAX as i128 + 1);
+        let len = (end - self.start as i128).max(0);
+        let j = if i < 0 && self.end.is_some() { i as i128 + len } else { i as i128 };
+        (j >= 0 && j < len).then(|| (self.start as i128 + j) as i64)
+    }
+
     pub fn contains(&self, n: i64) -> bool {
         n >= self.start && self.end.is_none_or(|e| (n as i128) < e)
     }
