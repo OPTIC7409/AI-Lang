@@ -63,6 +63,7 @@ pub mod proptest;
 pub mod repl;
 pub mod resolver;
 pub mod span;
+pub mod symbols;
 pub mod testing;
 pub mod typecheck;
 pub mod types;

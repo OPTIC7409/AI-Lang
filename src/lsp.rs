@@ -100,6 +100,8 @@ impl Server {
                             ("hoverProvider", Json::Bool(true)),
                             ("documentSymbolProvider", Json::Bool(true)),
                             ("definitionProvider", Json::Bool(true)),
+                            ("referencesProvider", Json::Bool(true)),
+                            ("renameProvider", Json::obj(vec![("prepareProvider", Json::Bool(true))])),
                             ("completionProvider", Json::obj(vec![("triggerCharacters", Json::Arr(vec![Json::str(".")]))])),
                             (
                                 "codeActionProvider",
@@ -139,6 +141,18 @@ impl Server {
             "textDocument/definition" => vec![reply(id, self.definition(&uri, params.get("position")))],
             "textDocument/completion" => vec![reply(id, self.completion(&uri, params.get("position")))],
             "textDocument/codeAction" => vec![reply(id, self.code_actions(&uri, params.get("range")))],
+            "textDocument/references" => {
+                let with_decl = !matches!(params.get("context").get("includeDeclaration"), Json::Bool(false));
+                vec![reply(id, self.references(&uri, params.get("position"), with_decl))]
+            }
+            "textDocument/prepareRename" => vec![reply(id, self.prepare_rename(&uri, params.get("position")))],
+            "textDocument/rename" => {
+                let new_name = params.get("newName").as_str().unwrap_or("").to_string();
+                match self.rename(&uri, params.get("position"), &new_name) {
+                    Ok(edit) => vec![reply(id, edit)],
+                    Err(msg) => vec![error_reply(id, -32803, &msg)],
+                }
+            }
             _ if !id.is_null() => vec![error_reply(id, -32601, &format!("method not supported: {}", method))],
             _ => vec![],
         }
@@ -383,10 +397,129 @@ impl Server {
         Json::Arr(out)
     }
 
+    /// The occurrences of every variable and function in the document (from
+    /// its resolved program, even if it has errors elsewhere).
+    fn index(&self, uri: &str) -> Option<Vec<crate::symbols::Occurrence>> {
+        index_of(self.text(uri), &uri_to_path(uri))
+    }
+
+    /// The occurrences of the name at `pos` (all of the same symbol).
+    fn same_symbol(&self, uri: &str, pos: &Json) -> Option<Vec<crate::symbols::Occurrence>> {
+        let offset = LineIndex::new(self.text(uri)).offset(pos)?;
+        let index = self.index(uri)?;
+        let here = index.iter().find(|o| o.span.start as usize <= offset && offset <= o.span.end as usize)?.sym;
+        Some(index.into_iter().filter(|o| o.sym == here).collect())
+    }
+
+    fn references(&self, uri: &str, pos: &Json, with_decl: bool) -> Json {
+        let lines = LineIndex::new(self.text(uri));
+        let Some(occs) = self.same_symbol(uri, pos) else { return Json::Null };
+        let locations = occs
+            .iter()
+            .filter(|o| with_decl || !o.decl)
+            .map(|o| Json::obj(vec![("uri", Json::str(uri)), ("range", lines.range(o.span.start as usize, o.span.end as usize))]))
+            .collect();
+        Json::Arr(locations)
+    }
+
+    /// The name at `pos`, if it can be renamed: a variable or function
+    /// declared in this document.
+    fn prepare_rename(&self, uri: &str, pos: &Json) -> Json {
+        let text = self.text(uri);
+        let lines = LineIndex::new(text);
+        let Some(offset) = lines.offset(pos) else { return Json::Null };
+        let Some(occs) = self.same_symbol(uri, pos) else { return Json::Null };
+        if !occs.iter().any(|o| o.decl) {
+            return Json::Null;
+        }
+        match occs.iter().find(|o| o.span.start as usize <= offset && offset <= o.span.end as usize) {
+            Some(o) => Json::obj(vec![
+                ("range", lines.range(o.span.start as usize, o.span.end as usize)),
+                ("placeholder", Json::str(&text[o.span.start as usize..o.span.end as usize])),
+            ]),
+            None => Json::Null,
+        }
+    }
+
+    /// Rename the variable or function at `pos` everywhere in the document,
+    /// unless the new name would change what any name refers to.
+    fn rename(&self, uri: &str, pos: &Json, new_name: &str) -> Result<Json, String> {
+        let text = self.text(uri);
+        let occs = self
+            .same_symbol(uri, pos)
+            .filter(|o| o.iter().any(|o| o.decl))
+            .ok_or("only a variable or function declared in this file can be renamed")?;
+        let old = &text[occs[0].span.start as usize..occs[0].span.end as usize];
+        let base = new_name.strip_suffix('!').unwrap_or(new_name);
+        let valid = base.starts_with(|c: char| c.is_lowercase() || c == '_')
+            && base.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && new_name.ends_with('!') == old.ends_with('!')
+            && !crate::lexer::KEYWORDS.contains(&new_name);
+        if !valid {
+            let bang = if old.ends_with('!') { ", ending in `!`" } else { ", without `!`" };
+            return Err(format!("`{}` is not a valid name here: it must start with a lowercase letter or `_`{}", new_name, bang));
+        }
+        let edits: Vec<(usize, usize, String)> = occs
+            .iter()
+            .map(|o| {
+                let replacement = match &o.field {
+                    Some(f) => format!("{}: {}", f, new_name),
+                    None => new_name.to_string(),
+                };
+                (o.span.start as usize, o.span.end as usize, replacement)
+            })
+            .collect();
+        // Every other name must keep referring to what it did: compare which
+        // occurrences share a symbol, before and after.
+        let mut renamed = text.to_string();
+        for (start, end, rep) in edits.iter().rev() {
+            renamed.replace_range(*start..*end, rep);
+        }
+        let shift = |offset: usize| -> usize {
+            let mut at = offset as isize;
+            for (start, end, rep) in &edits {
+                if *end <= offset {
+                    at += rep.len() as isize - (end - start) as isize;
+                }
+            }
+            at as usize
+        };
+        let groups = |occs: &[crate::symbols::Occurrence], map: &dyn Fn(usize) -> usize| {
+            let mut by_sym: HashMap<crate::symbols::Sym, Vec<usize>> = HashMap::new();
+            for o in occs {
+                by_sym.entry(o.sym).or_default().push(map(o.span.start as usize));
+            }
+            let mut groups: Vec<Vec<usize>> = by_sym.into_values().collect();
+            groups.sort();
+            groups
+        };
+        let path = uri_to_path(uri);
+        let before = index_of(text, &path).unwrap_or_default();
+        let after = index_of(&renamed, &path).ok_or("the renamed program does not parse")?;
+        // (A renamed shorthand field `{ x }` becomes `{ x: y }`: the name moves.)
+        let moved = |start: usize| {
+            let field = occs.iter().find(|o| o.span.start as usize == start).and_then(|o| o.field.as_ref());
+            shift(start) + field.map_or(0, |f| f.len() + 2)
+        };
+        let before_groups = groups(&before, &moved);
+        let after_groups = groups(&after, &|start| start);
+        if before_groups != after_groups {
+            return Err(format!("renaming `{}` to `{}` would change what other names refer to", old, new_name));
+        }
+        let lines = LineIndex::new(text);
+        let changes: Vec<Json> =
+            edits.iter().map(|(start, end, rep)| Json::obj(vec![("range", lines.range(*start, *end)), ("newText", Json::str(rep))])).collect();
+        Ok(Json::obj(vec![("changes", Json::obj(vec![(uri, Json::Arr(changes))]))]))
+    }
+
     fn definition(&self, uri: &str, pos: &Json) -> Json {
         let text = self.text(uri);
         let lines = LineIndex::new(text);
         let Some(offset) = lines.offset(pos) else { return Json::Null };
+        // A variable or function: where it is declared in this document.
+        if let Some(decl) = self.same_symbol(uri, pos).and_then(|occs| occs.into_iter().find(|o| o.decl)) {
+            return Json::obj(vec![("uri", Json::str(uri)), ("range", lines.range(decl.span.start as usize, decl.span.end as usize))]);
+        }
         let Some((word, _, _)) = word_at(text, offset) else { return Json::Null };
         let Ok(prog) = crate::parser::parse_program(text, 0) else { return Json::Null };
         match find_declaration(&prog, &word) {
@@ -620,6 +753,18 @@ impl<'a> LineIndex<'a> {
         }
         Some(end)
     }
+}
+
+/// The occurrences of names in `text` (a document at `path`), from its
+/// resolved program.
+fn index_of(text: &str, path: &Path) -> Option<Vec<crate::symbols::Occurrence>> {
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let mut it = Interp::new();
+    let mut ns = Namespace::default();
+    let file = it.ctx.sm.add(path.display().to_string(), text);
+    let mut prog = crate::parser::parse_program(text, file).ok()?;
+    crate::resolver::resolve_program(&mut it.ctx, &mut prog, &mut ns, &dir, false);
+    Some(crate::symbols::occurrences(&prog, text))
 }
 
 /// The identifier (with a trailing `!`) at or just before a byte offset.

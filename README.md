@@ -195,7 +195,7 @@ Hello, world!
 | `cogito check [PATHS]` | report errors and warnings without running |
 | `cogito fix PATHS` | rewrite habits from other languages (`&&`, `!x`, `x++`, `null`, `elif`, `// comment`, `x => x + 1`, `Math.floor(x)`, `xs.length`, ...) into Cogito; `--dry-run` only lists them |
 | `cogito fmt [--check] [PATHS]` | format files in the one canonical layout |
-| `cogito lsp` | language server for editors (errors as you type, quick fixes, format, hover, completion, go to definition) |
+| `cogito lsp` | language server for editors (errors as you type, quick fixes, format, hover, completion, go to definition, find references, rename) |
 | `cogito eval "CODE"` | run a snippet |
 | `cogito explain E0101` | explain an error code |
 | `cogito doc [NAME]` | built-in function reference (NAME: a function, or a category such as `math`) |
@@ -203,7 +203,8 @@ Hello, world!
 | `cogito spec` | print the compact language specification |
 
 Editor support: `cogito lsp` is a language server (errors and warnings as
-you type, quick fixes, formatting, hover documentation, completion, outline, go to definition) that
+you type, quick fixes, formatting, hover documentation, completion, outline, go to definition,
+find references, rename) that
 works with any editor that speaks LSP. [editors/vscode](editors/vscode) is a
 VS Code extension that uses it, with setup notes for Neovim and Helix.
 
@@ -244,6 +245,7 @@ src/
   typecheck.rs   the gradual static type checker
   format.rs      `cogito fmt`
   lsp.rs         `cogito lsp`, the language server (with json.rs)
+  symbols.rs     where each name is declared and used (references, rename)
   platform.rs    clock and sleep, for native builds and WebAssembly
 web/             the browser playground (a WebAssembly build of the interpreter)
 tests/

@@ -351,6 +351,30 @@ fn language_server_reports_diagnostics() {
     let actions = recv();
     assert!(actions.contains("\"kind\":\"quickfix\"") && actions.contains("\"newText\":\"len\""), "{}", actions);
     assert!(actions.contains("Fix all 2 automatically fixable problems") && !actions.contains("size"), "{}", actions);
+    // Rename: every use of the variable (not the field of the same name),
+    // keeping a shorthand field's name; refused where it would change what
+    // another name refers to.
+    let src = "let total = 1\nfn f(p: { x: Int }) -> Int {\n  let { x } = p\n  x + total\n}\nprint(f({ x: 2 }))\n";
+    send(&format!(
+        r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"file:///tmp/x.cog","version":5}},"contentChanges":[{{"text":{}}}]}}}}"#,
+        cogito::json::Json::str(src)
+    ));
+    recv();
+    send(
+        r#"{"jsonrpc":"2.0","id":8,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"position":{"line":3,"character":2},"newName":"n"}}"#,
+    );
+    let edit = recv();
+    assert!(edit.contains("\"newText\":\"x: n\"") && edit.matches("\"newText\":\"n\"").count() == 1, "{}", edit);
+    send(
+        r#"{"jsonrpc":"2.0","id":9,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"position":{"line":0,"character":5},"newName":"x"}}"#,
+    );
+    let refused = recv();
+    assert!(refused.contains("would change what other names refer to"), "{}", refused);
+    send(
+        r#"{"jsonrpc":"2.0","id":10,"method":"textDocument/references","params":{"textDocument":{"uri":"file:///tmp/x.cog"},"position":{"line":0,"character":5},"context":{"includeDeclaration":true}}}"#,
+    );
+    let refs = recv();
+    assert_eq!(refs.matches("\"uri\"").count(), 2, "{}", refs);
     send(r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#);
     assert!(recv().contains("\"id\":2"));
     send(r#"{"jsonrpc":"2.0","method":"exit"}"#);

@@ -10,7 +10,9 @@ Support for [Cogito](../../README.md) (`.cog` files):
   **Fix All**, **Format Document**
   (`cogito fmt`), documentation on hover for built-ins and your own
   functions (and the inferred type of a variable), completion (names in scope, built-ins, a module's functions
-  after `module.`), the outline view, and **Go to Definition**.
+  after `module.`), the outline view, **Go to Definition** (local variables
+  too), **Find All References**, and **Rename Symbol** (it refuses a new
+  name that would change what another name refers to).
 
 To install locally, put `cogito` on your `PATH` (or set `cogito.path` in the
 settings), then install the extension's one dependency and link this folder
