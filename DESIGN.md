@@ -428,11 +428,47 @@ values like `0.1`, after which `verify` found the floating-point bug
 (`[0.1, 0.1, 0.1]`) on its own. That bug is now the demonstration in the
 README.
 
+A third round added a new area, applications split across modules (a bank
+ledger, a vending machine, a to-do manager with undo, a spreadsheet), in
+place of types and contracts:
+
+| Area | Round 1 | Round 2 | Round 3 |
+|---|---|---|---|
+| Algorithms and data structures | 7 of 11 | 7 of 12 | 7 of 10 |
+| Text processing, formatting, JSON, I/O | 2 of 10 | 7 of 10 | 4 of 10 |
+| Types, contracts and tests | 6 of 10 | 6 of 10 | |
+| Applications with modules | | | 7 of 10 |
+
+The numbers did not keep rising, and the failures say why. Of the twelve
+programs that failed on the first run, nine were the agents' own mistakes
+(a `{` in a string that started an interpolation, a function from another
+language, a wrong expected value, an algorithm bug), each with an error
+pointing at it. Three hit real bugs, all now fixed: zero-padded hex printed
+`" a"` instead of `"0a"`; a module's `push!` with more parameters than the
+built-in `push!` was rejected by the arity check; and a local function named
+like a built-in (`let get = fn(k) => m.get(k)`) called itself instead of
+the built-in. The adversarial agent found
+three ways to make `check` accept a match that then failed (list patterns
+whose prefix and suffix overlap, record patterns without `..`, and a search
+that gave up silently), and fourteen kinds of correct program that the type
+checker rejected; the checker now treats as unknown everything the runtime
+does not enforce (inferred type arguments, the result type in a
+`fn(A) -> B` annotation, fields beyond a structural annotation).
+
+Two changes came from watching `verify` on application code. Generated
+inputs rarely fitted together (a key was almost never in the generated
+map), so 5 of 14 contracts on state-machine functions went unchecked; the
+generator now reuses values it has already produced across parameters,
+which checked one such function 200 times where it had found 13 valid
+inputs in 4,000. And four of five `verify` failures were overflows from
+inputs such as `max_int`, which is right but tedious, so those reports now
+say how to rule such inputs out.
+
 ## Future directions
 
-- A third round of dogfooding, to see whether the first-try success rate
-  keeps rising now that the remaining failures are the agents' own mistakes.
-
+- A type-level invariant (`type Graph = {...} where ...`), so that `verify`
+  generates only well-formed values of a type and every constructor checks
+  it; most remaining `verify` noise is malformed generated structures.
 - Deeper static checking: arguments of built-ins, the parameter types of
   passed-in functions, and flow-sensitive types for reassigned `var`s.
 - A bytecode compiler for speed.
