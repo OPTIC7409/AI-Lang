@@ -2,20 +2,36 @@
 #   cogito examples/bank.cog      runs the program
 #   cogito verify examples/bank.cog  checks the contracts with random inputs
 
+# Every Account satisfies its `where` clause: it is checked whenever one is
+# built or changed, and `verify` generates only accounts that satisfy it.
 type Account = { owner: Str, balance: Int }
+  where balance >= 0 and balance <= 1_000_000_000_000
+
+let max_balance = 1_000_000_000_000
 
 type TxError =
   | InsufficientFunds(needed: Int, available: Int)
   | InvalidAmount(amount: Int)
+  | LimitExceeded(limit: Int)
 
-fn deposit(acct: Account, amount: Int) -> Account
-  requires amount > 0 and amount <= 1_000_000_000
-  ensures result.balance == acct.balance + amount
-=> { ..acct, balance: acct.balance + amount }
+fn deposit(acct: Account, amount: Int) -> Result[Account, TxError]
+  ensures match result {
+    Ok(a) => a.balance == acct.balance + amount
+    Err(_) => true
+  }
+{
+  if amount <= 0 {
+    return Err(InvalidAmount(amount))
+  }
+  if amount > max_balance - acct.balance {
+    return Err(LimitExceeded(max_balance))
+  }
+  Ok({ ..acct, balance: acct.balance + amount })
+}
 
 fn withdraw(acct: Account, amount: Int) -> Result[Account, TxError]
   ensures match result {
-    Ok(a) => a.balance == acct.balance - amount and a.balance >= 0
+    Ok(a) => a.balance == acct.balance - amount
     Err(_) => true
   }
 {
@@ -29,19 +45,20 @@ fn withdraw(acct: Account, amount: Int) -> Result[Account, TxError]
 }
 
 fn transfer(from: Account, to: Account, amount: Int) -> Result[(Account, Account), TxError]
-  requires from.balance >= 0 and to.balance >= 0
   ensures match result {
     Ok((a, b)) => a.balance + b.balance == from.balance + to.balance
     Err(_) => true
   }
 {
   let a = withdraw(from, amount)?
-  Ok((a, deposit(to, amount)))
+  let b = deposit(to, amount)?
+  Ok((a, b))
 }
 
 fn describe(e: TxError) -> Str => match e {
   InsufficientFunds(needed, available) => "insufficient funds: needed {needed}, have {available}"
   InvalidAmount(amount) => "invalid amount {amount}"
+  LimitExceeded(limit) => "the balance would exceed {limit}"
 }
 
 fn main() {
@@ -62,11 +79,9 @@ fn main() {
   }
 }
 
-property "money is conserved" (a: Int, b: Int, amount: Int) where a >= 0 and b >= 0 {
-  let x = Account(owner: "x", balance: a)
-  let y = Account(owner: "y", balance: b)
+property "money is conserved" (x: Account, y: Account, amount: Int) {
   match transfer(x, y, amount) {
-    Ok((x2, y2)) => assert x2.balance + y2.balance == a + b
+    Ok((x2, y2)) => assert x2.balance + y2.balance == x.balance + y.balance
     Err(_) => assert true
   }
 }

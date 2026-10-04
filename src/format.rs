@@ -176,8 +176,6 @@ fn layout(src: &str, items: &[Item]) -> String {
     let mut prev_first = false;
     // The last token of the code so far (not a comment).
     let mut last_code: Option<&Tok> = None;
-    // Whether the last line of code started by closing a bracket.
-    let mut closer_line = false;
     // Whether this line continues a condition or contract (`and b {`): a
     // block it opens belongs to the statement, not to the continuation.
     let mut header_line = false;
@@ -194,7 +192,9 @@ fn layout(src: &str, items: &[Item]) -> String {
             None => &src[..it.start],
         };
         let newlines = gap.matches('\n').count();
-        let first = prev.is_none() || newlines > 0;
+        // `}` then `else` on the next line become `} else`.
+        let join_else = newlines > 0 && matches!(it.tok, Some(Tok::Else)) && matches!(prev.and_then(|p| p.tok), Some(Tok::RBrace));
+        let first = prev.is_none() || (newlines > 0 && !join_else);
         if first {
             if prev.is_some() {
                 out.push('\n');
@@ -225,9 +225,9 @@ fn layout(src: &str, items: &[Item]) -> String {
                 None if next_code.is_some_and(continues_line) => true,
                 Some(t) if is_closer(t) => false,
                 Some(t) if continues_line(t) => true,
-                // `else` lines up with a `}` that ends the line above, and is
-                // a continuation after anything else (`let y = if c { 1 }`).
-                Some(Tok::Else) => !closer_line,
+                // `else` lines up with its `if` (it is on a line of its own
+                // only after a comment; otherwise it joins the `}`).
+                Some(Tok::Else) => false,
                 _ => last_code.is_some_and(wants_continuation) && !matches!(last_code, Some(t) if is_opener(t)),
             };
             if continuation {
@@ -239,9 +239,6 @@ fn layout(src: &str, items: &[Item]) -> String {
                 continuation && (logical(it.tok) || logical(last_code) || matches!(it.tok, Some(Tok::Requires | Tok::Ensures | Tok::Where)));
             for _ in 0..level {
                 out.push_str(INDENT);
-            }
-            if let Some(t) = it.tok {
-                closer_line = is_closer(t);
             }
         } else if let Some(p) = prev {
             match (p.tok, it.tok) {
@@ -318,9 +315,12 @@ mod tests {
         // A block opened on a continued condition belongs to the `if`.
         let src = "if a\nand b {\nx\n}\nwhile a or\nb {\nx\n}\n";
         assert_eq!(fmt(src), "if a\n  and b {\n  x\n}\nwhile a or\n  b {\n  x\n}\n");
-        // `else` lines up with a `}` above it, and continues anything else.
+        // `else` on the line after a `}` joins it; after a comment, it lines
+        // up with its `if`.
         let src = "if a {\nx\n}\nelse {\ny\n}\nlet v = if a { 1 }\nelse if b { 2 }\nelse { 3 }\n";
-        assert_eq!(fmt(src), "if a {\n  x\n}\nelse {\n  y\n}\nlet v = if a { 1 }\n  else if b { 2 }\n  else { 3 }\n");
+        assert_eq!(fmt(src), "if a {\n  x\n} else {\n  y\n}\nlet v = if a { 1 } else if b { 2 } else { 3 }\n");
+        let src = "if a { x } # why\nelse { y }\n";
+        assert_eq!(fmt(src), src);
         // Comment lines inside a continuation; a binary minus starting a line.
         let src = "let t = xs\n|> sort\n# then add\n|> sum\nlet n = (a\n- b\n+ 1)\n";
         assert_eq!(fmt(src), "let t = xs\n  |> sort\n  # then add\n  |> sum\nlet n = (a\n  - b\n  + 1)\n");

@@ -328,7 +328,9 @@ A `!` function may break the invariant of its first argument while it runs:
 changes made through that parameter, at any depth and including by the `!`
 functions it calls on it, are checked when the outermost such call returns,
 as is the value it returns. (Copies of the broken argument that it stores
-elsewhere meanwhile are not checked.) To change several fields of a value outside a `!`
+elsewhere meanwhile are not checked.) The clauses run after every change, so
+a costly clause makes every change costly (`where xs == xs.sort()` sorts on
+each `push!`); `cogito run --no-contracts` skips contracts and invariants. To change several fields of a value outside a `!`
 function, build a new value. Inside `catch` (and in tests), a change that
 breaks an invariant is undone before the error is returned, so the value is
 still valid afterwards. Clauses may call functions and read constants, but

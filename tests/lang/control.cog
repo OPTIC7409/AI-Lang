@@ -14,6 +14,7 @@ test "else may start on the next line" {
   let v = if 1 > 2 {
     "yes"
   }
+  # (`cogito fmt` would join `} else`; this comment keeps them apart.)
   else {
     "no"
   }

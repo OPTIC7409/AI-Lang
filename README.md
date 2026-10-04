@@ -45,7 +45,7 @@ property "balances never go negative" (balance: Int, amount: Int) where balance 
 $ cogito test bank.cog
 bank.cog
   ✓ withdrawing too much fails
-  ✓ balances never go negative (100 cases, 77 discarded)
+  ✓ balances never go negative (100 cases)
 
 $ cogito verify bank.cog
 bank.cog

@@ -39,9 +39,16 @@ OPTIONS (test / verify):
 GLOBAL OPTIONS:
     --max-depth N    maximum number of nested calls before a stack-overflow error (default 100000)
     --no-color       disable colored output
+    --no-contracts   run/eval: skip `requires`, `ensures` and type invariants (`where`), for speed
 ",
         cogito::VERSION
     )
+}
+
+/// False after `--no-contracts`: `run` and `eval` then skip `requires`,
+/// `ensures` and type invariants (`test` and `verify` always check them).
+fn contracts_on() -> bool {
+    std::env::var_os("COGITO_NO_CONTRACTS").is_none()
 }
 
 fn color_enabled() -> bool {
@@ -89,6 +96,7 @@ fn load(it: &mut Interp, path: &Path, color: bool, show_warnings: bool) -> Optio
 
 fn cmd_run(path: &Path, prog_args: Vec<String>, color: bool) -> ExitCode {
     let mut it = Interp::new();
+    it.contracts = contracts_on();
     it.args = prog_args;
     let Some((prog, ns)) = load(&mut it, path, color, true) else { return ExitCode::from(2) };
     match cogito::run(&mut it, &prog, &ns) {
@@ -102,6 +110,7 @@ fn cmd_run(path: &Path, prog_args: Vec<String>, color: bool) -> ExitCode {
 
 fn cmd_eval(code: &str, prog_args: Vec<String>, color: bool) -> ExitCode {
     let mut it = Interp::new();
+    it.contracts = contracts_on();
     it.args = prog_args;
     let mut ns = Namespace::default();
     let (prog, _) = match cogito::load_source(&mut it, "<eval>", code, Path::new("."), &mut ns, false) {
@@ -457,6 +466,8 @@ fn real_main() -> ExitCode {
             }
         } else if a == "--no-color" {
             no_color = true;
+        } else if a == "--no-contracts" {
+            std::env::set_var("COGITO_NO_CONTRACTS", "1");
         } else {
             if !a.starts_with('-') || a == "-e" {
                 positionals += 1;

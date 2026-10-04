@@ -93,6 +93,16 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A field of a record at `depth`. An unbounded Int field of a parameter
+    /// (or of a record in one) is now and then extreme, as parameters are:
+    /// an account's balance near max_int finds overflow in a deposit.
+    fn field(&mut self, t: &Ty, b: &Bound, size: u32, depth: u32) -> Result<Value, String> {
+        if self.extremes && depth <= 1 && b.int.is_none() && matches!(t, Ty::Int) && self.rng.below(100) < 3 {
+            return Ok(Value::Int(EXTREME_INTS[self.rng.below(EXTREME_INTS.len())]));
+        }
+        self.bounded(t, b, size, depth + 1)
+    }
+
     /// A record of a type with an invariant: generated within the bounds the
     /// invariant states, with fields it defines computed, and retried until
     /// the invariant holds.
@@ -109,7 +119,7 @@ impl<'a> Gen<'a> {
             for (i, t) in tys.iter().enumerate() {
                 vals.push(match plan.derived[i] {
                     Some(_) => Value::Unit,
-                    None => self.bounded(t, &plan.bounds[i], size, depth + 1)?,
+                    None => self.field(t, &plan.bounds[i], size, depth)?,
                 });
             }
             if !compute_derived(self.it, plan, tys, &mut vals) {
@@ -446,7 +456,7 @@ impl<'a> Gen<'a> {
                 }
                 let mut vals = Vec::new();
                 for t in &tys {
-                    vals.push(self.value(t, size, depth + 1)?);
+                    vals.push(self.field(t, &Bound::default(), size, depth)?);
                 }
                 Ok(Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values: vals })))
             }

@@ -548,12 +548,23 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
     // case they cannot happen.
     if f.diag.code == "E0207" {
         let huge = def.params.iter().zip(&f.args).find(|(_, a)| matches!(a, Value::Int(n) if n.unsigned_abs() >= 1 << 31));
+        let is_huge = |v: &Value| matches!(v, Value::Int(n) if n.unsigned_abs() >= 1 << 31);
         if let Some((p, _)) = huge {
             out.push_str(&format!(
                 "      {}verify also tries extreme Ints such as max_int; if inputs this large cannot happen, say so: `requires {} <= 1_000_000_000`{}\n",
                 c.dim,
                 param_label(it, p),
                 c.reset
+            ));
+        } else if let Some((ty, field)) = f.args.iter().find_map(|a| match a {
+            Value::Record(r) => {
+                r.ty.as_ref().and_then(|t| r.names.iter().zip(r.values.iter()).find(|(_, v)| is_huge(v)).map(|(n, _)| (t.name.clone(), n.clone())))
+            }
+            _ => None,
+        }) {
+            out.push_str(&format!(
+                "      {}verify also tries extreme Ints such as max_int in record fields; if `{}` cannot be this large, say so in the type: `type {} = {{ ... }} where {} <= 1_000_000_000`{}\n",
+                c.dim, field, ty, field, c.reset
             ));
         }
     }
