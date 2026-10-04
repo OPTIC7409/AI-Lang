@@ -583,7 +583,8 @@ this document. Each one is an error with a hint, but avoiding it saves a run.
 `cogito fix FILE` rewrites most of them (`&&`, `!x`, `x++`, `'text'`,
 `f"..."`, `null`, `True`, `elif`, `def`, `let mut`, `List<Int>`, `{"a": 1}`,
 `xs.length()`, `xs.length`, `s.startsWith(p)`, `// comment`, `x => x + 1`,
-`Math.floor(x)`, `math.sqrt(x)`, `console.log(x)`, ...).
+`Math.floor(x)`, `math.sqrt(x)`, `console.log(x)`, a dropped `xs.sort()` on a
+`var` known to hold a list, ...).
 
 - `if let` / `while let`: use `match`, or `is` for a test (`if r is Ok(_)`).
 - `c ? a : b`: use `if c { a } else { b }`. `?` only propagates errors.

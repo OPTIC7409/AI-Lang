@@ -90,7 +90,14 @@ pub fn load_source(
     let mut prog = parser::parse_program_all(src, file)?;
     let mut diags = resolver::resolve_program(&mut it.ctx, &mut prog, ns, dir, repl);
     if !diags.iter().any(|d| d.is_error()) {
-        diags.extend(typecheck::check_program(&it.ctx, &prog));
+        let (type_diags, twins) = typecheck::check_program_twins(&it.ctx, &prog);
+        diags.extend(type_diags);
+        // A dropped `xs.sort()` on a `var` known to hold a List: `xs.sort!()`.
+        for d in diags.iter_mut().filter(|d| d.code == "W0003" && d.fixes.is_empty()) {
+            if let Some((_, fix)) = twins.iter().find(|(span, _)| Some(*span) == d.span) {
+                d.fixes.push(fix.clone());
+            }
+        }
     }
     if diags.iter().any(|d| d.is_error()) {
         Err(diags)

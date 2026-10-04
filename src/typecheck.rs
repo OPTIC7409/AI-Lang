@@ -34,6 +34,14 @@ pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
     check_pass(ctx, prog, stable_vars(ctx, prog), false).diags
 }
 
+/// As `check_program`, and the in-place twin of each call of a pure
+/// built-in on a `var` whose type is known to suit it (`xs.sort()` on a
+/// `var` holding a List can be `xs.sort!()`): by the call's span.
+pub fn check_program_twins(ctx: &Ctx, prog: &Program) -> (Vec<Diagnostic>, Vec<(Span, crate::diagnostic::Fix)>) {
+    let pass = check_pass(ctx, prog, stable_vars(ctx, prog), false);
+    (pass.diags, pass.twins)
+}
+
 /// The known type of each name (variable use or binding) in the program,
 /// by its span (for editors).
 pub fn name_types(ctx: &Ctx, prog: &Program) -> HashMap<Span, Ty> {
@@ -55,6 +63,7 @@ fn stable_vars(ctx: &Ctx, prog: &Program) -> HashMap<Span, Ty> {
 
 struct Pass {
     diags: Vec<Diagnostic>,
+    twins: Vec<(Span, crate::diagnostic::Fix)>,
     candidates: HashMap<Span, Ty>,
     broken: HashSet<Span>,
     names: HashMap<Span, Ty>,
@@ -106,8 +115,24 @@ fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>, record: boo
         }
     }
     let reassigned_globals = reassigned.into_iter().filter_map(|r| if let VarRes::Global(s) = r { Some(s) } else { None }).collect();
+    let mut changed = HashSet::new();
+    let mut top_changed = HashSet::new();
+    for item in &prog.items {
+        match item {
+            Item::Stmt(s) => {
+                retyped_stmt(ctx, s, &mut changed);
+                retyped_stmt(ctx, s, &mut top_changed);
+            }
+            Item::Fn(def) => retyped(ctx, &def.body, &mut changed),
+            Item::Test(t) => retyped(ctx, &t.func.body, &mut changed),
+            Item::Property(p) => retyped(ctx, &p.func.body, &mut changed),
+            _ => {}
+        }
+    }
+    let retyped_globals = changed.into_iter().filter_map(|r| if let VarRes::Global(s) = r { Some(s) } else { None }).collect();
     let top = Frame {
         reassigned: top_locals.into_iter().filter_map(|r| if let VarRes::Local(s) = r { Some(s) } else { None }).collect(),
+        retyped: top_changed.into_iter().filter_map(|r| if let VarRes::Local(s) = r { Some(s) } else { None }).collect(),
         ..Frame::default()
     };
     let mut c = Checker {
@@ -122,6 +147,10 @@ fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>, record: boo
         candidates: HashMap::new(),
         broken: HashSet::new(),
         global_vars: HashMap::new(),
+        mutable_globals: HashMap::new(),
+        retyped_globals,
+        twins: Vec::new(),
+        let_value: Ty::Any,
         names: record.then(HashMap::new),
         caught: caught_names(prog),
     };
@@ -160,7 +189,7 @@ fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>, record: boo
             _ => {}
         }
     }
-    Pass { diags: c.diags, candidates: c.candidates, broken: c.broken, names: c.names.unwrap_or_default() }
+    Pass { diags: c.diags, twins: c.twins, candidates: c.candidates, broken: c.broken, names: c.names.unwrap_or_default() }
 }
 
 #[derive(Default)]
@@ -168,6 +197,10 @@ struct Frame {
     locals: HashMap<u32, Ty>,
     /// The `var` declaration that each local slot holds (for assumptions).
     vars: HashMap<u32, Span>,
+    /// Local slots declared with `var`, with the type of their first value.
+    mutable: HashMap<u32, Ty>,
+    /// Local slots that may come to hold another kind of value (see `retyped`).
+    retyped: HashSet<u32>,
     /// Local slots assigned as a whole somewhere in the function (`x = ...`).
     reassigned: HashSet<u32>,
     captures: Vec<Ty>,
@@ -200,6 +233,14 @@ struct Checker<'a> {
     broken: HashSet<Span>,
     /// The `var` declaration of each top-level variable slot.
     global_vars: HashMap<u32, Span>,
+    /// Top-level slots declared with `var`, with the type of their first value.
+    mutable_globals: HashMap<u32, Ty>,
+    /// Top-level slots that may come to hold another kind of value.
+    retyped_globals: HashSet<u32>,
+    /// See `check_program_twins`.
+    twins: Vec<(Span, crate::diagnostic::Fix)>,
+    /// The type of the value of the `let` or `var` being checked.
+    let_value: Ty,
     /// When asked for: the known type of each name, by span.
     names: Option<HashMap<Span, Ty>>,
 }
@@ -225,6 +266,56 @@ fn scan(e: &Expr, out: &mut HashSet<VarRes>) {
         _ => {}
     }
     for_each_child(e, &mut |c| scan(c, out));
+}
+
+/// Record the variables that may come to hold another kind of value:
+/// assigned as a whole, or passed to a `!` function other than a built-in
+/// (a built-in keeps a List a List).
+fn retyped(ctx: &Ctx, e: &Expr, out: &mut HashSet<VarRes>) {
+    let user_fn = |f: &Var| !matches!(f.res, VarRes::Global(s) if matches!(ctx.globals[s as usize].kind, GlobalKind::Builtin(_)));
+    match &e.kind {
+        ExprKind::Block(stmts) => {
+            for s in stmts {
+                retyped_stmt(ctx, s, out);
+            }
+            return;
+        }
+        ExprKind::MethodCall { receiver, method, mutating: true, .. } if user_fn(method) => {
+            if let ExprKind::Var(v) = &receiver.kind {
+                out.insert(v.res);
+            }
+        }
+        ExprKind::Call { callee, args } => {
+            if let (ExprKind::Var(f), Some(Arg { value: Expr { kind: ExprKind::Var(v), .. }, .. })) = (&callee.kind, args.first()) {
+                if f.name.ends_with('!') && user_fn(f) {
+                    out.insert(v.res);
+                }
+            }
+        }
+        _ => {}
+    }
+    for_each_child(e, &mut |c| retyped(ctx, c, out));
+}
+
+fn retyped_stmt(ctx: &Ctx, s: &Stmt, out: &mut HashSet<VarRes>) {
+    match &s.kind {
+        StmtKind::Let { value, .. } => retyped(ctx, value, out),
+        StmtKind::Assign { target, value, .. } => {
+            if let ExprKind::Var(v) = &target.kind {
+                out.insert(v.res);
+            }
+            retyped(ctx, target, out);
+            retyped(ctx, value, out);
+        }
+        StmtKind::Assert { cond, msg } => {
+            retyped(ctx, cond, out);
+            if let Some(m) = msg {
+                retyped(ctx, m, out);
+            }
+        }
+        StmtKind::Expr(e) => retyped(ctx, e, out),
+        StmtKind::Fn { def, .. } => retyped(ctx, &def.body, out),
+    }
 }
 
 /// Whether a statement never finishes normally.
@@ -443,8 +534,11 @@ impl<'a> Checker<'a> {
     fn function(&mut self, def: &FnDef, captures: &[Ty]) -> Ty {
         let mut reassigned = HashSet::new();
         scan(&def.body, &mut reassigned);
+        let mut changed = HashSet::new();
+        retyped(self.ctx, &def.body, &mut changed);
         let mut frame = Frame {
             reassigned: reassigned.into_iter().filter_map(|r| if let VarRes::Local(s) = r { Some(s) } else { None }).collect(),
+            retyped: changed.into_iter().filter_map(|r| if let VarRes::Local(s) = r { Some(s) } else { None }).collect(),
             captures: captures.to_vec(),
             ret: def.ret.as_ref().map(|t| t.ty.clone()).filter(|t| !t.is_any()),
             name: def.name.clone(),
@@ -543,10 +637,28 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------ statements
 
     fn stmt(&mut self, s: &Stmt) {
+        self.stmt_kind(s);
+        // (After the binding: a slot holds a `var` from here on.)
+        if let StmtKind::Let { pat: Pattern { kind: PatKind::Bind { res, sub: None, .. }, .. }, mutable: true, .. } = &s.kind {
+            let t = std::mem::replace(&mut self.let_value, Ty::Any);
+            match res {
+                VarRes::Local(slot) => {
+                    self.frame().mutable.insert(*slot, t);
+                }
+                VarRes::Global(slot) => {
+                    self.mutable_globals.insert(*slot, t);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn stmt_kind(&mut self, s: &Stmt) {
         match &s.kind {
             StmtKind::Let { pat, ty, value, mutable } => {
                 let errors = self.diags.len();
                 let t = self.expr(value);
+                self.let_value = t.clone();
                 // `let bad = fn() => ...` passed to `catch` later: like a
                 // function written in the `catch` call itself.
                 if let (PatKind::Bind { name, .. }, ExprKind::Lambda(_)) = (&pat.kind, &value.kind) {
@@ -713,6 +825,8 @@ impl<'a> Checker<'a> {
                 match res {
                     VarRes::Local(slot) => {
                         self.frame().locals.insert(*slot, t.clone());
+                        // (A new binding: of a `var` only if `stmt` says so.)
+                        self.frame().mutable.remove(slot);
                     }
                     VarRes::Global(slot) => {
                         self.globals.insert(*slot, t.clone());
@@ -1060,6 +1174,12 @@ impl<'a> Checker<'a> {
                     let t = self.enforced(&a.value, t);
                     arg_tys.push((a.name.clone(), t, a.value.span));
                 }
+                if let (Some(b), Some(Arg { value: Expr { kind: ExprKind::Var(v), .. }, name: None }), Some((_, t, _))) =
+                    (builtin, args.first(), arg_tys.first())
+                {
+                    let at = Span { start: callee.span.end, ..callee.span };
+                    self.twin(b, v, t, e.span, at);
+                }
                 match &callee.kind {
                     ExprKind::Var(v) => self.call_named(v, None, &arg_tys, e.span),
                     // A function value's result is not checked against a
@@ -1071,7 +1191,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            ExprKind::MethodCall { receiver, method, args, mutating, .. } => {
+            ExprKind::MethodCall { receiver, method, method_span, args, mutating, .. } => {
                 // A `!` function may give its first argument another type.
                 if let (true, ExprKind::Var(v)) = (*mutating, &receiver.kind) {
                     self.mutated(v);
@@ -1090,6 +1210,10 @@ impl<'a> Checker<'a> {
                     self.lambda_hint = None;
                     let t = self.enforced(&a.value, t);
                     arg_tys.push((a.name.clone(), t, a.value.span));
+                }
+                if let (false, Some(b), ExprKind::Var(v)) = (*mutating, builtin, &receiver.kind) {
+                    let at = Span { start: method_span.end, ..*method_span };
+                    self.twin(b, v, &rt, e.span, at);
                 }
                 // A record's own field, or a function from the module that
                 // declared the receiver's type, may take precedence.
@@ -1339,6 +1463,28 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => Ty::Any,
+        }
+    }
+
+    /// `xs.sort()` (or `sort(xs)`) on a `var` holding a List: the in-place
+    /// twin `xs.sort!()`, by inserting `!` at `at` (see `check_program_twins`).
+    fn twin(&mut self, b: &str, v: &Var, t: &Ty, call: Span, at: Span) {
+        // (The type of the `var`'s first value, if it never comes to hold
+        // another kind of value.)
+        let first = match v.res {
+            VarRes::Local(s) => self.frames.last().and_then(|f| f.mutable.get(&s).filter(|_| !f.retyped.contains(&s))),
+            VarRes::Global(s) => self.mutable_globals.get(&s).filter(|_| !self.retyped_globals.contains(&s)),
+            _ => None,
+        };
+        let Some(first) = first else { return };
+        let known = if t.is_any() { first.clone() } else { t.clone() };
+        let suits = matches!(
+            (b, &known),
+            ("sort" | "reverse" | "push" | "extend" | "sort_by" | "swap", Ty::List(_))
+                | ("insert" | "remove" | "clear", Ty::List(_) | Ty::Map(..) | Ty::Set(_))
+        );
+        if suits && self.ctx.builtins.values.contains_key(format!("{}!", b).as_str()) && !self.has_home(&known) {
+            self.twins.push((call, crate::diagnostic::Fix { span: at, text: "!".into() }));
         }
     }
 
