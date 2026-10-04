@@ -538,8 +538,9 @@ the list.
 
 ## Future directions
 
-- Deeper static checking: arguments of built-ins, the parameter types of
-  passed-in functions, and flow-sensitive types for reassigned `var`s.
+- Deeper static checking: the parameter types of passed-in functions, the
+  element types built-ins return, and flow-sensitive types for reassigned
+  `var`s.
 - A bytecode compiler for speed.
 - Richer contract-guided generation: today simple numeric bounds in `requires`
   steer the generator; more general constraints could be solved instead of

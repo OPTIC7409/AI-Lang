@@ -1,0 +1,6 @@
+# expect: E0121
+fn main() {
+  let parts = "a,b".split(1)
+  print(parts)
+}
+main()

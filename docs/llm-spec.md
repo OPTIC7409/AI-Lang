@@ -492,7 +492,8 @@ mistake (`cogito FILE` shows these warnings too, except unused variables).
 annotations, and the signatures of functions, constructors and common
 built-ins. Where a value's type is known and can never fit what is
 expected, the program is rejected before it runs: a call argument against a
-parameter annotation, a returned value against the return type, a `let` or
+parameter annotation or a built-in's parameter (`"a,b".split(1)`), a
+returned value against the return type, a `let` or
 assignment against its annotation (including record fields and elements of
 declared collections), a non-Bool condition, operators on the wrong kinds
 (`"a" + 1`), and fields a record type lacks. Anything unknown (an

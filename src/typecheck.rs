@@ -907,6 +907,7 @@ impl<'a> Checker<'a> {
     /// A call of a named function (with the receiver, for method syntax).
     fn call_named(&mut self, v: &Var, receiver: Option<(Ty, Span)>, args: &[(Option<Name>, Ty, Span)], span: Span) -> Ty {
         let mut all: Vec<(Option<Name>, Ty, Span)> = Vec::new();
+        let receiver_given = receiver.is_some();
         if let Some((t, sp)) = receiver {
             all.push((None, t, sp));
         }
@@ -917,7 +918,11 @@ impl<'a> Checker<'a> {
                 match kind {
                     GlobalKind::Fn => self.call_user(s, &v.name, &all),
                     GlobalKind::Ctor(c) => self.call_ctor(c, &all),
-                    GlobalKind::Builtin(i) => builtin_result(crate::builtins::BUILTINS[i as usize].name, &all),
+                    GlobalKind::Builtin(i) => {
+                        let name = crate::builtins::BUILTINS[i as usize].name;
+                        self.check_builtin_args(name, receiver_given, &all);
+                        builtin_result(name, &all)
+                    }
                     _ => Ty::Any,
                 }
             }
@@ -927,6 +932,22 @@ impl<'a> Checker<'a> {
                 Ty::Any
             }
             _ => Ty::Any,
+        }
+    }
+
+    /// Report arguments of a built-in that can never have the kind it needs
+    /// (`"a,b".split(1)`), as the built-in would when the program runs.
+    fn check_builtin_args(&mut self, name: &str, method: bool, args: &[(Option<Name>, Ty, Span)]) {
+        let kinds = builtin_kinds(name);
+        for (i, (n, t, span)) in args.iter().enumerate() {
+            if n.is_some() {
+                break;
+            }
+            let Some(k) = kinds.get(i) else { break };
+            if k.excludes(t) {
+                let which = if method && i == 0 { format!("the receiver of `.{}()`", name) } else { format!("argument {} of `{}`", i + 1, name) };
+                self.error(*span, format!("{} must be {}, but this is {}", which, k.describe(), a(t)), &format!("not {}", k.describe()));
+            }
         }
     }
 
@@ -1102,6 +1123,83 @@ fn tail_span(e: &Expr) -> Span {
             None => e.span,
         },
         _ => e.span,
+    }
+}
+
+/// What a built-in's positional parameter must be, where that is certain
+/// (the built-in fails at run time otherwise).
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    /// Anything (not checked).
+    Any,
+    Str,
+    Int,
+    /// Int or Float.
+    Num,
+    Fn,
+    Set,
+    /// A List, Str, Map, Set, Tuple or Range.
+    Sized,
+}
+
+fn builtin_kinds(name: &str) -> &'static [Kind] {
+    use Kind::*;
+    match name {
+        "lines" | "words" | "chars" | "trim" | "trim_start" | "trim_end" | "upper" | "lower" | "capitalize" | "is_digit" | "is_alpha"
+        | "is_alnum" | "is_space" | "is_upper" | "is_lower" | "parse_float" | "ord" | "read_file" | "file_exists" | "list_dir" | "env"
+        | "parse_json" => &[Str],
+        "split_once" | "strip_prefix" | "strip_suffix" | "starts_with" | "ends_with" | "write_file" | "append_file" => &[Str, Str],
+        "split" => &[Str, Str, Int],
+        "replace" => &[Str, Str, Str],
+        "parse_int" => &[Str, Int],
+        "chr" | "bit_not" | "seed" | "exit" => &[Int],
+        "gcd" | "lcm" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "bit_and" | "bit_or" | "bit_xor" | "shl" | "shr" | "random_int" => {
+            &[Int, Int]
+        }
+        "abs" | "sqrt" | "exp" | "ln" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "floor" | "ceil" | "trunc" | "sign"
+        | "is_nan" | "sleep" => &[Num],
+        "pow" | "log" | "atan2" | "hypot" => &[Num, Num],
+        "round" | "fixed" => &[Num, Int],
+        "len" => &[Sized],
+        "map" | "filter" | "each" | "find" | "find_index" | "take_while" | "drop_while" | "flat_map" | "min_by" | "max_by" | "sort_by"
+        | "sort_with" | "group_by" | "partition" | "map_values" | "map_err" | "and_then" | "unwrap_or_else" | "reduce" | "any" | "all" => &[Any, Fn],
+        "fold" => &[Any, Any, Fn],
+        "update" => &[Any, Any, Any, Fn],
+        "catch" => &[Fn],
+        "take" | "drop" | "chunks" | "windows" | "repeat" => &[Any, Int],
+        "pad_left" | "pad_right" => &[Any, Int, Str],
+        "join" => &[Any, Str],
+        "union" | "intersection" | "difference" | "is_subset" => &[Set, Set],
+        _ => &[],
+    }
+}
+
+impl Kind {
+    /// Whether a value of type `t` can never be of this kind.
+    fn excludes(self, t: &Ty) -> bool {
+        let known = !matches!(t, Ty::Any | Ty::Generic(_) | Ty::Param(..));
+        known
+            && !match self {
+                Kind::Any => true,
+                Kind::Str => matches!(t, Ty::Str),
+                Kind::Int => matches!(t, Ty::Int),
+                Kind::Num => matches!(t, Ty::Int | Ty::Float),
+                Kind::Fn => matches!(t, Ty::Fn(..)),
+                Kind::Set => matches!(t, Ty::Set(_)),
+                Kind::Sized => matches!(t, Ty::List(_) | Ty::Str | Ty::Map(..) | Ty::Set(_) | Ty::Tuple(_) | Ty::Range),
+            }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Kind::Any => "anything",
+            Kind::Str => "a Str",
+            Kind::Int => "an Int",
+            Kind::Num => "a number",
+            Kind::Fn => "a function",
+            Kind::Set => "a Set",
+            Kind::Sized => "a collection or string",
+        }
     }
 }
 
