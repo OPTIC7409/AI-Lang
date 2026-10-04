@@ -1,0 +1,5 @@
+# expect: W0004
+fn parse_all(xs: List[Str]) -> Result[List[Int], Str] {
+  Ok(xs.map(fn(s) => parse_int(s).ok_or("bad {s}")?))
+}
+print(parse_all(["1"]))

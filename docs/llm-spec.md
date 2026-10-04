@@ -90,7 +90,7 @@ copy-on-write, so copies are cheap.)
 **Equality** `==` is structural (deep). `1 == 1.0` is true (Int/Float
 comparisons are exact). Comparison `< <= > >=` works on numbers, strings,
 Bools (`false < true`), lists/tuples (lexicographic), and values of the same
-enum/record type.
+enum/record type. Records compare field by field in declaration order.
 Enum values compare by variant in declaration order, then by fields:
 `Some(_) < None`, `Ok(_) < Err(_)`, `Less < Equal < Greater`.
 Comparing different kinds is an error.
@@ -232,7 +232,7 @@ match value {
   Circle(radius: r, ..) => "some named fields"
   Some(x) => x
   n @ 10..=19 => "bind and test: {n}"
-  _ => total += 1                          # an arm body may be an assignment
+  _ => total += 1                          # an arm body may be an assignment or `assert`
 }
 ```
 
@@ -323,10 +323,13 @@ type Graph = { n: Int, adj: List[List[Int]] }
 The invariant is checked (E0303) whenever a value of the type is built (by
 its constructor, from an anonymous record, by `{ ..s, lo: 9 }`) and after
 every change to one of its fields (`s.lo = 9`, `g.adj[0].push!(1)`). A `!`
-function may break the invariant of its first argument while it runs; it is
-checked when the function returns. To change several fields of a value
-outside a `!` function, build a new value. Only record types have
-invariants.
+function may break the invariant of its first argument while it runs:
+changes made through that parameter, at any depth, are checked when the
+function returns. To change several fields of a value outside a `!`
+function, build a new value. Inside `catch` (and in tests), a change that
+breaks an invariant is undone before the error is returned, so the value is
+still valid afterwards. Clauses may call functions and read constants, but
+not `self`. Only record types have invariants.
 
 `cogito verify FILE` treats each function with contracts as a property: it
 generates arguments from the parameter types (including extreme Ints such as
@@ -415,7 +418,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   `min(xs) -> Option` / `min(a, b, ...)`, `max` likewise
 - **Math**: `abs sqrt pow exp ln log(x, base) log2 log10 sin cos tan asin acos
   atan atan2 hypot floor ceil trunc` (floor/ceil/trunc/round return Int),
-  `round(x, digits) -> Float`, `sign clamp(x, lo, hi) gcd lcm is_nan fixed(x, digits) -> Str`,
+  `round(x, digits) -> Float`, `sign clamp(x, lo, hi) gcd lcm is_nan fixed(x, digits) -> Str` (gcd and lcm are never negative),
   `bit_and bit_or bit_xor bit_not shl shr`, `wrapping_add wrapping_sub
   wrapping_mul` (wrap around instead of failing, for hashes and checksums;
   the operators always fail on overflow), constants `pi tau e inf max_int min_int`,

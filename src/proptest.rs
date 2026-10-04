@@ -44,6 +44,10 @@ pub struct Gen<'a> {
     pub pool: Vec<Value>,
     /// Record types with invariants, by type id.
     pub plans: Rc<HashMap<u32, InvPlan>>,
+    /// Set when no value of a record type that satisfies its invariant was
+    /// found: the type and the clause broken most often. Unlike other
+    /// generation errors this one may not happen again for the next case.
+    pub missed: Option<(Rc<str>, String)>,
 }
 
 /// Extreme Int values, likely to expose overflow.
@@ -66,7 +70,7 @@ fn mentions(ty: &Ty, id: u32) -> bool {
 
 impl<'a> Gen<'a> {
     pub fn new(it: &'a mut Interp, rng: &'a mut Rng, extremes: bool, plans: Rc<HashMap<u32, InvPlan>>) -> Gen<'a> {
-        Gen { it, rng, extremes, pool: Vec::new(), plans }
+        Gen { it, rng, extremes, pool: Vec::new(), plans, missed: None }
     }
 
     /// A value of type `t` within the bounds `b`.
@@ -88,6 +92,7 @@ impl<'a> Gen<'a> {
     /// the invariant holds.
     fn valid_record(&mut self, td: &Rc<TypeDef>, plan: &InvPlan, tys: &[Ty], size: u32, depth: u32) -> Result<Value, String> {
         let TypeKind::Record { fields, .. } = &td.kind else { unreachable!() };
+        let mut broken: Vec<(String, u32)> = Vec::new();
         for attempt in 0..100 {
             // Smaller values satisfy more invariants (an empty edge list is
             // always in range), so retries shrink.
@@ -104,16 +109,35 @@ impl<'a> Gen<'a> {
             }
             let v = Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values: vals }));
             let depth_before = self.it.stack.len();
-            let ok = matches!(self.it.broken_invariant(&v), Ok(None));
+            let r = self.it.broken_invariant(&v);
             self.it.stack.truncate(depth_before);
-            if ok {
-                return Ok(v);
+            match r {
+                Ok(None) => return Ok(v),
+                Ok(Some(b)) => match broken.iter_mut().find(|(c, _)| *c == b.clause) {
+                    Some((_, n)) => *n += 1,
+                    None => broken.push((b.clause, 1)),
+                },
+                Err(_) => {}
             }
         }
-        Err(format!(
-            "cannot generate a `{}` that satisfies its invariant (`where`); test functions on it with a `property` that builds valid values",
-            td.name
-        ))
+        let clause = broken.iter().max_by_key(|(_, n)| *n).map(|(c, _)| c.clone()).unwrap_or_default();
+        let msg = if clause.is_empty() {
+            format!(
+                "cannot generate {} `{}` that satisfies its invariant (`where`): checking it failed with an error",
+                crate::diagnostic::a_an(&td.name),
+                td.name
+            )
+        } else {
+            format!(
+                "cannot generate {} `{}` that satisfies its invariant: random values rarely satisfy `where {}`;\n      \
+                 write a field the clause defines as `field == expr` so it is computed, or test with a `property` that builds valid values",
+                crate::diagnostic::a_an(&td.name),
+                td.name,
+                clause
+            )
+        };
+        self.missed = Some((td.name.clone(), clause));
+        Err(msg)
     }
 
     pub fn value(&mut self, ty: &Ty, size: u32, depth: u32) -> Result<Value, String> {

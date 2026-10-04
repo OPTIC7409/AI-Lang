@@ -1,0 +1,4 @@
+# expect: nothing
+let r = parse_int("5")
+r.unwrap()
+r.expect("a number")

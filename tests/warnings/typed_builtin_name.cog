@@ -1,0 +1,9 @@
+# expect: nothing
+type Stack = { items: List[Int] }
+fn push!(s: Stack, x: Int) {
+  s.items.push!(x)
+}
+fn len(s: Stack) -> Int => s.items.len()
+var st = Stack([])
+st.push!(1)
+print(st.len())

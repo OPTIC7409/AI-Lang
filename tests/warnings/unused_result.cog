@@ -1,0 +1,4 @@
+# expect: W0003
+var xs = [3, 1, 2]
+xs.sort()
+print(xs)

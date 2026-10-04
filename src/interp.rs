@@ -106,6 +106,10 @@ pub struct Interp {
     pub args: Vec<String>,
     /// Discard all program output (used while generating test inputs).
     pub silent: bool,
+    /// Above zero while an error can be caught and the program go on (inside
+    /// `catch`, and while running tests): a failed `!` call then restores a
+    /// value whose type has an invariant, so that it still satisfies it.
+    pub catching: u32,
     /// Collect program output here instead of writing it to stdout.
     pub capture: Option<String>,
     pub contracts: bool,
@@ -198,6 +202,7 @@ impl Interp {
             try_span: None,
             last_try_return: None,
             salvaged: None,
+            catching: 0,
             busy_globals: Vec::new(),
             test_mode: false,
             embedded: false,
@@ -626,6 +631,29 @@ impl Interp {
         Ok(None)
     }
 
+    /// Whether a `!` call on a place may change a record whose type has an
+    /// invariant: the value itself (moved out as `target`) or a record
+    /// along the path to it.
+    fn invariant_on_path(&self, root: &PlaceRoot, steps: &[Step], target: &Value, env: &Env) -> bool {
+        if self.ctx.invariants.is_empty() {
+            return false;
+        }
+        if self.has_invariant(target) || contains_invariant(self, target) {
+            return true;
+        }
+        let Some(mut v) = self.root_value(root, env) else { return false };
+        for k in 0..steps.len() {
+            if self.has_invariant(v) {
+                return true;
+            }
+            match peek_place(v, &steps[k..k + 1]) {
+                Some(x) => v = x,
+                None => break,
+            }
+        }
+        false
+    }
+
     /// E0303 for a broken invariant, reported at `span`.
     fn invariant_error(&self, span: Span, b: BrokenInvariant, label: String, help: String) -> Ctrl {
         let mut d = Diagnostic::error("E0303", format!("invariant of `{}` violated: `{}`", b.ty, b.clause)).at(span).label(label).note(format!(
@@ -874,6 +902,15 @@ impl Interp {
         }
         let expected = types[steps.len()].clone();
         let stamps = if expected.is_some() { self.valid_stamps(&root, &steps, &types, env) } else { Vec::new() };
+        // Inside `catch`, a write that breaks an invariant is undone, so the
+        // program goes on with valid values. Only globals need this: locals
+        // that a closure in `catch` can change are gone after the error.
+        let backup = if self.catching > 0 && matches!(root, PlaceRoot::Global(_)) && !self.ctx.invariants.is_empty() {
+            let leaf = self.with_place(&root, &steps, false, env, span, |p| p.clone()).ok();
+            leaf.filter(|l| self.invariant_on_path(&root, &steps, l, env))
+        } else {
+            None
+        };
         let mismatch = |me: &Self, m: String| {
             me.fail(
                 me.diag(span, "E0200", format!("type mismatch in assignment to `{}`: {}", me.snippet(span), m))
@@ -914,7 +951,7 @@ impl Interp {
                         if expected.is_some() {
                             self.restamp(&root, &steps, &stamps, env);
                         }
-                        return self.after_write(&root, &steps, false, span, env, None);
+                        return self.after_write_undo(&root, &steps, span, env, backup);
                     }
                 }
                 let cur = self.with_place(&root, &steps, false, env, span, |p| p.clone())?;
@@ -926,7 +963,17 @@ impl Interp {
                 self.restamp(&root, &steps, &stamps, env);
             }
         }
-        self.after_write(&root, &steps, false, span, env, None)
+        self.after_write_undo(&root, &steps, span, env, backup)
+    }
+
+    /// [`Interp::after_write`] for an assignment; when it fails, puts back
+    /// the old value of the place if one was saved.
+    fn after_write_undo(&mut self, root: &PlaceRoot, steps: &[Step], span: Span, env: &mut Env, backup: Option<Value>) -> R<()> {
+        let r = self.after_write(root, steps, false, span, env, None);
+        if let (Err(_), Some(old)) = (&r, backup) {
+            let _ = self.with_place(root, steps, false, env, span, |p| *p = old);
+        }
+        r
     }
 
     /// Check the invariants a write may have broken (see
@@ -936,11 +983,11 @@ impl Interp {
         let Some(b) = self.check_path_invariants(root, steps, leaf, env)? else { return Ok(()) };
         let (label, help) = match call {
             Some(f) => (
-                format!("after this call to `{}`, a `{}` breaks it", f, b.ty),
+                format!("after this call to `{}`, {} `{}` breaks it", f, crate::diagnostic::a_an(&b.ty), b.ty),
                 "a `!` function may break the invariant of its first argument while it runs, but must restore it before it returns".to_string(),
             ),
             None => (
-                format!("after this change, a `{}` breaks it", b.ty),
+                format!("after this change, {} `{}` breaks it", crate::diagnostic::a_an(&b.ty), b.ty),
                 format!(
                     "every `{}` must satisfy its `where` clauses after each change; to change several fields at once, build a new value, or make the change in a `!` function (which may break the invariant until it returns)",
                     b.ty
@@ -2246,7 +2293,10 @@ impl Interp {
             (Ty::Float, Value::Int(_)) => coerce,
             (Ty::Unit, Value::Unit) | (Ty::Range, Value::Range(_)) => true,
             (Ty::List(t), Value::List(xs)) => {
-                if t.is_any() {
+                // (Generic parameters are not checked: `List[Option[T]]` only
+                // needs a list, and scanning it would replace the memo of the
+                // list's own declared type.)
+                if t.is_any() || mentions_generic(t) {
                     return true;
                 }
                 // Memoize successful exact checks: an unchanged list is not re-scanned.
@@ -2261,7 +2311,7 @@ impl Interp {
                 ok
             }
             (Ty::Set(t), Value::Set(m)) => {
-                if t.is_any() {
+                if t.is_any() || mentions_generic(t) {
                     return true;
                 }
                 let fp = if coerce { 0 } else { ty.fingerprint() };
@@ -2275,7 +2325,7 @@ impl Interp {
                 ok
             }
             (Ty::Map(k, t), Value::Map(m)) => {
-                if k.is_any() && t.is_any() {
+                if (k.is_any() && t.is_any()) || mentions_generic(k) || mentions_generic(t) {
                     return true;
                 }
                 let fp = if coerce { 0 } else { ty.fingerprint() };
@@ -2639,7 +2689,12 @@ impl Interp {
             let v = Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values }));
             if let Some(b) = self.broken_invariant(&v)? {
                 let help = format!("every `{}` must satisfy its `where` clauses, from the moment it is built", b.ty);
-                return Err(self.invariant_error(span, b, format!("this builds a `{}` that breaks it", cname), help));
+                return Err(self.invariant_error(
+                    span,
+                    b,
+                    format!("this builds {} `{}` that breaks it", crate::diagnostic::a_an(&cname), cname),
+                    help,
+                ));
             }
             Ok(v)
         }
@@ -3031,6 +3086,15 @@ impl Interp {
             }
             None => self.load(method, span, env)?,
         };
+        // Pick among overloads now, so that the type checks below know which
+        // function runs (a built-in `push!` next to a user `push!`).
+        let f = match &f {
+            Value::Overload(cands) => {
+                let picked = self.root_value(&root, env).and_then(|v| peek_place(v, &steps)).and_then(|t| self.pick_mutating(cands, t, &pos, &named));
+                picked.unwrap_or(f)
+            }
+            _ => f,
+        };
         let types = self.place_types(&root, &steps, decl, env);
         let expected = types[steps.len()].clone();
         // Built-ins that add elements: check (and convert) the new elements
@@ -3066,6 +3130,8 @@ impl Interp {
         }
         let stamps = if expected.is_some() { self.valid_stamps(&root, &steps, &types, env) } else { Vec::new() };
         let mut target = self.with_place(&root, &steps, false, env, receiver.span, std::mem::take)?;
+        let inv_backup = (self.catching > 0 && matches!(root, PlaceRoot::Global(_)) && self.invariant_on_path(&root, &steps, &target, env))
+            .then(|| target.clone());
         // While the call runs, the global is unavailable (it has been moved
         // into the call), so reading it gives a clear error instead of `()`.
         let busy = if let PlaceRoot::Global(s) = root {
@@ -3097,6 +3163,15 @@ impl Interp {
             _ => None,
         };
         let result = self.call_mutating(&f, &mut target, pos, named, span);
+        // Inside `catch`, a failed call, or one that leaves an invariant
+        // broken, is undone.
+        let inv_backup = match (&result, inv_backup) {
+            (Err(_), Some(b)) => {
+                target = b;
+                None
+            }
+            (_, b) => b,
+        };
         let mut type_error = None;
         if let (Ok(_), Some(t)) = (&result, &expected) {
             // If the collection was known to match before, built-ins that only
@@ -3181,9 +3256,30 @@ impl Interp {
         }
         self.restamp(&root, &steps, &stamps, env);
         if result.is_ok() {
-            self.after_write(&root, &steps, true, span, env, Some(&method.name))?;
+            if let Err(e) = self.after_write(&root, &steps, true, span, env, Some(&method.name)) {
+                if let Some(b) = inv_backup {
+                    let _ = self.with_place(&root, &steps, false, env, receiver.span, |p| *p = b);
+                }
+                return Err(e);
+            }
         }
         result
+    }
+
+    /// The candidate of an overloaded `!` function that a call on `target`
+    /// with these arguments runs.
+    fn pick_mutating(&self, cands: &[Value], target: &Value, args: &[Value], named: &[(Name, Value)]) -> Option<Value> {
+        let mut probe = Vec::with_capacity(args.len() + 1);
+        probe.push(target.clone());
+        probe.extend(args.iter().cloned());
+        cands
+            .iter()
+            .find(|c| match c {
+                Value::Builtin(i) => matches!(BUILTINS[*i as usize].f, BFn::Mut(_)) && self.accepts(c, &probe, named),
+                Value::Func(f) => f.def.mutating && self.accepts(c, &probe, named),
+                _ => false,
+            })
+            .cloned()
     }
 
     pub fn call_mutating(&mut self, f: &Value, target: &mut Value, args: Vec<Value>, named: Vec<(Name, Value)>, span: Span) -> R {
@@ -3219,24 +3315,15 @@ impl Interp {
                     }
                 }
             }
-            Value::Overload(cands) => {
-                let cands = cands.clone();
-                let mut probe = Vec::with_capacity(args.len() + 1);
-                probe.push(target.clone());
-                probe.extend(args.iter().cloned());
-                for c in cands.iter() {
-                    let ok = match c {
-                        Value::Builtin(i) => matches!(BUILTINS[*i as usize].f, BFn::Mut(_)) && self.accepts(c, &probe, &named),
-                        Value::Func(f) => f.def.mutating && self.accepts(c, &probe, &named),
-                        _ => false,
-                    };
-                    if ok {
-                        drop(probe);
-                        return self.call_mutating(c, target, args, named, span);
-                    }
+            Value::Overload(cands) => match self.pick_mutating(cands, target, &args, &named) {
+                Some(c) => self.call_mutating(&c, target, args, named, span),
+                None => {
+                    let mut probe = Vec::with_capacity(args.len() + 1);
+                    probe.push(target.clone());
+                    probe.extend(args);
+                    Err(self.fail(self.no_overload(cands, &probe, &named, span)))
                 }
-                Err(self.fail(self.no_overload(&cands, &probe, &named, span)))
-            }
+            },
             other => Err(self.err(span, "E0111", format!("{} is not a mutating function", describe(other)))),
         }
     }
@@ -3269,6 +3356,31 @@ impl Interp {
             Value::Bool(b) => Ok(b),
             other => Err(self.err(span, "E0209", format!("{} must return a Bool, but it returned {}", what, describe(&other)))),
         }
+    }
+}
+
+/// Whether a record with an invariant is directly inside a value (one level
+/// down: the fields of a record, the elements of a small collection).
+fn contains_invariant(it: &Interp, v: &Value) -> bool {
+    match v {
+        Value::Record(r) => r.values.iter().any(|x| it.has_invariant(x)),
+        Value::List(xs) if xs.len() <= 64 => xs.iter().any(|x| it.has_invariant(x)),
+        _ => false,
+    }
+}
+
+/// Whether a type mentions a generic parameter anywhere (those are not
+/// checked when the program runs).
+fn mentions_generic(t: &Ty) -> bool {
+    match t {
+        Ty::Generic(_) | Ty::Param(..) => true,
+        Ty::List(x) | Ty::Set(x) => mentions_generic(x),
+        Ty::Map(k, v) => mentions_generic(k) || mentions_generic(v),
+        Ty::Tuple(ts) => ts.iter().any(mentions_generic),
+        Ty::Record(fs) => fs.iter().any(|(_, t)| mentions_generic(t)),
+        Ty::Named { args, .. } => args.iter().any(mentions_generic),
+        Ty::Fn(..) => false,
+        _ => false,
     }
 }
 

@@ -310,10 +310,19 @@ pub const CATALOG: &[(&str, &str, &str)] = &[
     ("W0001", "unused variable", "A variable was declared but never read. Remove it, or prefix its name with\nan underscore (`_unused`) to signal that this is intentional."),
     ("W0002", "unreachable code", "Code after `return`, `break` or `continue` in the same block can never run."),
     ("W0003", "unused result", "A built-in function that has no side effects was called (with no callback\nthat has any), and its result was thrown away, so the call does nothing:\n\n    var xs = [3, 1, 2]\n    xs.sort()        # warning: returns a sorted copy, which is dropped\n    xs.sort!()       # sorts xs itself\n\nEvery mutating built-in has a twin without `!` that returns a new value.\nStore that value (`let ys = xs.sort()`), or call the `!` version."),
+    ("W0005", "a function hides the built-in it calls", "A function with the name of a built-in takes every call to that name its\nparameters accept. With an untyped first parameter, that is every call:\n\n    fn push!(s, x) {\n      s.items.push!(x)    # warning: calls this push! again, forever\n    }\n\nGive the first parameter a type, and calls on other values (here, the\nlist `s.items`) go to the built-in:\n\n    fn push!(s: Stack, x: Int) {\n      s.items.push!(x)    # the built-in push! on a list\n    }"),
     ("W0004", "`?` or `return` inside an anonymous function", "`?` and `return` always leave the innermost function. Inside an anonymous\nfunction passed to `map`, `each` and so on, they leave that anonymous\nfunction, not the function you are writing:\n\n    fn parse_all(xs: List[Str]) -> Result[List[Int], Str] {\n      Ok(xs.map(fn(s) => parse_int(s).ok_or(\"bad {s}\")?))   # warning\n    }\n\nHere `?` makes the anonymous function return `Err(...)`, which becomes an\nelement of the list. Use `collect_ok` to combine a list of Results:\n\n    xs.map(fn(s) => parse_int(s).ok_or(\"bad {s}\")).collect_ok()\n\nor a `for` loop, where `?` returns from `parse_all` itself."),
 ];
 
 pub fn explain(code: &str) -> Option<(&'static str, &'static str)> {
     let code = code.trim().to_ascii_uppercase();
     CATALOG.iter().find(|(c, _, _)| *c == code).map(|(_, t, e)| (*t, *e))
+}
+
+/// "a" or "an", whichever reads right before `word` (a type name).
+pub fn a_an(word: &str) -> &'static str {
+    match word.trim_start_matches('`').chars().next() {
+        Some(c) if "AEIOUaeiou".contains(c) => "an",
+        _ => "a",
+    }
 }

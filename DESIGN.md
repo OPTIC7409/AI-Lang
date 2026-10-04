@@ -191,10 +191,10 @@ to repeat the same `requires`. Stating the condition once, on the type,
 fixes both: functions may assume it, and the generator produces only values
 that satisfy it. The `!` exception is the class-invariant rule of Eiffel,
 for the same reason: a mutation that moves two fields (`lo` and `hi`)
-passes through states that break the invariant. A failed check is not
-undone (keeping a copy to restore would make every write through such a
-value cost as much as the value), because breaking an invariant is a bug,
-not a condition to handle. Only record types have invariants: per-variant
+passes through states that break the invariant. A failed check is
+undone only inside `catch` and in tests, where the program goes on
+afterwards; elsewhere it stops the program, and keeping a copy to restore
+would make every write through such a value cost as much as the value. Only record types have invariants: per-variant
 conditions on enums would need their own syntax.
 
 ### Tests and properties are syntax

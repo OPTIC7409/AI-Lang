@@ -1,0 +1,6 @@
+# expect: W0002
+fn f() -> Int {
+  return 1
+  print("never")
+}
+print(f())

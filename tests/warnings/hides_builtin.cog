@@ -1,0 +1,5 @@
+# expect: W0005
+type Stack = { items: List[Int] }
+fn push!(s, x) {
+  s.items.push!(x)
+}

@@ -3,6 +3,8 @@
 //! * `tests/lang/*.cog`   — the language's own test suite, written in Cogito.
 //! * `tests/errors/*.cog` — programs that must fail; the first line says which
 //!   error code (`# expect: E0101`), or the exact message (`# expect: error: ...`).
+//! * `tests/warnings/*.cog` — programs that `check` accepts with exactly the
+//!   warning on the first line (`# expect: W0003`, or `# expect: nothing`).
 //! * `examples/*.cog`     — example programs; when `examples/NAME.out` exists,
 //!   the program's output must match it exactly.
 
@@ -71,6 +73,24 @@ fn examples_produce_expected_output() {
             failures.push(format!("{} failed:\n{}", f.display(), text(&out.stderr)));
         } else if stdout != expected {
             failures.push(format!("{}: output differs.\n--- expected\n{}\n--- actual\n{}", f.display(), expected, stdout));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn warning_codes() {
+    let mut failures = Vec::new();
+    for f in files("tests/warnings", "cog") {
+        let src = std::fs::read_to_string(&f).unwrap();
+        let expect =
+            src.lines().next().and_then(|l| l.strip_prefix("# expect: ")).unwrap_or_else(|| panic!("{} has no `# expect:` line", f.display()));
+        let out = cogito(&["check", f.to_str().unwrap()]);
+        let stderr = text(&out.stderr);
+        let codes: Vec<&str> = stderr.lines().filter_map(|l| l.strip_prefix("warning[")).filter_map(|l| l.split(']').next()).collect();
+        let wanted: Vec<&str> = if expect.trim() == "nothing" { vec![] } else { vec![expect.trim()] };
+        if !out.status.success() || codes != wanted {
+            failures.push(format!("{}: expected warnings {:?}, got:\n{}", f.display(), wanted, stderr));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

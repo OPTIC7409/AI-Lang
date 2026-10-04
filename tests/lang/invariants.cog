@@ -73,6 +73,27 @@ test "a `!` function may break the invariant until it returns" {
   assert catch(fn() => global_span.break_it!()).is_err()
 }
 
+var g_span = Span(0, 1)
+var g_pair = Pair(Span(0, 1), Span(2, 3))
+var g_stack = Stack([1], 1)
+
+test "inside `catch`, a change that breaks an invariant is undone" {
+  assert catch(fn() => { g_span.lo = 5 }).is_err()
+  assert g_span == Span(0, 1)
+  assert catch(fn() => g_span.break_it!()).is_err()
+  assert g_span == Span(0, 1)
+  assert catch(fn() => { g_pair.a.hi += 5 }).is_err()
+  assert g_pair == Pair(Span(0, 1), Span(2, 3))
+  assert catch(fn() => g_stack.items.push!(2)).is_err()
+  assert g_stack == Stack([1], 1)
+}
+
+type Rare = { a: Int, b: Int } where (a * 7 + b) % 61 == 5
+
+property "values random inputs rarely satisfy are still generated" (r: Rare) {
+  assert (r.a * 7 + r.b) % 61 == 5
+}
+
 property "generated stacks satisfy their invariant" (s: Stack) {
   assert s.size == s.items.len()
 }

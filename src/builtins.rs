@@ -819,7 +819,10 @@ fn b_dbg(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 fn b_catch(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let f = fn_arg(it, &a, 0, "catch", sp)?;
     let depth = it.stack.len();
-    match it.call(&f, vec![], sp) {
+    it.catching += 1;
+    let r = it.call(&f, vec![], sp);
+    it.catching -= 1;
+    match r {
         Ok(v) => Ok(it.ok(v)),
         Err(Ctrl::Error(d)) => {
             it.stack.truncate(depth);

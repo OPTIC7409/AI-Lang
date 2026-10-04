@@ -119,7 +119,9 @@ fn run_case(it: &mut Interp, c: &Rc<Closure>, args: Vec<Value>) -> Outcome {
         Err(Ctrl::Error(d)) => Outcome::Fail(d),
         Err(_) => Outcome::Discard,
         Ok(true) => {
+            it.catching += 1;
             let r = it.call_closure(c, args, vec![], Span::default());
+            it.catching -= 1;
             // For properties, an early `?` or an Err result is a failure.
             let r = if c.def.ensures.is_empty() && c.def.global_slot.is_none() { check_test_result(it, r) } else { r };
             match r {
@@ -141,8 +143,18 @@ struct Failure {
 }
 
 enum PropOutcome {
-    Passed { cases: u32, discarded: u32 },
-    GaveUp { cases: u32, discarded: u32 },
+    /// `missed`: attempts where no record satisfying its invariant was
+    /// found (counted in `discarded`), with the clause broken most often.
+    Passed {
+        cases: u32,
+        discarded: u32,
+        missed: Option<(u32, String)>,
+    },
+    GaveUp {
+        cases: u32,
+        discarded: u32,
+        missed: Option<(u32, String)>,
+    },
     Failed(Failure),
     CannotGenerate(String),
 }
@@ -185,14 +197,15 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
     let mut rng = Rng::new(seed);
     let mut passed = 0u32;
     let mut discarded = 0u32;
+    let mut missed: Option<(u32, String)> = None;
     let was_silent = it.silent;
     it.silent = true;
     let result = loop {
         if passed >= cases {
-            break PropOutcome::Passed { cases: passed, discarded };
+            break PropOutcome::Passed { cases: passed, discarded, missed };
         }
         if discarded > cases.max(10) * 20 {
-            break PropOutcome::GaveUp { cases: passed, discarded };
+            break PropOutcome::GaveUp { cases: passed, discarded, missed };
         }
         // Inputs grow during the run. Discarded attempts count too, so that a
         // filter such as `xs.len() >= 5` eventually sees inputs that pass it.
@@ -211,7 +224,25 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
             }
         }
         if let Some(m) = gen_err {
-            break PropOutcome::CannotGenerate(m);
+            // A record whose invariant random values rarely satisfy: skip
+            // this attempt, unless no attempt ever succeeds.
+            match gen.missed.take() {
+                Some((ty, clause)) => {
+                    let n = missed.as_ref().map_or(0, |m| m.0) + 1;
+                    if passed == 0 && n >= 5 {
+                        break PropOutcome::CannotGenerate(m);
+                    }
+                    let what = if clause.is_empty() {
+                        format!("`{}` satisfying its invariant", ty)
+                    } else {
+                        format!("`{}` satisfying `where {}`", ty, clause)
+                    };
+                    missed = Some((n, what));
+                    discarded += 1;
+                    continue;
+                }
+                None => break PropOutcome::CannotGenerate(m),
+            }
         }
         match run_case(it, &c, args.clone()) {
             Outcome::Pass => passed += 1,
@@ -485,7 +516,9 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                 let saved_budget = it.budget;
                 it.budget = Some(opts.budget);
                 it.ticks = 0;
+                it.catching += 1;
                 let r = it.call_closure(&cl, vec![], vec![], Span::default());
+                it.catching -= 1;
                 it.budget = saved_budget;
                 it.stack.truncate(depth);
                 let r = check_test_result(it, r);
@@ -514,13 +547,13 @@ pub fn run_tests(it: &mut Interp, prog: &Program, file: &str, opts: &Options) ->
                 any = true;
                 let seed = opts.seed.unwrap_or_else(|| name_seed(&p.name));
                 match quickcheck(it, &p.func, opts.cases, seed, opts.budget, false) {
-                    PropOutcome::Passed { cases, discarded } => {
+                    PropOutcome::Passed { cases, discarded, .. } => {
                         sum.passed += 1;
                         sum.cases += cases as u64;
                         let disc = if discarded > 0 { format!(", {} discarded", discarded) } else { String::new() };
                         out.push_str(&format!("  {}✓{} {} {}({} cases{}){}\n", c.green, c.reset, p.name, c.dim, cases, disc, c.reset));
                     }
-                    PropOutcome::GaveUp { cases, discarded } => {
+                    PropOutcome::GaveUp { cases, discarded, .. } => {
                         sum.gave_up += 1;
                         sum.cases += cases as u64;
                         out.push_str(&format!(
@@ -602,26 +635,35 @@ pub fn run_verify(it: &mut Interp, prog: &Program, file: &str, opts: &Options) -
         }
         let seed = opts.seed.unwrap_or_else(|| name_seed(&def.display_name()));
         match quickcheck(it, &def, opts.cases, seed, opts.budget, true) {
-            PropOutcome::Passed { cases, discarded } => {
+            PropOutcome::Passed { cases, discarded, missed } => {
                 sum.passed += 1;
                 sum.cases += cases as u64;
                 let what = if def.has_contracts() { "contracts held" } else { "no errors" };
-                let disc = if discarded > 0 { format!(", {} inputs rejected by `requires`", discarded) } else { String::new() };
+                let rejected = discarded - missed.as_ref().map_or(0, |m| m.0);
+                let mut disc = if rejected > 0 { format!(", {} inputs rejected by `requires`", rejected) } else { String::new() };
+                if let Some((n, ty)) = &missed {
+                    disc.push_str(&format!(", {} attempts found no {}", n, ty));
+                }
                 out.push_str(&format!("  {}✓{} {:w$}  {}{} cases, {}{}{}\n", c.green, c.reset, name, c.dim, cases, what, disc, c.reset, w = width));
             }
-            PropOutcome::GaveUp { cases, discarded } => {
+            PropOutcome::GaveUp { cases, discarded, missed } => {
                 // Not a failure: the function may need inputs (a well-formed
                 // tree, a consistent table) that random values rarely are.
                 sum.skipped += 1;
                 sum.cases += cases as u64;
+                let what = match &missed {
+                    Some((n, ty)) if *n * 2 > discarded => format!("contained {} {}", crate::diagnostic::a_an(ty), ty),
+                    _ => "satisfied `requires`".to_string(),
+                };
                 out.push_str(&format!(
-                    "  {}?{} {:w$}  {}not checked: only {} of {} random inputs satisfied `requires`;\n      test it with `test` blocks, or a `property` that builds valid inputs{}\n",
+                    "  {}?{} {:w$}  {}not checked: only {} of {} random inputs {};\n      test it with `test` blocks, or a `property` that builds valid inputs{}\n",
                     c.yellow,
                     c.reset,
                     name,
                     c.dim,
                     cases,
                     cases + discarded,
+                    what,
                     c.reset,
                     w = width
                 ));

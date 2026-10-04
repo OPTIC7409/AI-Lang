@@ -277,6 +277,23 @@ impl<'a> Resolver<'a> {
         self.diags.push(d);
     }
 
+    /// Resolve a contract clause. For one already reported as changing
+    /// something (E0118), errors about what it changes would only repeat it.
+    fn contract_expr(&mut self, e: &mut Expr, effectful: bool) {
+        let n = self.diags.len();
+        self.expr(e);
+        if effectful {
+            let mut k = n;
+            while k < self.diags.len() {
+                if matches!(self.diags[k].code, "E0110" | "E0111") {
+                    self.diags.remove(k);
+                } else {
+                    k += 1;
+                }
+            }
+        }
+    }
+
     fn line_of(&self, span: Span) -> String {
         if (span.file as usize) < self.ctx.sm.files.len() && span != Span::default() {
             self.ctx.sm.location(span)
@@ -722,6 +739,21 @@ impl<'a> Resolver<'a> {
                     if let Some(&b) = self.ctx.builtins.values.get(&name) {
                         if matches!(self.ctx.globals[b as usize].kind, GlobalKind::Builtin(_)) {
                             def.overload_fallback = Some(b);
+                            // With an untyped first parameter this function
+                            // takes every call to the name, so a call on a
+                            // field (`s.items.push!(x)`) runs it again instead
+                            // of the built-in.
+                            if def.params.first().is_some_and(|p| p.ty.is_none() && p.pat.is_none()) {
+                                if let Some(at) = find_field_call(&def.body, &name) {
+                                    let p = def.params[0].name.clone();
+                                    let d = Diagnostic::warning("W0005", format!("this calls your `{}`, not the built-in `{}`", name, name))
+                                        .at(at)
+                                        .label("calls this function again")
+                                        .note(format!("`{}` has an untyped first parameter `{}`, so it takes every call to `{}`, whatever the value", name, p, name))
+                                        .help(format!("give `{}` the type this function is for (`{}: Stack`, say); then calls on other values go to the built-in", p, p));
+                                    self.diags.push(d);
+                                }
+                            }
                         }
                     }
                 }
@@ -1264,16 +1296,19 @@ impl<'a> Resolver<'a> {
                 self.resolve_type(t, &[]);
             }
         }
-        for c in def.requires.iter_mut().chain(def.ensures.iter_mut()) {
+        let mut effectful = Vec::new();
+        for (i, c) in def.requires.iter_mut().chain(def.ensures.iter_mut()).enumerate() {
             if let Some((span, what)) = contract_effect(c) {
                 let d = Diagnostic::error("E0118", format!("contracts must not change anything, but this {}", what))
                     .at(span)
                     .help("a contract only states a condition; move the change into the function body");
                 self.error(d);
+                effectful.push(i);
             }
         }
-        for r in def.requires.iter_mut() {
-            self.expr(r);
+        let n_requires = def.requires.len();
+        for (i, r) in def.requires.iter_mut().enumerate() {
+            self.contract_expr(r, effectful.contains(&i));
         }
         // `old(expr)` in postconditions: evaluated on entry, into dedicated slots.
         let mut olds: Vec<Expr> = Vec::new();
@@ -1290,8 +1325,8 @@ impl<'a> Resolver<'a> {
         if !def.ensures.is_empty() {
             self.push_scope();
             def.result_slot = self.declare_local(Rc::from("result"), def.name_span, false, LocalKind::Result);
-            for e in def.ensures.iter_mut() {
-                self.expr(e);
+            for (i, e) in def.ensures.iter_mut().enumerate() {
+                self.contract_expr(e, effectful.contains(&(n_requires + i)));
             }
             self.pop_scope();
         }
@@ -1614,6 +1649,11 @@ impl<'a> Resolver<'a> {
             "choice",
             "each",
             "flush",
+            // These stop the program when the value is not Ok/Some, so a
+            // dropped result still checks something.
+            "unwrap",
+            "expect",
+            "unwrap_err",
         ];
         if b.name.ends_with('!') || EFFECTS.contains(&b.name) {
             return;
@@ -2790,6 +2830,29 @@ fn has_effects(e: &Expr, effects: &[&str]) -> bool {
 }
 
 /// The first use of a variable with one of these names in an expression.
+/// A call `x.f.name(...)` or `name(x.f, ...)` (on a field) inside `e`.
+fn find_field_call(e: &Expr, name: &str) -> Option<Span> {
+    match &e.kind {
+        ExprKind::MethodCall { receiver, method, method_span, .. } if &*method.name == name && matches!(receiver.kind, ExprKind::Field { .. }) => {
+            return Some(*method_span)
+        }
+        ExprKind::Call { callee, args }
+            if matches!(&callee.kind, ExprKind::Var(v) if &*v.name == name)
+                && args.first().is_some_and(|a| a.name.is_none() && matches!(a.value.kind, ExprKind::Field { .. })) =>
+        {
+            return Some(callee.span)
+        }
+        _ => {}
+    }
+    let mut found = None;
+    for_each_child(e, &mut |c| {
+        if found.is_none() {
+            found = find_field_call(c, name);
+        }
+    });
+    found
+}
+
 fn find_var(e: &Expr, names: &[&str]) -> Option<Span> {
     if let ExprKind::Var(v) = &e.kind {
         if names.contains(&&*v.name) {
