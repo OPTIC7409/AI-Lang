@@ -748,6 +748,12 @@ impl<'s> Parser<'s> {
                 return Err(Diagnostic::error("E0010", "unclosed `{`").at(open).label("this block is never closed").help("add a matching `}`"));
             }
             stmts.push(self.stmt()?);
+            // `{1, 2, 3}` from Python: a block cannot hold a list of values.
+            if stmts.len() == 1 && self.at(&Tok::Comma) {
+                return Err(Diagnostic::error("E0010", "`{` starts a block here, and a block cannot hold values separated by commas")
+                    .at(open.to(self.span()))
+                    .help("for a set write `to_set([1, 2, 3])`, for a list `[1, 2, 3]`, and for a record `{ name: value }`"));
+            }
             self.expect_terminator()?;
         }
         let close = self.bump().span;

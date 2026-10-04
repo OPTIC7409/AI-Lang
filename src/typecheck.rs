@@ -159,6 +159,7 @@ pub fn compatible(ctx: &Ctx, a: &Ty, e: &Ty) -> bool {
         (Ty::Int, Ty::Float) => true,
         (Ty::List(x), Ty::List(y)) => compatible(ctx, x, y),
         (Ty::Map(k1, v1), Ty::Map(k2, v2)) => compatible(ctx, k1, k2) && compatible(ctx, v1, v2),
+        (Ty::Set(x), Ty::Set(y)) => compatible(ctx, x, y),
         (Ty::Tuple(xs), Ty::Tuple(ys)) => xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| compatible(ctx, x, y)),
         (Ty::Named { id: i1, args: a1, .. }, Ty::Named { id: i2, args: a2, .. }) => {
             i1 == i2 && (a1.is_empty() || a2.is_empty() || (a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| compatible(ctx, x, y))))
@@ -211,6 +212,7 @@ fn element(t: &Ty) -> Ty {
         Ty::Range => Ty::Int,
         Ty::Str => Ty::Str,
         Ty::Map(k, v) => Ty::Tuple(vec![(**k).clone(), (**v).clone()]),
+        Ty::Set(e) => (**e).clone(),
         _ => Ty::Any,
     }
 }
@@ -1018,7 +1020,7 @@ impl<'a> Checker<'a> {
                     || unknown(r)
                     || (num(l) && num(r))
                     // Ranges, maps and functions have no order.
-                    || (l == r && !matches!(l, Ty::Range | Ty::Map(..) | Ty::Fn(..)))
+                    || (l == r && !matches!(l, Ty::Range | Ty::Map(..) | Ty::Set(..) | Ty::Fn(..)))
                     || matches!(
                         (l, r),
                         (Ty::List(_), Ty::List(_))
@@ -1074,6 +1076,7 @@ fn erase_params(t: &Ty) -> Ty {
         Ty::Param(..) => Ty::Any,
         Ty::List(x) => list(erase_params(x)),
         Ty::Map(k, v) => Ty::Map(Box::new(erase_params(k)), Box::new(erase_params(v))),
+        Ty::Set(x) => Ty::Set(Box::new(erase_params(x))),
         Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(erase_params).collect()),
         Ty::Record(fs) => Ty::Record(fs.iter().map(|(n, t)| (n.clone(), erase_params(t))).collect()),
         Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(erase_params).collect(), Box::new(erase_params(r))),
@@ -1131,6 +1134,17 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
             Ty::List(_) | Ty::Str => first.clone(),
             _ => Ty::Any,
         },
+        "to_set" => match &first {
+            Ty::Set(_) => first.clone(),
+            Ty::List(_) | Ty::Str | Ty::Range => Ty::Set(Box::new(elem)),
+            _ if args.is_empty() => Ty::Set(Box::new(Ty::Any)),
+            _ => Ty::Any,
+        },
+        "union" | "intersection" | "difference" => match &first {
+            Ty::Set(_) => first.clone(),
+            _ => Ty::Any,
+        },
+        "is_subset" => Ty::Bool,
         "shuffle" => match &first {
             Ty::List(_) => first.clone(),
             Ty::Str => list(Ty::Str),

@@ -78,7 +78,7 @@ impl<'a> Gen<'a> {
                 Ok(v)
             }
             (Ty::Float, Bound { float: Some((lo, hi)), .. }) => Ok(self.float_in(*lo, *hi, size)),
-            (Ty::Str | Ty::List(_) | Ty::Map(..), Bound { len: Some((lo, hi)), .. }) => self.sized(t, size, *lo, *hi),
+            (Ty::Str | Ty::List(_) | Ty::Map(..) | Ty::Set(_), Bound { len: Some((lo, hi)), .. }) => self.sized(t, size, *lo, *hi),
             _ => self.value(t, size, depth),
         }
     }
@@ -193,6 +193,13 @@ impl<'a> Gen<'a> {
                 let n = self.rng.below(size as usize + 1);
                 self.map(k, v, n, size as u32, depth)?
             }
+            Ty::Set(t) => {
+                let n = self.rng.below(size as usize + 1);
+                match self.map(t, &Ty::Unit, n, size as u32, depth)? {
+                    Value::Map(m) => Value::Set(m),
+                    v => v,
+                }
+            }
             Ty::Tuple(ts) => {
                 let mut xs = Vec::new();
                 for t in ts {
@@ -288,6 +295,10 @@ impl<'a> Gen<'a> {
             Ty::Str => Ok(self.string(n)),
             Ty::List(t) => self.list(t, n, size.max(2), 0),
             Ty::Map(k, v) => self.map(k, v, n, size.max(2), 0),
+            Ty::Set(t) => match self.map(t, &Ty::Unit, n, size.max(2), 0)? {
+                Value::Map(m) => Ok(Value::Set(m)),
+                v => Ok(v),
+            },
             _ => self.value(ty, size, 0),
         }
     }
@@ -503,7 +514,7 @@ pub fn repair(it: &mut Interp, plans: &HashMap<u32, InvPlan>, v: &Value) -> Opti
             }
             Value::Variant(Rc::new(VariantVal { ty: vv.ty.clone(), tag: vv.tag, values }))
         }
-        Value::Map(m) => {
+        Value::Map(m) | Value::Set(m) => {
             if m.entries.iter().any(|(k, x)| repair(it, plans, k).is_none() || repair(it, plans, x).is_none()) {
                 return None;
             }
@@ -604,6 +615,16 @@ pub fn shrink(v: &Value) -> Vec<Value> {
                     let mut c = xs.to_vec();
                     c[i] = s;
                     out.push(Value::tuple(c));
+                }
+            }
+        }
+        Value::Set(m) => {
+            if !m.is_empty() {
+                out.push(Value::Set(Rc::new(MapVal::new())));
+                for (k, _) in m.entries.iter().take(16) {
+                    let mut c = (**m).clone();
+                    c.remove(k);
+                    out.push(Value::Set(Rc::new(c)));
                 }
             }
         }

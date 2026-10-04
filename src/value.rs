@@ -26,6 +26,8 @@ pub enum Value {
     List(Rc<List>),
     Tuple(Rc<List>),
     Map(Rc<MapVal>),
+    /// A set: a map whose values are all `()`, so it keeps insertion order.
+    Set(Rc<MapVal>),
     Record(Rc<RecordVal>),
     Variant(Rc<VariantVal>),
     Range(Rc<RangeVal>),
@@ -395,6 +397,10 @@ fn hash_inner<H: Hasher>(v: &Value, h: &mut H, memo: &mut HashMemo) {
             6u8.hash(h);
             m.len().hash(h);
         }
+        Value::Set(m) => {
+            13u8.hash(h);
+            m.len().hash(h);
+        }
         Value::Record(r) => {
             7u8.hash(h);
             r.values.len().hash(h);
@@ -564,6 +570,7 @@ pub fn type_name(v: &Value) -> String {
         Value::List(_) => "List".into(),
         Value::Tuple(_) => "Tuple".into(),
         Value::Map(_) => "Map".into(),
+        Value::Set(_) => "Set".into(),
         Value::Record(r) => match &r.ty {
             Some(t) => t.name.to_string(),
             None => "Record".into(),
@@ -600,7 +607,7 @@ fn shared_pair<T>(x: &Rc<T>, y: &Rc<T>, nested: impl FnOnce() -> bool) -> Option
 fn any_nested<'a>(mut vs: impl Iterator<Item = &'a Value>) -> bool {
     vs.any(|v| match v {
         Value::List(xs) | Value::Tuple(xs) => !xs.is_empty(),
-        Value::Map(m) => !m.is_empty(),
+        Value::Map(m) | Value::Set(m) => !m.is_empty(),
         Value::Record(r) => !r.values.is_empty(),
         Value::Variant(vv) => !vv.values.is_empty(),
         _ => false,
@@ -640,6 +647,8 @@ fn eq_inner(a: &Value, b: &Value, memo: &mut EqMemo) -> bool {
                         x.entries.iter().all(|(k, v)| y.get(k).is_some_and(|w| eq_inner(v, w, m)))
                     }))
         }
+        // Sets are equal when they have the same elements, in any order.
+        (Value::Set(x), Value::Set(y)) => Rc::ptr_eq(x, y) || (x.len() == y.len() && x.entries.iter().all(|(k, _)| y.get(k).is_some())),
         (Value::Record(x), Value::Record(y)) => {
             let same_ty = match (&x.ty, &y.ty) {
                 (Some(a), Some(b)) => a.id == b.id,
@@ -835,6 +844,17 @@ pub fn write_value(out: &mut String, v: &Value, quote: bool) {
                 out.push(',');
             }
             out.push(')');
+        }
+        // `to_set([1, 2])`, which builds the same set again.
+        Value::Set(m) => {
+            out.push_str("to_set([");
+            for (i, (k, _)) in m.entries.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_value(out, k, true);
+            }
+            out.push_str("])");
         }
         Value::Map(m) => {
             if m.is_empty() {

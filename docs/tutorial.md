@@ -131,6 +131,14 @@ let squares = [n * n for n in 1..=10 if n % 2 == 0]
 let grid = [(r, c) for r in 0..2 for c in 0..3]
 ```
 
+A set holds each value once:
+
+```cogito
+var seen = to_set(["ada", "alan"])
+print(seen.insert!("grace"), seen.insert!("ada"))   # true false
+print("alan" in seen, seen.len())             # true 3
+```
+
 To count or group things in a map, `update!` changes one entry, starting
 from a default when the key is new:
 

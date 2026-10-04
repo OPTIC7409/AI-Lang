@@ -138,8 +138,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("collections", "push", 2, 2, b_push, "push(xs: List[T], x: T) -> List[T]\nA new list with x added at the end."),
     m!("collections", "push!", 2, 2, m_push, "xs.push!(x)\nAdd x to the end of the list variable xs."),
     m!("collections", "pop!", 1, 1, m_pop, "xs.pop!() -> Option[T]\nRemove and return the last element of the list variable xs."),
-    b!("collections", "insert", 3, 3, b_insert, "insert(xs: List[T], i: Int, x: T) -> List[T]   |   insert(m: Map, k, v) -> Map\nA new list with x inserted at index i, or a new map with k set to v."),
-    m!("collections", "insert!", 3, 3, m_insert, "xs.insert!(i, x)   |   m.insert!(k, v)\nInsert into the list or map variable in place."),
+    b!("collections", "insert", 2, 3, b_insert, "insert(xs: List[T], i: Int, x: T) -> List[T]   |   insert(m: Map, k, v) -> Map   |   insert(s: Set[T], x: T) -> Set[T]\nA new list with x inserted at index i, a new map with k set to v, or a new set with x added."),
+    m!("collections", "insert!", 2, 3, m_insert, "xs.insert!(i, x)   |   m.insert!(k, v)   |   s.insert!(x) -> Bool\nInsert into the list, map or set variable in place (for a set: true if x was not already there)."),
     b!("collections", "remove", 2, 2, b_remove, "remove(xs: List[T], i: Int) -> List[T]   |   remove(m: Map, k) -> Map\nA copy without the element at index i (or key k)."),
     m!("collections", "remove!", 2, 2, m_remove, "xs.remove!(i) -> T   |   m.remove!(k) -> Option[V]\nRemove from the list or map variable in place, returning what was removed."),
     b!("collections", "set", 3, 3, b_set, "set(xs: List[T], i: Int, x: T) -> List[T]   |   set(m: Map, k, v) -> Map\nA copy with one element replaced (same as assigning to a `var` copy)."),
@@ -197,7 +197,12 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("collections", "keys", 1, 1, b_keys, "keys(m: Map[K, V]) -> List[K]\nThe keys, in insertion order."),
     b!("collections", "values", 1, 1, b_values, "values(m: Map[K, V]) -> List[V]\nThe values, in insertion order."),
     b!("collections", "entries", 1, 1, b_entries, "entries(m: Map[K, V]) -> List[(K, V)]\nThe (key, value) pairs, in insertion order."),
-    b!("collections", "has", 2, 2, b_has, "has(m: Map, k) -> Bool\nWhether the map has the key."),
+    b!("collections", "has", 2, 2, b_has, "has(m: Map, k) -> Bool   |   has(s: Set, x) -> Bool\nWhether the map has the key (or the set the element)."),
+    b!("collections", "to_set", 0, 1, b_to_set, "to_set(xs = []) -> Set[T]\nA set of the elements of a list, range, string or set: duplicates are dropped, and the elements keep the order in which they first appear."),
+    b!("collections", "union", 2, 2, b_union, "union(s: Set[T], t: Set[T]) -> Set[T]\nThe elements in s or in t."),
+    b!("collections", "intersection", 2, 2, b_intersection, "intersection(s: Set[T], t: Set[T]) -> Set[T]\nThe elements in both s and t."),
+    b!("collections", "difference", 2, 2, b_difference, "difference(s: Set[T], t: Set[T]) -> Set[T]\nThe elements of s that are not in t."),
+    b!("collections", "is_subset", 2, 2, b_is_subset, "is_subset(s: Set[T], t: Set[T]) -> Bool\nWhether every element of s is in t."),
     b!("collections", "merge", 2, 2, b_merge, "merge(a: Map, b: Map) -> Map\nAll entries of a and b (b wins on conflicts)."),
     b!("collections", "map_values", 2, 2, b_map_values, "map_values(m: Map[K, V], f: fn(V) -> W) -> Map[K, W]\nApply f to every value."),
     // ---- strings
@@ -446,8 +451,8 @@ fn usize_arg(it: &Interp, a: &[Value], i: usize, f: &str, sp: Span) -> R<usize> 
 /// The elements of an iterable argument (moving out of the list when unshared).
 fn items(it: &mut Interp, v: Value, f: &str, i: usize, sp: Span) -> R<Vec<Value>> {
     match v {
-        Value::List(_) | Value::Tuple(_) | Value::Range(_) | Value::Str(_) | Value::Map(_) => it.iter_values(v, sp),
-        other => Err(type_err(it, f, i, "a list, range, string, map or tuple", &other, sp)),
+        Value::List(_) | Value::Tuple(_) | Value::Range(_) | Value::Str(_) | Value::Map(_) | Value::Set(_) => it.iter_values(v, sp),
+        other => Err(type_err(it, f, i, "a list, range, string, map, set or tuple", &other, sp)),
     }
 }
 
@@ -1261,7 +1266,7 @@ fn b_len(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     Ok(Value::Int(match &a[0] {
         Value::Str(s) => s.char_len() as i64,
         Value::List(xs) | Value::Tuple(xs) => xs.len() as i64,
-        Value::Map(m) => m.len() as i64,
+        Value::Map(m) | Value::Set(m) => m.len() as i64,
         Value::Range(r) => match r.len_u128() {
             Some(n) => match i64::try_from(n) {
                 Ok(n) => n,
@@ -1278,7 +1283,7 @@ fn b_is_empty(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     Ok(Value::Bool(match &a[0] {
         Value::Str(s) => s.is_empty(),
         Value::List(xs) | Value::Tuple(xs) => xs.is_empty(),
-        Value::Map(m) => m.is_empty(),
+        Value::Map(m) | Value::Set(m) => m.is_empty(),
         Value::Range(r) => r.len() == Some(0),
         v => return Err(type_err(it, "is_empty", 0, "a collection or string", v, sp)),
     }))
@@ -1353,6 +1358,15 @@ fn insert_index(it: &Interp, i: i64, len: usize, sp: Span) -> R<usize> {
 }
 
 fn b_insert(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
+    // `s.insert(x)` on a set.
+    if let (Value::Set(_), 2) = (&a[0], a.len()) {
+        let Value::Set(mut m) = take_arg(&mut a, 0) else { unreachable!() };
+        Rc::make_mut(&mut m).insert(take_arg(&mut a, 1), Value::Unit);
+        return Ok(Value::Set(m));
+    }
+    if a.len() < 3 {
+        return Err(it.err(sp, "E0201", "`insert` takes a position (for a list) or a key (for a map) and a value; a set takes just the value"));
+    }
     let x = take_arg(&mut a, 2);
     match take_arg(&mut a, 0) {
         Value::List(xs) => {
@@ -1366,7 +1380,7 @@ fn b_insert(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
             Rc::make_mut(&mut m).insert(take_arg(&mut a, 1), x);
             Ok(Value::Map(m))
         }
-        v => Err(type_err(it, "insert", 0, "a List or Map", &v, sp)),
+        v => Err(type_err(it, "insert", 0, "a List, Map or Set", &v, sp)),
     }
 }
 
@@ -1402,6 +1416,13 @@ fn m_update(it: &mut Interp, t: &mut Value, mut a: Vec<Value>, sp: Span) -> R {
 }
 
 fn m_insert(it: &mut Interp, t: &mut Value, mut a: Vec<Value>, sp: Span) -> R {
+    // `s.insert!(x)` on a set: true if x was not there before.
+    if let (Value::Set(m), 1) = (&mut *t, a.len()) {
+        return Ok(Value::Bool(Rc::make_mut(m).insert(take_arg(&mut a, 0), Value::Unit).is_none()));
+    }
+    if a.len() < 2 {
+        return Err(it.err(sp, "E0201", "`insert!` takes a position (for a list) or a key (for a map) and a value; a set takes just the value"));
+    }
     let x = take_arg(&mut a, 1);
     match t {
         Value::List(xs) => {
@@ -1414,7 +1435,7 @@ fn m_insert(it: &mut Interp, t: &mut Value, mut a: Vec<Value>, sp: Span) -> R {
             Rc::make_mut(m).insert(take_arg(&mut a, 0), x);
             Ok(Value::Unit)
         }
-        v => Err(type_err(it, "insert!", 0, "a List or Map", v, sp)),
+        v => Err(type_err(it, "insert!", 0, "a List, Map or Set", v, sp)),
     }
 }
 
@@ -1433,7 +1454,11 @@ fn b_remove(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
             Rc::make_mut(&mut m).remove(&a[1]);
             Ok(Value::Map(m))
         }
-        v => Err(type_err(it, "remove", 0, "a List or Map", &v, sp)),
+        Value::Set(mut m) => {
+            Rc::make_mut(&mut m).remove(&a[1]);
+            Ok(Value::Set(m))
+        }
+        v => Err(type_err(it, "remove", 0, "a List, Map or Set", &v, sp)),
     }
 }
 
@@ -1450,7 +1475,8 @@ fn m_remove(it: &mut Interp, t: &mut Value, a: Vec<Value>, sp: Span) -> R {
             let r = Rc::make_mut(m).remove(&a[0]);
             Ok(it.option(r))
         }
-        v => Err(type_err(it, "remove!", 0, "a List or Map", v, sp)),
+        Value::Set(m) => Ok(Value::Bool(Rc::make_mut(m).remove(&a[0]).is_some())),
+        v => Err(type_err(it, "remove!", 0, "a List, Map or Set", v, sp)),
     }
 }
 
@@ -1488,8 +1514,8 @@ fn m_extend(it: &mut Interp, t: &mut Value, mut a: Vec<Value>, sp: Span) -> R {
 fn m_clear(it: &mut Interp, t: &mut Value, _: Vec<Value>, sp: Span) -> R {
     match t {
         Value::List(xs) => Rc::make_mut(xs).clear(),
-        Value::Map(m) => Rc::make_mut(m).clear(),
-        v => return Err(type_err(it, "clear!", 0, "a List or Map", v, sp)),
+        Value::Map(m) | Value::Set(m) => Rc::make_mut(m).clear(),
+        v => return Err(type_err(it, "clear!", 0, "a List, Map or Set", v, sp)),
     }
     Ok(Value::Unit)
 }
@@ -2201,7 +2227,69 @@ fn b_entries(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     Ok(Value::list(m.entries.iter().map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()])).collect()))
 }
 
+fn set_arg(it: &Interp, a: &[Value], i: usize, f: &str, sp: Span) -> R<Rc<MapVal>> {
+    match &a[i] {
+        Value::Set(m) => Ok(m.clone()),
+        v => Err(type_err(it, f, i, "a Set", v, sp)),
+    }
+}
+
+fn b_to_set(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
+    if a.is_empty() {
+        return Ok(Value::Set(Rc::new(MapVal::new())));
+    }
+    let v = take_arg(&mut a, 0);
+    if let Value::Set(_) = v {
+        return Ok(v);
+    }
+    let xs = items(it, v, "to_set", 0, sp)?;
+    let mut m = MapVal::with_capacity(xs.len());
+    for x in xs {
+        m.insert(x, Value::Unit);
+    }
+    Ok(Value::Set(Rc::new(m)))
+}
+
+fn b_union(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let mut m = set_arg(it, &a, 0, "union", sp)?;
+    let t = set_arg(it, &a, 1, "union", sp)?;
+    let mm = Rc::make_mut(&mut m);
+    for (k, _) in t.entries.iter() {
+        mm.insert(k.clone(), Value::Unit);
+    }
+    Ok(Value::Set(m))
+}
+
+fn b_intersection(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let s = set_arg(it, &a, 0, "intersection", sp)?;
+    let t = set_arg(it, &a, 1, "intersection", sp)?;
+    let mut out = MapVal::new();
+    for (k, _) in s.entries.iter().filter(|(k, _)| t.contains(k)) {
+        out.insert(k.clone(), Value::Unit);
+    }
+    Ok(Value::Set(Rc::new(out)))
+}
+
+fn b_difference(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let s = set_arg(it, &a, 0, "difference", sp)?;
+    let t = set_arg(it, &a, 1, "difference", sp)?;
+    let mut out = MapVal::new();
+    for (k, _) in s.entries.iter().filter(|(k, _)| !t.contains(k)) {
+        out.insert(k.clone(), Value::Unit);
+    }
+    Ok(Value::Set(Rc::new(out)))
+}
+
+fn b_is_subset(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    let s = set_arg(it, &a, 0, "is_subset", sp)?;
+    let t = set_arg(it, &a, 1, "is_subset", sp)?;
+    Ok(Value::Bool(s.entries.iter().all(|(k, _)| t.contains(k))))
+}
+
 fn b_has(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
+    if let Value::Set(m) = &a[0] {
+        return Ok(Value::Bool(m.contains(&a[1])));
+    }
     let m = map_arg(it, &a, 0, "has", sp)?;
     Ok(Value::Bool(m.contains(&a[1])))
 }
@@ -2623,6 +2711,11 @@ fn to_json(v: &Value, indent: usize, level: usize, out: &mut String) -> Result<(
             out.push_str(&format_float(*f));
         }
         Value::Str(s) => json_escape(s, out),
+        // A set becomes an array of its elements.
+        Value::Set(m) => {
+            let xs: Vec<Value> = m.entries.iter().map(|(k, _)| k.clone()).collect();
+            return to_json(&Value::list(xs), indent, level, out);
+        }
         Value::List(xs) | Value::Tuple(xs) => {
             if xs.is_empty() {
                 out.push_str("[]");

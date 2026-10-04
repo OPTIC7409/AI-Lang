@@ -17,6 +17,7 @@ pub enum Ty {
     Range,
     List(Box<Ty>),
     Map(Box<Ty>, Box<Ty>),
+    Set(Box<Ty>),
     Tuple(Vec<Ty>),
     Record(Vec<(Name, Ty)>),
     Fn(Vec<Ty>, Box<Ty>),
@@ -39,6 +40,7 @@ impl Ty {
             Ty::Param(i, _) => args.get(*i as usize).cloned().unwrap_or(Ty::Any),
             Ty::List(t) => Ty::List(Box::new(t.subst(args))),
             Ty::Map(k, v) => Ty::Map(Box::new(k.subst(args)), Box::new(v.subst(args))),
+            Ty::Set(t) => Ty::Set(Box::new(t.subst(args))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| t.subst(args)).collect()),
             Ty::Record(fs) => Ty::Record(fs.iter().map(|(n, t)| (n.clone(), t.subst(args))).collect()),
             Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|t| t.subst(args)).collect(), Box::new(r.subst(args))),
@@ -75,6 +77,7 @@ impl fmt::Display for Ty {
             Ty::Range => write!(f, "Range"),
             Ty::List(t) => write!(f, "List[{}]", t),
             Ty::Map(k, v) => write!(f, "Map[{}, {}]", k, v),
+            Ty::Set(t) => write!(f, "Set[{}]", t),
             Ty::Tuple(ts) => {
                 write!(f, "(")?;
                 for (i, t) in ts.iter().enumerate() {

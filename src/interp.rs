@@ -1693,6 +1693,12 @@ impl Interp {
                     run_body!();
                 }
             }
+            Value::Set(m) => {
+                for (k, _) in m.entries.iter() {
+                    self.bind_loop(pat, k.clone(), env)?;
+                    run_body!();
+                }
+            }
             other => return Err(self.fail(self.not_iterable(&other, span))),
         }
         Ok(Value::Unit)
@@ -1726,6 +1732,7 @@ impl Interp {
             },
             Value::Str(s) => Ok(s.chars().map(|c| Value::str(c.to_string())).collect()),
             Value::Map(m) => Ok(m.entries.iter().map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()])).collect()),
+            Value::Set(m) => Ok(m.entries.iter().map(|(k, _)| k.clone()).collect()),
             other => Err(self.fail(self.not_iterable(&other, span))),
         }
     }
@@ -2046,7 +2053,7 @@ impl Interp {
                 Value::Str(sub) => Ok(s.contains(sub.as_str())),
                 _ => Err(self.err(span, "E0211", format!("`in` on a string needs a Str to search for, got {}", describe(x)))),
             },
-            Value::Map(m) => Ok(m.contains(x)),
+            Value::Map(m) | Value::Set(m) => Ok(m.contains(x)),
             Value::Range(r) => match x {
                 Value::Int(n) => Ok(r.contains(*n)),
                 _ => Ok(false),
@@ -2253,6 +2260,20 @@ impl Interp {
                 }
                 ok
             }
+            (Ty::Set(t), Value::Set(m)) => {
+                if t.is_any() {
+                    return true;
+                }
+                let fp = if coerce { 0 } else { ty.fingerprint() };
+                if fp != 0 && m.checked() == fp {
+                    return true;
+                }
+                let ok = m.entries.iter().all(|(a, _)| self.has_type(a, t, coerce));
+                if ok && fp != 0 {
+                    m.set_checked(fp);
+                }
+                ok
+            }
             (Ty::Map(k, t), Value::Map(m)) => {
                 if k.is_any() && t.is_any() {
                     return true;
@@ -2334,6 +2355,14 @@ impl Interp {
                     }
                 }
                 return Ok(Value::list(out));
+            }
+            (Ty::Set(t), Value::Set(m)) => {
+                let mut out = MapVal::with_capacity(m.len());
+                for (k, _) in m.entries.iter() {
+                    let k2 = self.conform(k.clone(), t).map_err(|e| format!("expected {}, but an element is wrong: {}", ty, e))?;
+                    out.insert(k2, Value::Unit);
+                }
+                return Ok(Value::Set(Rc::new(out)));
             }
             (Ty::Map(kt, vt), Value::Map(m)) => {
                 let mut out = MapVal::with_capacity(m.len());
@@ -3014,6 +3043,7 @@ impl Interp {
                 (Ty::List(et), "insert!") => vec![(1, (**et).clone())],
                 (Ty::Map(kt, vt), "insert!") => vec![(0, (**kt).clone()), (1, (**vt).clone())],
                 (Ty::Map(kt, vt), "update!") => vec![(0, (**kt).clone()), (1, (**vt).clone())],
+                (Ty::Set(et), "insert!") => vec![(0, (**et).clone())],
                 _ => vec![],
             };
             for (k, want) in checks {
@@ -3048,6 +3078,7 @@ impl Interp {
         let pre = match (&expected, &target) {
             (Some(t @ Ty::List(_)), Value::List(xs)) => Some((xs.checked() == t.fingerprint(), xs.len())),
             (Some(t @ Ty::Map(..)), Value::Map(m)) => Some((m.checked() == t.fingerprint(), m.len())),
+            (Some(t @ Ty::Set(..)), Value::Set(m)) => Some((m.checked() == t.fingerprint(), m.len())),
             _ => None,
         };
         // A user function whose parameter is not declared with the same type
@@ -3090,6 +3121,11 @@ impl Interp {
                     ok
                 }
                 (Some((true, _)), Value::Map(m), _) if matches!(builtin, "remove!" | "clear!") => {
+                    m.set_checked(t.fingerprint());
+                    true
+                }
+                // (The element `insert!` adds was checked before the call.)
+                (Some((true, _)), Value::Set(m), _) if matches!(builtin, "insert!" | "remove!" | "clear!") => {
                     m.set_checked(t.fingerprint());
                     true
                 }
@@ -3333,6 +3369,7 @@ fn contains_param(t: &Ty) -> bool {
         Ty::Param(..) | Ty::Generic(_) => true,
         Ty::List(x) => contains_param(x),
         Ty::Map(k, v) => contains_param(k) || contains_param(v),
+        Ty::Set(t) => contains_param(t),
         Ty::Tuple(ts) => ts.iter().any(contains_param),
         Ty::Record(fs) => fs.iter().any(|(_, t)| contains_param(t)),
         Ty::Fn(ps, r) => ps.iter().any(contains_param) || contains_param(r),

@@ -64,6 +64,7 @@ program's `args()`.
 | `Unit` | `()` | value of statements, `if` without `else`, etc. |
 | `List[T]` | `[1, 2, 3]`, `[..xs, 4]` | `xs[0]`, `xs[-1]`, `xs[1..3]`, `xs[2..]`, `xs[..2]` |
 | `Map[K, V]` | `["a": 1, "b": 2]`, empty `[:]` | insertion-ordered; `m[k]`, `m.get(k)` |
+| `Set[T]` | `to_set([1, 2])`, empty `to_set()` | distinct elements, insertion-ordered; `x in s`; equal regardless of order |
 | tuples | `(1, "a")`, `(x,)` | `t.0`, `t[1]` |
 | records | `{ x: 1, y: 2 }`, `{ ..r, y: 5 }` | see Records below |
 | `Range` | `0..10`, `0..=10`, `0..` | Int only; end exclusive (`..=` inclusive) |
@@ -435,6 +436,13 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   pieces of `chunks`/`windows`); `map` gives a List.
 - **Mutating**: `push! pop! -> Option insert! remove! extend! clear! swap!(i, j)
   sort! sort_by! reverse!`
+- **Sets**: `to_set(xs)` (from a list, range, string or set) `insert(x)`
+  `insert!(x) -> Bool` (false if already there) `remove(x)` `remove!(x) -> Bool` `has(x)` (or
+  `x in s`) `union intersection difference is_subset`, and `len is_empty
+  clear! to_list`. Other collection functions (`map`, `filter`, `sort`, ...)
+  accept a set and give a List; wrap the result in `to_set(...)` for a set.
+  A set of visited states: `var seen = to_set([start])`, then
+  `if seen.insert!(next) { ... }`.
 - **Maps**: `keys values entries -> List[(K, V)] has(k) merge(other)
   map_values(f) get(k) get_or(k, d) insert(k, v) remove(k)`. On a map,
   `filter each count any all find partition` pass the key and value to a

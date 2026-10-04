@@ -1,0 +1,64 @@
+# Sets: unordered collections of distinct values.
+
+fn reachable(edges: Map[Int, List[Int]], start: Int) -> Set[Int] {
+  var seen = to_set([start])
+  var todo = [start]
+  while not todo.is_empty() {
+    let v = todo.pop!().unwrap()
+    for w in edges.get_or(v, []) {
+      if seen.insert!(w) {
+        todo.push!(w)
+      }
+    }
+  }
+  seen
+}
+
+test "building and querying sets" {
+  let s = to_set([3, 1, 3, 2])
+  assert s.len() == 3 and 1 in s and not (5 in s) and s.has(2)
+  assert s == to_set([1, 2, 3]) and s != to_set([1, 2])
+  assert s.to_list() == [3, 1, 2]
+  assert to_set("hello").len() == 4 and to_set(0..3) == to_set([2, 1, 0])
+  assert to_set().is_empty() and str(to_set([1, 2])) == "to_set([1, 2])"
+}
+
+test "changing sets" {
+  var s: Set[Int] = to_set()
+  assert s.insert!(4) and not s.insert!(4)
+  s.insert!(5)
+  assert s.remove!(4) and not s.remove!(4)
+  assert s == to_set([5])
+  assert s.insert(6) == to_set([5, 6]) and s == to_set([5])
+  assert catch(fn() => { var t: Set[Int] = to_set(); t.insert!("x"); t }).is_err()
+  s.clear!()
+  assert s.is_empty()
+}
+
+test "set algebra" {
+  let a = to_set([1, 2, 3])
+  let b = to_set([2, 3, 4])
+  assert a.union(b) == to_set([1, 2, 3, 4])
+  assert a.intersection(b) == to_set([2, 3])
+  assert a.difference(b) == to_set([1])
+  assert to_set([2]).is_subset(a) and not a.is_subset(b)
+}
+
+test "sets in other values and functions" {
+  let edges = [1: [2, 3], 2: [4], 3: [4], 4: [1], 5: [6]]
+  assert reachable(edges, 1) == to_set([1, 2, 3, 4])
+  assert [to_set([1]): "a"][to_set([1])] == "a"
+  assert to_set([1, 2]).map(fn(x) => x * 2).sort() == [2, 4]
+  assert to_json(to_set([1, 2])) == "[1,2]"
+}
+
+property "a set has no duplicates" (s: Set[Int]) {
+  assert s.to_list().unique() == s.to_list()
+  assert to_set(s.to_list()) == s
+}
+
+property "union contains both" (a: Set[Int], b: Set[Int]) {
+  let u = a.union(b)
+  assert a.is_subset(u) and b.is_subset(u)
+  assert u.len() == a.len() + b.len() - a.intersection(b).len()
+}

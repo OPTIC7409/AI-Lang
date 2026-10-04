@@ -203,7 +203,7 @@ impl Server {
             for c in ["pi", "tau", "e", "inf", "max_int", "min_int"] {
                 items.add(c, KIND_CONSTANT, String::new(), String::new());
             }
-            for t in ["Int", "Float", "Str", "Bool", "Unit", "List", "Map", "Option", "Result", "Range", "Any", "Some", "None", "Ok", "Err"] {
+            for t in ["Int", "Float", "Str", "Bool", "Unit", "List", "Map", "Set", "Option", "Result", "Range", "Any", "Some", "None", "Ok", "Err"] {
                 items.add(t, KIND_STRUCT, String::new(), String::new());
             }
             // Any other name in the file (parameters, local variables).

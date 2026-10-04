@@ -261,6 +261,7 @@ fn confusion_hint(name: &str) -> Option<&'static str> {
         "format" | "sprintf" | "fmt" => "use string interpolation with a format spec: `\"{x:.2} {name:>10}\"`",
         "filter_map" | "filterMap" | "compact_map" => "use a comprehension: `[f(x) for x in xs if keep(x)]`, or `collect_some`",
         "Vec" | "vec" | "array" | "Array" | "list" => "lists are written `[1, 2, 3]`; the type is `List[Int]`",
+        "HashSet" | "Set" | "TreeSet" | "frozenset" | "set_new" => "a set is built with `to_set(xs)` (empty: `to_set()`); the type is `Set[Int]`",
         "HashMap" | "dict" | "Dict" | "hashmap" | "map_new" => "maps are written `[\"a\": 1]` (empty: `[:]`); the type is `Map[Str, Int]`",
         "set!" | "put!" | "update!" | "replace!" => "assign directly: `xs[i] = v` or `m[k] = v` (the non-mutating `set(xs, i, v)` returns a copy)",
         "mod" | "rem" => "use the `%` operator (the result takes the sign of the divisor)",
@@ -1088,6 +1089,12 @@ impl<'a> Resolver<'a> {
                         let k = targs.pop().unwrap_or(Ty::Any);
                         Ty::Map(Box::new(k), Box::new(v))
                     }
+                    "Set" => {
+                        if targs.len() > 1 {
+                            arity_err(self, 1);
+                        }
+                        Ty::Set(Box::new(targs.pop().unwrap_or(Ty::Any)))
+                    }
                     "Fn" => Ty::Fn(vec![], Box::new(Ty::Any)),
                     _ => {
                         if let Some(i) = type_params.iter().position(|p| *p == name) {
@@ -1112,8 +1119,10 @@ impl<'a> Resolver<'a> {
                             let short: Name = Rc::from(name.rsplit('.').next().unwrap());
                             Ty::Named { id, name: short, args: targs }
                         } else {
-                            let mut cands: Vec<String> =
-                                vec!["Int", "Float", "Str", "Bool", "Unit", "Any", "List", "Map", "Range"].into_iter().map(String::from).collect();
+                            let mut cands: Vec<String> = vec!["Int", "Float", "Str", "Bool", "Unit", "Any", "List", "Map", "Set", "Range"]
+                                .into_iter()
+                                .map(String::from)
+                                .collect();
                             cands.extend(self.ns.types.keys().map(|k| k.to_string()));
                             cands.extend(self.ns.aliases.keys().map(|k| k.to_string()));
                             cands.extend(self.ctx.builtins.types.keys().map(|k| k.to_string()));
@@ -1681,6 +1690,8 @@ impl<'a> Resolver<'a> {
                     )
                     .at(span)
                     .note(format!("usage: {}", b.doc.lines().next().unwrap_or("")));
+                    // `set([1, 2])` from Python: a set of values is `to_set`.
+                    let d = if b.name == "set" && positional <= 1 { d.help("for a set of values, use `to_set(xs)`") } else { d };
                     self.error(d);
                 }
             }
@@ -2817,7 +2828,7 @@ fn flatten_alts<'p>(p: &'p Pattern, out: &mut Vec<&'p Pattern>) {
 }
 
 fn is_primitive_type(name: &str) -> bool {
-    matches!(name, "Int" | "Float" | "Str" | "Bool" | "Unit" | "Any" | "List" | "Map" | "Range" | "Fn")
+    matches!(name, "Int" | "Float" | "Str" | "Bool" | "Unit" | "Any" | "List" | "Map" | "Set" | "Range" | "Fn")
 }
 
 fn field_names(td: &TypeDef) -> Vec<Name> {
