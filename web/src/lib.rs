@@ -37,6 +37,7 @@ const MODE_TEST: u32 = 1;
 const MODE_VERIFY: u32 = 2;
 const MODE_CHECK: u32 = 3;
 const MODE_VERIFY_ALL: u32 = 4;
+const MODE_FORMAT: u32 = 5;
 
 thread_local! {
     static RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -121,6 +122,17 @@ fn render(it: &Interp, diags: &[Diagnostic]) -> String {
 }
 
 fn run(src: &str, input: Vec<u8>, mode: u32) -> Outcome {
+    if mode == MODE_FORMAT {
+        // `out` is the formatted source.
+        return match cogito::format::format_source(src) {
+            Ok(code) => Outcome { out: code, diag: String::new(), status: 0 },
+            Err(d) => {
+                let mut it = new_interp(Vec::new());
+                it.ctx.sm.add(FILE, src);
+                Outcome { out: String::new(), diag: d.render(&it.ctx.sm, true), status: 2 }
+            }
+        };
+    }
     let mut it = new_interp(input);
     if mode == MODE_TEST || mode == MODE_VERIFY || mode == MODE_VERIFY_ALL {
         it.test_mode = true;

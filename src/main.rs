@@ -21,6 +21,7 @@ USAGE:
     cogito test [PATH...]           run `test` and `property` blocks (files or directories)
     cogito verify FILE.cog          check function contracts against random inputs
     cogito check FILE.cog...        report errors and warnings without running
+    cogito fmt [--check] [PATH...]  format files in the canonical layout (--check: only report)
     cogito eval \"CODE\"              run a snippet of code
     cogito explain CODE             explain an error code (e.g. E0101)
     cogito doc [NAME]               documentation for built-in functions
@@ -227,6 +228,48 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
     }
 }
 
+fn cmd_fmt(paths: &[String], check: bool, color: bool) -> ExitCode {
+    let files = collect_files(paths);
+    let (mut changed, mut failed) = (0, 0);
+    for f in &files {
+        let src = match std::fs::read_to_string(f) {
+            Ok(s) => s,
+            Err(e) => {
+                cogito::err_outln!("error: cannot read `{}`: {}", f.display(), e);
+                failed += 1;
+                continue;
+            }
+        };
+        match cogito::format::format_source(&src) {
+            Ok(out) if out == src => {}
+            Ok(out) => {
+                changed += 1;
+                if check {
+                    cogito::outln!("{} would be reformatted", f.display());
+                } else if let Err(e) = std::fs::write(f, out) {
+                    cogito::err_outln!("error: cannot write `{}`: {}", f.display(), e);
+                    failed += 1;
+                } else {
+                    cogito::outln!("formatted {}", f.display());
+                }
+            }
+            Err(d) => {
+                let mut it = Interp::new();
+                it.ctx.sm.add(f.display().to_string(), src);
+                cogito::err_out!("{}", d.render(&it.ctx.sm, color));
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        ExitCode::from(2)
+    } else if check && changed > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 fn cmd_check(paths: &[String], color: bool) -> ExitCode {
     let files = collect_files(paths);
     let mut errors = 0;
@@ -426,6 +469,11 @@ fn real_main() -> ExitCode {
                     ExitCode::from(2)
                 }
             }
+        }
+        "fmt" => {
+            let check = args[1..].iter().any(|a| a == "--check");
+            let paths: Vec<String> = args[1..].iter().filter(|a| !a.starts_with("--")).cloned().collect();
+            cmd_fmt(&paths, check, color)
         }
         "check" => {
             let paths: Vec<String> = args[1..].iter().filter(|a| !a.starts_with("--")).cloned().collect();

@@ -28,6 +28,7 @@ jobs:
           cargo build --release
           ./target/release/cogito test tests/lang examples
           ./target/release/cogito check examples
+          ./target/release/cogito fmt --check examples tests/lang web/examples
         shell: bash
 
   wasm:

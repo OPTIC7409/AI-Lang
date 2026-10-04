@@ -181,6 +181,7 @@ Hello, world!
 | `cogito test [PATHS]` | run `test` and `property` blocks |
 | `cogito verify FILE.cog` | check contracts against random inputs |
 | `cogito check [PATHS]` | report errors and warnings without running |
+| `cogito fmt [--check] [PATHS]` | format files in the one canonical layout |
 | `cogito eval "CODE"` | run a snippet |
 | `cogito explain E0101` | explain an error code |
 | `cogito doc [NAME]` | built-in function reference |

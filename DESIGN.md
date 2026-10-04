@@ -299,6 +299,23 @@ values of the variables involved.
 *Why:* for a model fixing its own code, the error message is the only
 feedback channel. A good message turns a guess into a correction.
 
+### One layout: `cogito fmt`
+
+`cogito fmt` rewrites files in the canonical layout: two-space indentation
+(one level per open bracket, plus one for continuation lines such as
+`|> map(...)`, `requires ...` and `| Variant(...)`), one space around binary
+operators and after commas and colons, none inside brackets, and at most one
+blank line in a row. It changes only whitespace: line breaks stay where the
+author put them, comments are kept (trailing comments keep their column, so
+aligned comments stay aligned), and the result must lex to exactly the same
+tokens as the input, or the file is left alone. CI runs `cogito fmt --check`.
+
+*Why:* "one obvious way" should extend to layout, so that diffs show only
+changes in meaning, and so that code written by models and by people looks
+the same. Keeping the author's line breaks avoids the hardest part of a
+pretty-printer (deciding where to break long lines) and keeps the formatter
+small enough to trust.
+
 ### The spec fits in a context window
 
 [docs/llm-spec.md](docs/llm-spec.md) is the complete language: syntax,
@@ -419,8 +436,6 @@ README.
 - Deeper static checking: arguments of built-ins, the parameter types of
   passed-in functions, and flow-sensitive types for reassigned `var`s.
 - A bytecode compiler for speed.
-- A formatter (`cogito fmt`) to make the "one obvious way" principle
-  extend to layout.
 - Richer contract-guided generation: today simple numeric bounds in `requires`
   steer the generator; more general constraints could be solved instead of
   filtered.

@@ -318,6 +318,7 @@ details.stdin textarea {
       <button id="btn-test" disabled title="Run the test and property blocks">Test</button>
       <button id="btn-verify" disabled title="Check function contracts against generated inputs">Verify</button>
       <button id="btn-check" disabled title="Report errors and warnings without running">Check</button>
+      <button id="btn-format" disabled title="Rewrite the code in the canonical layout (cogito fmt)">Format</button>
       <button class="stop" id="btn-stop" hidden>Stop</button>
     </div>
     <p class="what" id="what">Loading the interpreter…</p>
@@ -365,9 +366,9 @@ details.stdin textarea {
   "use strict";
   const $ = (id) => document.getElementById(id);
   const src = $("source"), hl = $("highlight"), gutter = $("gutter"), out = $("output"), status = $("status");
-  const buttons = { run: $("btn-run"), test: $("btn-test"), verify: $("btn-verify"), check: $("btn-check") };
-  const MODES = { run: 0, test: 1, verify: 2, check: 3 };
-  const VERBS = { run: "Running", test: "Testing", verify: "Verifying", check: "Checking" };
+  const buttons = { run: $("btn-run"), test: $("btn-test"), verify: $("btn-verify"), check: $("btn-check"), format: $("btn-format") };
+  const MODES = { run: 0, test: 1, verify: 2, check: 3, format: 5 };
+  const VERBS = { run: "Running", test: "Testing", verify: "Verifying", check: "Checking", format: "Formatting" };
 
   // ---------------------------------------------------------------- editor
 
@@ -599,6 +600,19 @@ details.stdin textarea {
   function finish(result, ms) {
     const action = busy.action;
     busy = null; clearInterval(timer);
+    if (action === "format" && result.status === 0) {
+      // Replace the code (keeping undo where the browser allows it).
+      if (result.out !== src.value) {
+        src.focus();
+        src.select();
+        if (!document.execCommand || !document.execCommand("insertText", false, result.out)) src.value = result.out;
+        src.setSelectionRange(0, 0);
+        refresh(); saveDraft();
+      }
+      setStatus("formatted", "ok");
+      setBusy(false);
+      return;
+    }
     show(result, ms, action);
     setBusy(false);
   }

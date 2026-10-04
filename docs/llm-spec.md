@@ -9,7 +9,9 @@ correct programs; it is written to fit in a language model's context window.
 Run: `cogito FILE.cog [ARGS]` · Test: `cogito test FILE.cog` · Check contracts:
 `cogito verify FILE.cog` · Static check: `cogito check FILE.cog` · Snippet:
 `cogito eval "CODE"` (prints the last expression's value) · REPL: `cogito` ·
-Explain an error code: `cogito explain E0101` · Built-in docs: `cogito doc [NAME]`.
+Explain an error code: `cogito explain E0101` · Built-in docs: `cogito doc [NAME]` ·
+Format: `cogito fmt [--check] [PATHS]` (two-space indentation, canonical spacing;
+line breaks and comments are kept).
 Options: `--max-depth N` (before the file name); for `test`/`verify`:
 `--cases N`, `--seed N`, `--filter TEXT`, `--budget N`, and `--all` (verify
 functions without contracts too). Arguments after the file name go to the
