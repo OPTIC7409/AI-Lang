@@ -124,6 +124,9 @@ pub struct Interp {
     pub clock_start: f64,
     /// The status passed to `exit()` in embedded mode.
     pub exit_code: Option<i32>,
+    /// Emptied vectors kept for reuse as argument lists and local frames,
+    /// so that a function call does not allocate.
+    pool: Vec<Vec<Value>>,
     stdout: std::io::BufWriter<std::io::Stdout>,
     stdout_tty: bool,
     pub none: Value,
@@ -192,6 +195,7 @@ impl Interp {
             input: None,
             clock_start: crate::platform::monotonic_seconds(),
             exit_code: None,
+            pool: Vec::new(),
             stdout: std::io::BufWriter::with_capacity(1 << 16, std::io::stdout()),
             stdout_tty: std::io::stdout().is_terminal(),
             none,
@@ -645,7 +649,107 @@ impl Interp {
                 _ => {}
             }
         }
-        let (root, mut steps) = self.eval_place(target, env)?;
+        // Fast path: `xs[i] = v` or `m[k] = v` on a local list or map, with
+        // no declared type or a declared `List[T]` (the common case in loops).
+        if let ExprKind::Index { target: t, index } = &target.kind {
+            if let ExprKind::Var(Var { res: VarRes::Local(s), .. }) = &t.kind {
+                let elem = match decl {
+                    None => Some(None),
+                    Some(Ty::List(et)) => Some(Some((**et).clone())),
+                    _ => None,
+                };
+                if let Some(elem) = elem {
+                    let idx = self.eval(index, env)?;
+                    let slot = *s as usize;
+                    if let Some(done) = self.fast_index_assign(slot, &idx, op, &rhs, elem.as_ref(), decl, span, env)? {
+                        return Ok(done);
+                    }
+                    let steps = vec![Step::Index(idx)];
+                    return self.assign_at(PlaceRoot::Local(*s), steps, op, rhs, decl, span, env);
+                }
+            }
+        }
+        let (root, steps) = self.eval_place(target, env)?;
+        self.assign_at(root, steps, op, rhs, decl, span, env)
+    }
+
+    /// `xs[i] = v` (or `xs[i] op= v`) on a local list or map. Returns `None`
+    /// when the general path is needed (an error to report, or a type check
+    /// that needs more than the element type).
+    #[allow(clippy::too_many_arguments)]
+    fn fast_index_assign(
+        &mut self,
+        slot: usize,
+        idx: &Value,
+        op: Option<BinOp>,
+        rhs: &Value,
+        elem: Option<&Ty>,
+        decl: Option<&Ty>,
+        span: Span,
+        env: &mut Env,
+    ) -> R<Option<()>> {
+        match (&env.locals[slot], idx) {
+            (Value::List(xs), Value::Int(i)) => {
+                let Some(j) = norm_index(*i, xs.len()) else { return Ok(None) };
+                let mut nv = match op {
+                    None => rhs.clone(),
+                    Some(op) => {
+                        let cur = xs[j].clone();
+                        self.binop(op, cur, rhs.clone(), span)?
+                    }
+                };
+                // With a declared element type, the new element must have it
+                // (Ints become Floats); the list's type memo stays valid.
+                let stamp = match (elem, decl) {
+                    (Some(et), Some(t)) => {
+                        if !self.has_type(&nv, et, false) {
+                            match self.conform(nv, et) {
+                                Ok(v) => nv = v,
+                                Err(_) => return Ok(None),
+                            }
+                        }
+                        let fp = t.fingerprint();
+                        (xs.checked() == fp).then_some(fp)
+                    }
+                    _ => None,
+                };
+                if let Value::List(xs) = &mut env.locals[slot] {
+                    Rc::make_mut(xs)[j] = nv;
+                    if let Some(fp) = stamp {
+                        xs.set_checked(fp);
+                    }
+                }
+                Ok(Some(()))
+            }
+            (Value::Map(m), _) if elem.is_none() && decl.is_none() => {
+                let nv = match op {
+                    None => rhs.clone(),
+                    Some(op) => {
+                        let Some(cur) = m.get(idx).cloned() else { return Ok(None) };
+                        self.binop(op, cur, rhs.clone(), span)?
+                    }
+                };
+                if let Value::Map(m) = &mut env.locals[slot] {
+                    Rc::make_mut(m).insert(idx.clone(), nv);
+                }
+                Ok(Some(()))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Assign to an evaluated place (the general path).
+    #[allow(clippy::too_many_arguments)]
+    fn assign_at(
+        &mut self,
+        root: PlaceRoot,
+        mut steps: Vec<Step>,
+        op: Option<BinOp>,
+        rhs: Value,
+        decl: Option<&Ty>,
+        span: Span,
+        env: &mut Env,
+    ) -> R<()> {
         let types = self.place_types(&root, &steps, decl, env);
         // Map keys must have the declared key type (an Int key becomes a
         // Float where Float keys are declared).
@@ -940,8 +1044,25 @@ impl Interp {
         self.diag(span, "E0209", format!("{} must be a Bool, but this is {}", what, describe(v))).help(help)
     }
 
+    /// An empty vector, reused from earlier calls when possible.
+    #[inline]
+    fn take_vec(&mut self, cap: usize) -> Vec<Value> {
+        match self.pool.pop() {
+            Some(v) => v,
+            None => Vec::with_capacity(cap.max(4)),
+        }
+    }
+
+    #[inline]
+    fn give_vec(&mut self, mut v: Vec<Value>) {
+        if self.pool.len() < 256 && v.capacity() <= 64 {
+            v.clear();
+            self.pool.push(v);
+        }
+    }
+
     pub fn eval_args(&mut self, args: &[Arg], env: &mut Env, first: Option<Value>) -> R<(Vec<Value>, Vec<(Name, Value)>)> {
-        let mut pos = Vec::with_capacity(args.len() + 1);
+        let mut pos = self.take_vec(args.len() + 1);
         if let Some(f) = first {
             pos.push(f);
         }
@@ -969,6 +1090,98 @@ impl Interp {
             ExprKind::Float(f) => Ok(Value::Float(*f)),
             ExprKind::Str(s) => Ok(Value::Str(s.clone())),
             ExprKind::Var(v) => self.load(v, e.span, env),
+            ExprKind::Field { target, name, name_span } => {
+                let v = self.eval(target, env)?;
+                self.get_field(&v, name, *name_span)
+            }
+            ExprKind::Index { target, index } => {
+                let v = self.eval(target, env)?;
+                let mut i = self.eval(index, env)?;
+                // `xs[a..=-1]`: an inclusive end counted from the back runs
+                // through that element (the stored exclusive end, -1 + 1 = 0,
+                // would otherwise mean the front).
+                if let (ExprKind::Range { inclusive: true, end: Some(_), .. }, Value::Range(r)) = (&index.kind, &i) {
+                    if let Some(end) = r.end.filter(|end| *end <= 0) {
+                        let len = match &v {
+                            Value::List(xs) | Value::Tuple(xs) => xs.len(),
+                            Value::Str(s) => s.char_len(),
+                            _ => 0,
+                        };
+                        i = Value::Range(Rc::new(RangeVal { start: r.start, end: Some(end + len as i128) }));
+                    }
+                }
+                self.index_value(v, i, e.span)
+            }
+            ExprKind::Call { callee, args } => {
+                let f = self.eval(callee, env)?;
+                let (pos, named) = self.eval_args(args, env, None)?;
+                self.call_value(&f, pos, named, e.span)
+            }
+            ExprKind::Unary { op, expr } => {
+                let v = self.eval(expr, env)?;
+                match (op, v) {
+                    (UnOp::Neg, Value::Int(i)) => {
+                        i.checked_neg().map(Value::Int).ok_or_else(|| self.err(e.span, "E0207", "integer overflow in negation"))
+                    }
+                    (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
+                    (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+                    (UnOp::Not, other) => Err(self.fail(self.not_bool(expr.span, "the operand of `not`", &other))),
+                    (UnOp::Neg, other) => Err(self.err(e.span, "E0211", format!("cannot negate {}", describe(&other)))),
+                }
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                let a = self.eval(lhs, env)?;
+                let b = self.eval(rhs, env)?;
+                self.binop(*op, a, b, e.span)
+            }
+            ExprKind::And(a, b) => {
+                if !self.eval_cond(a, env, "the left side of `and`")? {
+                    return Ok(Value::Bool(false));
+                }
+                Ok(Value::Bool(self.eval_cond(b, env, "the right side of `and`")?))
+            }
+            ExprKind::Or(a, b) => {
+                if self.eval_cond(a, env, "the left side of `or`")? {
+                    return Ok(Value::Bool(true));
+                }
+                Ok(Value::Bool(self.eval_cond(b, env, "the right side of `or`")?))
+            }
+            ExprKind::If { cond, then, els } => {
+                if self.eval_cond(cond, env, "the `if` condition")? {
+                    self.eval(then, env)
+                } else if let Some(x) = els {
+                    self.eval(x, env)
+                } else {
+                    Ok(Value::Unit)
+                }
+            }
+            ExprKind::Block(stmts) => self.exec_block(stmts, env),
+            ExprKind::Lambda(def) => Ok(self.make_closure(def, env)),
+            ExprKind::Break(v) => {
+                let v = match v {
+                    Some(x) => self.eval(x, env)?,
+                    None => Value::Unit,
+                };
+                Err(Ctrl::Break(v))
+            }
+            ExprKind::Continue => Err(Ctrl::Continue),
+            ExprKind::Return(v) => {
+                let v = match v {
+                    Some(x) => self.eval(x, env)?,
+                    None => Value::Unit,
+                };
+                self.try_span = None;
+                Err(Ctrl::Return(v))
+            }
+            _ => self.eval_cold(e, env),
+        }
+    }
+
+    /// The less frequent kinds of expression, kept out of `eval` so that its
+    /// stack frame stays small: every nested expression passes through `eval`.
+    #[inline(never)]
+    fn eval_cold(&mut self, e: &Expr, env: &mut Env) -> R {
+        match &e.kind {
             ExprKind::Interp(parts) => {
                 let mut s = String::new();
                 for p in parts {
@@ -1067,33 +1280,6 @@ impl Interp {
                     }
                 }
             }
-            ExprKind::Field { target, name, name_span } => {
-                let v = self.eval(target, env)?;
-                self.get_field(&v, name, *name_span)
-            }
-            ExprKind::Index { target, index } => {
-                let v = self.eval(target, env)?;
-                let mut i = self.eval(index, env)?;
-                // `xs[a..=-1]`: an inclusive end counted from the back runs
-                // through that element (the stored exclusive end, -1 + 1 = 0,
-                // would otherwise mean the front).
-                if let (ExprKind::Range { inclusive: true, end: Some(_), .. }, Value::Range(r)) = (&index.kind, &i) {
-                    if let Some(end) = r.end.filter(|end| *end <= 0) {
-                        let len = match &v {
-                            Value::List(xs) | Value::Tuple(xs) => xs.len(),
-                            Value::Str(s) => s.char_len(),
-                            _ => 0,
-                        };
-                        i = Value::Range(Rc::new(RangeVal { start: r.start, end: Some(end + len as i128) }));
-                    }
-                }
-                self.index_value(v, i, e.span)
-            }
-            ExprKind::Call { callee, args } => {
-                let f = self.eval(callee, env)?;
-                let (pos, named) = self.eval_args(args, env, None)?;
-                self.call_value(&f, pos, named, e.span)
-            }
             ExprKind::MethodCall { receiver, method, method_span, args, mutating, root_ty } => {
                 if *mutating {
                     return self.mutating_call(receiver, method, *method_span, args, e.span, root_ty.as_ref(), env);
@@ -1129,35 +1315,6 @@ impl Interp {
                 };
                 let (pos, named) = self.eval_args(args, env, Some(recv))?;
                 self.call_value(&f, pos, named, e.span)
-            }
-            ExprKind::Unary { op, expr } => {
-                let v = self.eval(expr, env)?;
-                match (op, v) {
-                    (UnOp::Neg, Value::Int(i)) => {
-                        i.checked_neg().map(Value::Int).ok_or_else(|| self.err(e.span, "E0207", "integer overflow in negation"))
-                    }
-                    (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
-                    (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-                    (UnOp::Not, other) => Err(self.fail(self.not_bool(expr.span, "the operand of `not`", &other))),
-                    (UnOp::Neg, other) => Err(self.err(e.span, "E0211", format!("cannot negate {}", describe(&other)))),
-                }
-            }
-            ExprKind::Binary { op, lhs, rhs } => {
-                let a = self.eval(lhs, env)?;
-                let b = self.eval(rhs, env)?;
-                self.binop(*op, a, b, e.span)
-            }
-            ExprKind::And(a, b) => {
-                if !self.eval_cond(a, env, "the left side of `and`")? {
-                    return Ok(Value::Bool(false));
-                }
-                Ok(Value::Bool(self.eval_cond(b, env, "the right side of `and`")?))
-            }
-            ExprKind::Or(a, b) => {
-                if self.eval_cond(a, env, "the left side of `or`")? {
-                    return Ok(Value::Bool(true));
-                }
-                Ok(Value::Bool(self.eval_cond(b, env, "the right side of `or`")?))
             }
             ExprKind::Range { start, end, inclusive } => {
                 let s = self.eval(start, env)?;
@@ -1201,15 +1358,6 @@ impl Interp {
                     )),
                 }
             }
-            ExprKind::If { cond, then, els } => {
-                if self.eval_cond(cond, env, "the `if` condition")? {
-                    self.eval(then, env)
-                } else if let Some(x) = els {
-                    self.eval(x, env)
-                } else {
-                    Ok(Value::Unit)
-                }
-            }
             ExprKind::Match { scrutinee, arms } => {
                 let v = self.eval(scrutinee, env)?;
                 for arm in arms {
@@ -1236,8 +1384,6 @@ impl Interp {
                         .help("add an arm for this value, or a catch-all arm `_ => ...`"),
                 ))
             }
-            ExprKind::Block(stmts) => self.exec_block(stmts, env),
-            ExprKind::Lambda(def) => Ok(self.make_closure(def, env)),
             ExprKind::While { cond, body } => {
                 while self.eval_cond(cond, env, "the `while` condition")? {
                     self.tick(e.span)?;
@@ -1261,22 +1407,7 @@ impl Interp {
                 let it = self.eval(iter, env)?;
                 self.exec_for(pat, it, body, env, iter.span)
             }
-            ExprKind::Break(v) => {
-                let v = match v {
-                    Some(x) => self.eval(x, env)?,
-                    None => Value::Unit,
-                };
-                Err(Ctrl::Break(v))
-            }
-            ExprKind::Continue => Err(Ctrl::Continue),
-            ExprKind::Return(v) => {
-                let v = match v {
-                    Some(x) => self.eval(x, env)?,
-                    None => Value::Unit,
-                };
-                self.try_span = None;
-                Err(Ctrl::Return(v))
-            }
+            _ => unreachable!("handled in eval"),
         }
     }
 
@@ -1554,6 +1685,19 @@ impl Interp {
 
     pub fn binop(&mut self, op: BinOp, a: Value, b: Value, span: Span) -> R {
         use Value::*;
+        // Comparisons of two Ints are the most common operation of all.
+        if let (Int(x), Int(y)) = (&a, &b) {
+            let (x, y) = (*x, *y);
+            match op {
+                BinOp::Lt => return Ok(Bool(x < y)),
+                BinOp::Le => return Ok(Bool(x <= y)),
+                BinOp::Gt => return Ok(Bool(x > y)),
+                BinOp::Ge => return Ok(Bool(x >= y)),
+                BinOp::Eq => return Ok(Bool(x == y)),
+                BinOp::Ne => return Ok(Bool(x != y)),
+                _ => {}
+            }
+        }
         match op {
             BinOp::Add => match (a, b) {
                 (Int(x), Int(y)) => x.checked_add(y).map(Int).ok_or_else(|| self.overflow(span, op, x, y)),
@@ -2306,12 +2450,16 @@ impl Interp {
                 .note(format!("`{}` is defined at {}", def.display_name(), self.location(def.name_span))),
             ));
         }
-        let mut env = Env { locals: vec![Value::Unit; def.num_slots as usize], closure: Some(c.clone()) };
+        let mut locals = self.take_vec(def.num_slots as usize);
+        locals.resize(def.num_slots as usize, Value::Unit);
+        let mut env = Env { locals, closure: Some(c.clone()) };
         let mut filled = 0u64;
+        let mut args = args;
         let nargs = args.len();
-        for (i, a) in args.into_iter().enumerate() {
+        for (i, a) in args.drain(..).enumerate() {
             env.locals[def.params[i].slot as usize] = a;
         }
+        self.give_vec(args);
         if nparams <= 64 {
             filled = if nargs >= 64 { u64::MAX } else { (1u64 << nargs) - 1 };
         }
@@ -2339,9 +2487,10 @@ impl Interp {
         if r.is_err() && want_first && nparams > 0 {
             self.salvaged = Some(std::mem::take(&mut env.locals[def.params[0].slot as usize]));
         }
-        let result = r?;
-        let first = if want_first && nparams > 0 { std::mem::take(&mut env.locals[def.params[0].slot as usize]) } else { Value::Unit };
-        Ok((result, first))
+        let first = if want_first && nparams > 0 && r.is_ok() { std::mem::take(&mut env.locals[def.params[0].slot as usize]) } else { Value::Unit };
+        let locals = std::mem::take(&mut env.locals);
+        self.give_vec(locals);
+        Ok((r?, first))
     }
 
     fn call_body(&mut self, def: &Rc<FnDef>, env: &mut Env, filled: u64, span: Span) -> R {
@@ -2379,7 +2528,11 @@ impl Interp {
                 }
             }
             if let Some(t) = &p.ty {
-                if !self.has_type(&env.locals[p.slot as usize], &t.ty, false) {
+                let fits = match (&t.ty, &env.locals[p.slot as usize]) {
+                    (Ty::Int, Value::Int(_)) | (Ty::Float, Value::Float(_)) | (Ty::Str, Value::Str(_)) | (Ty::Bool, Value::Bool(_)) => true,
+                    (t, v) => self.has_type(v, t, false),
+                };
+                if !fits {
                     let v = std::mem::take(&mut env.locals[p.slot as usize]);
                     match self.conform(v, &t.ty) {
                         Ok(v) => env.locals[p.slot as usize] = v,
@@ -2533,6 +2686,45 @@ impl Interp {
 
     #[allow(clippy::too_many_arguments)]
     fn mutating_call(&mut self, receiver: &Expr, method: &Var, method_span: Span, args: &[Arg], span: Span, decl: Option<&Ty>, env: &mut Env) -> R {
+        // Fast path: the built-in `xs.push!(x)` on a local list.
+        if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), [arg], VarRes::Global(g)) = (&receiver.kind, args, method.res) {
+            let builtin_push = matches!(self.ctx.globals[g as usize].kind, GlobalKind::Builtin(i) if BUILTINS[i as usize].name == "push!");
+            let slot = *s as usize;
+            let elem = match decl {
+                None => Some(None),
+                Some(Ty::List(et)) => Some(Some((**et).clone())),
+                _ => None,
+            };
+            if let (true, None, Some(elem), Value::List(_)) = (builtin_push, &arg.name, elem, &env.locals[slot]) {
+                let mut v = self.eval(&arg.value, env)?;
+                if let Some(et) = &elem {
+                    if !self.has_type(&v, et, false) {
+                        v = self.conform(v, et).map_err(|m| {
+                            self.fail(
+                                self.diag(
+                                    span,
+                                    "E0200",
+                                    format!("`push!` would break the declared type of `{}`: {}", self.snippet(receiver.span), m),
+                                )
+                                .help("the variable (or field) was declared with a type, and every change must respect it; nothing was changed"),
+                            )
+                        })?;
+                    }
+                }
+                let fp = decl.map(|t| t.fingerprint());
+                return match &mut env.locals[slot] {
+                    Value::List(xs) => {
+                        let valid = fp.is_some_and(|f| xs.checked() == f);
+                        Rc::make_mut(xs).push(v);
+                        if let (true, Some(f)) = (valid, fp) {
+                            xs.set_checked(f);
+                        }
+                        Ok(Value::Unit)
+                    }
+                    other => Err(self.err(span, "E0200", format!("argument 1 of `push!` must be a List, got {}", describe(other)))),
+                };
+            }
+        }
         let (mut pos, named) = self.eval_args(args, env, None)?;
         let (root, steps) = self.eval_place(receiver, env)?;
         // As for other method calls, a function from the module that

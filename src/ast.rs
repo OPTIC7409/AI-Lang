@@ -99,7 +99,13 @@ pub struct FnDef {
 
 impl FnDef {
     pub fn display_name(&self) -> Rc<str> {
-        self.name.clone().unwrap_or_else(|| Rc::from("<anonymous fn>"))
+        thread_local! {
+            static ANON: Rc<str> = Rc::from("<anonymous fn>");
+        }
+        match &self.name {
+            Some(n) => n.clone(),
+            None => ANON.with(|a| a.clone()),
+        }
     }
 
     pub fn required_params(&self) -> usize {
