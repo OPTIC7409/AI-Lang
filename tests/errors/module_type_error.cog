@@ -1,0 +1,3 @@
+# expect: E0121
+import "modules/bad_types.cog"
+print(bad_types.label(1))

@@ -1,0 +1,2 @@
+# A module with a type error (imported by module_type_error.cog).
+fn label(n: Int) -> Str => "n = " + n

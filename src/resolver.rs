@@ -977,6 +977,10 @@ impl<'a> Resolver<'a> {
                     self.diags.push(d);
                 }
             }
+            // The module's own code is type-checked too.
+            let type_errors: Vec<Diagnostic> = if has_errors { vec![] } else { crate::typecheck::check_program(self.ctx, &prog) };
+            let has_errors = has_errors || !type_errors.is_empty();
+            self.diags.extend(type_errors);
             if has_errors {
                 self.error(Diagnostic::error("E0114", format!("module `{}` has errors", imp.path)).at(imp.path_span));
                 return;
