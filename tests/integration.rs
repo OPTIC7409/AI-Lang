@@ -150,6 +150,13 @@ fn exhaustiveness_never_gives_up_silently() {
 }
 
 #[test]
+fn every_syntax_error_is_reported() {
+    let out = cogito(&["check", "tests/errors/several_syntax.cog"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(stderr.matches("error[E00").count(), 3, "{}", stderr);
+}
+
+#[test]
 fn spec_is_embedded() {
     let out = cogito(&["spec"]);
     assert!(out.status.success());

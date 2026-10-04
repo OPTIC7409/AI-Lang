@@ -1,0 +1,20 @@
+# expect: E0001
+# Three syntax errors in three functions: one run reports all of them.
+fn first(xs: List[Int]) -> Int {
+  if let Some(x) = xs.get(0) {
+    x
+  } else {
+    0
+  }
+}
+
+fn second(a: Int, b: Int) -> Bool {
+  a > 0 && b > 0
+}
+
+fn third(s: Str) -> Str {
+  match s {
+    "a" -> "x"
+    _ -> "y"
+  }
+}

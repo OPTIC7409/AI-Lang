@@ -47,9 +47,17 @@ pub fn parse_program(src: &str, file: u32) -> PResult<Program> {
 /// Like [`parse_program`], but when the program does not lex, reports every
 /// error the lexer found (several bad strings, say) rather than the first.
 pub fn parse_program_all(src: &str, file: u32) -> Result<Program, Vec<Diagnostic>> {
-    let toks = crate::lexer::lex_all(src, file, 0, src.len())?;
+    let (toks, mut errors) = crate::lexer::lex_all(src, file, 0, src.len())?;
     let mut p = Parser { src, file, toks, pos: 0, depth: 0, open_blocks: Vec::new() };
-    p.program().map_err(|d| vec![d])
+    match p.program() {
+        Ok(prog) if errors.is_empty() => Ok(prog),
+        Ok(_) => Err(errors),
+        Err(mut more) => {
+            errors.append(&mut more);
+            errors.sort_by_key(|d| d.span.map_or(0, |s| s.start));
+            Err(errors)
+        }
+    }
 }
 
 /// Parse an expression from a sub-range of the source (used for string interpolation).
@@ -275,17 +283,73 @@ impl<'s> Parser<'s> {
 
     // ------------------------------------------------------------ items
 
-    fn program(&mut self) -> PResult<Program> {
+    /// The whole file. After a syntax error, parsing resumes at the next
+    /// line that starts a top-level declaration or statement, so that one
+    /// run reports every syntax error (up to 20).
+    fn program(&mut self) -> Result<Program, Vec<Diagnostic>> {
         let mut items = Vec::new();
+        let mut errors = Vec::new();
         loop {
             self.skip_terminators();
             if self.at(&Tok::Eof) {
                 break;
             }
-            items.push(self.item()?);
-            self.expect_terminator()?;
+            match self.item().and_then(|i| self.expect_terminator().map(|_| i)) {
+                Ok(i) => items.push(i),
+                Err(d) => {
+                    errors.push(d);
+                    if errors.len() >= 20 {
+                        break;
+                    }
+                    self.depth = 0;
+                    self.open_blocks.clear();
+                    self.recover();
+                }
+            }
         }
-        Ok(Program { items, file: self.file, num_slots: 0 })
+        if errors.is_empty() {
+            Ok(Program { items, file: self.file, num_slots: 0 })
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Skip to the next token that begins a line at column 0 and could start
+    /// a top-level item (not a `}` or a continuation such as `|` or `.`).
+    fn recover(&mut self) {
+        loop {
+            if self.at(&Tok::Eof) {
+                return;
+            }
+            self.pos += 1;
+            let t = &self.toks[self.pos];
+            let start = t.span.start as usize;
+            let line_start = start == 0 || self.src.get(..start).is_some_and(|b| b.ends_with('\n'));
+            // (A `{` at the start of a line usually opens the body of what
+            // came before it.)
+            let continues = matches!(
+                t.tok,
+                Tok::RBrace
+                    | Tok::LBrace
+                    | Tok::RParen
+                    | Tok::RBracket
+                    | Tok::Else
+                    | Tok::Newline
+                    | Tok::Bar
+                    | Tok::Dot
+                    | Tok::PipeGt
+                    | Tok::And
+                    | Tok::Or
+                    | Tok::FatArrow
+                    | Tok::Requires
+                    | Tok::Ensures
+                    | Tok::Where
+                    | Tok::Comma
+            );
+            if t.tok == Tok::Eof || (line_start && !continues) {
+                return;
+            }
+        }
     }
 
     fn item(&mut self) -> PResult<Item> {

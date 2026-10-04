@@ -245,29 +245,49 @@ pub struct Lexer<'a> {
     /// Errors inside one-line strings: lexing continues on the next line,
     /// so that one run reports all of them.
     soft: Vec<Diagnostic>,
+    /// Errors for which a token was substituted (`&&` for `and`): the token
+    /// stream is still sound, so the parser can look for more errors.
+    substituted: Vec<Diagnostic>,
 }
 
 /// Lex `src[start..end]`. Spans are absolute offsets into `src`.
 pub fn lex(src: &str, file: u32, start: usize, end: usize) -> Result<Vec<Token>, Diagnostic> {
-    lex_all(src, file, start, end).map_err(|mut ds| ds.swap_remove(0))
+    match lex_all(src, file, start, end) {
+        Ok((toks, subs)) if subs.is_empty() => Ok(toks),
+        Ok((_, mut ds)) | Err(mut ds) => Err(ds.swap_remove(0)),
+    }
 }
 
-/// Like [`lex`], but reports every error in a one-line string, not just the
-/// first error.
-pub fn lex_all(src: &str, file: u32, start: usize, end: usize) -> Result<Vec<Token>, Vec<Diagnostic>> {
+/// Like [`lex`], but reports every error it can. `Ok` holds the tokens with
+/// the errors for which a token was substituted (`&&` read as `and`), so
+/// that the parser can still look for errors; `Err` means the tokens are
+/// not usable (a bad string skips the rest of its line).
+pub fn lex_all(src: &str, file: u32, start: usize, end: usize) -> Result<(Vec<Token>, Vec<Diagnostic>), Vec<Diagnostic>> {
     // A UTF-8 byte-order mark at the start of a file is ignored.
     let start = if start == 0 && src.starts_with('\u{feff}') { 3 } else { start };
-    let mut lx = Lexer { src, b: src.as_bytes(), pos: start, end, file, toks: Vec::new(), delims: Vec::new(), nesting: 0, soft: Vec::new() };
+    let mut lx = Lexer {
+        src,
+        b: src.as_bytes(),
+        pos: start,
+        end,
+        file,
+        toks: Vec::new(),
+        delims: Vec::new(),
+        nesting: 0,
+        soft: Vec::new(),
+        substituted: Vec::new(),
+    };
     let r = lx.run();
     let mut errors = std::mem::take(&mut lx.soft);
     if let Err(d) = r {
         errors.push(d);
     }
     if errors.is_empty() {
-        Ok(lx.toks)
-    } else {
-        Err(errors)
+        return Ok((lx.toks, lx.substituted));
     }
+    errors.append(&mut lx.substituted);
+    errors.sort_by_key(|d| d.span.map_or(0, |s| s.start));
+    Err(errors)
 }
 
 fn is_ident_start(c: u8) -> bool {
@@ -588,11 +608,20 @@ impl<'a> Lexer<'a> {
             },
             b'|' => match c1 {
                 b'>' => (Tok::PipeGt, 2),
-                b'|' => return Err(self.err("E0001", "unexpected `||`", start, start + 2).help("use the keyword `or` for boolean disjunction")),
+                b'|' => {
+                    let d = self.err("E0001", "unexpected `||`", start, start + 2).help("use the keyword `or` for boolean disjunction");
+                    self.substituted.push(d);
+                    (Tok::Or, 2)
+                }
                 _ => (Tok::Bar, 1),
             },
             b'&' => {
-                return Err(self.err("E0001", "unexpected character `&`", start, start + 1).help("use the keyword `and` for boolean conjunction"))
+                let len = if c1 == b'&' { 2 } else { 1 };
+                let d = self
+                    .err("E0001", format!("unexpected `{}`", &self.src[start..start + len]), start, start + len)
+                    .help("use the keyword `and` for boolean conjunction");
+                self.substituted.push(d);
+                (Tok::And, len)
             }
             b'\'' => {
                 return Err(self
