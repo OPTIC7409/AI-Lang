@@ -589,6 +589,26 @@ The simulations agent found that every record hashed to the same value,
 so a map keyed by game boards was a list in disguise: its memoized
 minimax took 95 seconds to verify, and 0.5 after the fix.
 
+The eighth round wrote command-line tools split into modules (a CSV
+summarizer, a log analyzer, an LCS diff checked against GNU `diff -u`, a
+todo manager that keeps its state in a JSON file): 5 of 8 worked on the
+first attempt. The worst finding was `parse_json` re-validating the rest
+of its input for every character of a string, so a 3 MB file took 49
+seconds; it takes 0.06 now. An adversarial agent wrote about 120 programs
+against the checker and found no false type errors, but a bare `Fn`
+annotation that only accepted functions without parameters, endless
+ranges that wrapped around past `max_int`, and warnings that missed the
+last line of a loop body.
+
+The same round added **fix-its**. Most errors an agent makes while
+learning Cogito are habits from other languages (`&&`, `!x`, `x++`,
+`null`, `elif`, `def`, `let mut`, `List<Int>`, `{"a": 1}`, `xs.length()`,
+`s.startsWith(p)`), and for most of them the correction is certain.
+Diagnostics carry those corrections as edits: `check --json` lists them,
+`cogito fix` applies them all (checking again until none are left), and
+the language server offers them as quick fixes. An agent can apply the
+edits itself instead of reading the help text and retyping the line.
+
 ## Future directions
 
 - Deeper static checking: the parameter types of functions passed to user

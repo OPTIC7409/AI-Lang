@@ -932,6 +932,15 @@ impl<'a> Checker<'a> {
                             Ty::Tuple(ts) => name.parse::<usize>().map_or(true, |i| i >= ts.len()),
                             _ => false,
                         };
+                        // An enum none of whose variants has the field.
+                        if let Ty::Named { id, .. } = &t {
+                            if let Some(TypeKind::Enum { variants }) = self.type_def(*id).map(|d| &d.kind) {
+                                if !variants.iter().any(|v| v.fields.iter().any(|f| f == name)) {
+                                    let d = self.error(*name_span, format!("no variant of {} has a field `{}`", t, name), "no such field");
+                                    d.help = Some("use `match` to get the fields of each variant".into());
+                                }
+                            }
+                        }
                         if fieldless || bad_index {
                             let msg = match &t {
                                 Ty::Tuple(ts) if name.parse::<usize>().is_ok() => format!("{} has no element `{}` (it has {})", t, name, ts.len()),
@@ -1720,6 +1729,7 @@ fn builtin_kinds(name: &str) -> &'static [Kind] {
         "replace" => &[Str, Str, Str],
         "parse_int" => &[Str, Int],
         "chr" | "bit_not" | "seed" | "exit" => &[Int],
+        "range" => &[Int, Int, Int],
         "gcd" | "lcm" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "bit_and" | "bit_or" | "bit_xor" | "shl" | "shr" | "wrapping_shl"
         | "shr_logical" | "random_int" => &[Int, Int],
         "abs" | "sqrt" | "exp" | "ln" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "floor" | "ceil" | "trunc" | "sign"
