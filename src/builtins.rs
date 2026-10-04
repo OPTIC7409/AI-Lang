@@ -860,9 +860,9 @@ fn b_float(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     match &a[0] {
         Value::Int(n) => Ok(Value::Float(*n as f64)),
         Value::Float(f) => Ok(Value::Float(*f)),
-        Value::Str(s) => match s.trim().replace('_', "").parse::<f64>() {
-            Ok(n) => Ok(Value::Float(n)),
-            Err(_) => Err(it.fail(
+        Value::Str(s) => match parse_float_text(&s.trim().replace('_', "")) {
+            Some(n) => Ok(Value::Float(n)),
+            None => Err(it.fail(
                 it.diag(sp, "E0216", format!("cannot convert {} to Float", repr(&a[0])))
                     .help("use `parse_float(s)`, which returns None instead of failing"),
             )),
@@ -912,10 +912,18 @@ fn b_hash(_: &mut Interp, a: Vec<Value>, _: Span) -> R {
     Ok(Value::Int(hash_of(&a[0]) as i64))
 }
 
+/// A Float from text: `inf` and `-inf` (as `str` prints them) are allowed,
+/// but not NaN, or a number too large for a Float (`1e999`).
+fn parse_float_text(t: &str) -> Option<f64> {
+    let f = t.parse::<f64>().ok()?;
+    let word = t.trim_start_matches(['+', '-']);
+    (f.is_finite() || word.eq_ignore_ascii_case("inf") || word.eq_ignore_ascii_case("infinity")).then_some(f)
+}
+
 fn b_parse_float(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = str_arg(it, &a, 0, "parse_float", sp)?;
     let t = s.trim().replace('_', "");
-    Ok(it.option(t.parse::<f64>().ok().map(Value::Float)))
+    Ok(it.option(parse_float_text(&t).map(Value::Float)))
 }
 
 fn b_ord(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {

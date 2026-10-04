@@ -174,6 +174,15 @@ fn layout(src: &str, items: &[Item]) -> String {
     let mut prev_first = false;
     // The last token of the code so far (not a comment).
     let mut last_code: Option<&Tok> = None;
+    // Whether the last line of code started by closing a bracket.
+    let mut closer_line = false;
+    // Whether this line continues a condition or contract (`and b {`): a
+    // block it opens belongs to the statement, not to the continuation.
+    let mut header_line = false;
+    // Whether a `match` has started on this line (its `{` is an expression's).
+    let mut line_match = false;
+    // How many brackets were open when the last line of code began.
+    let mut line_depth = 0;
     for it in items {
         let gap = match prev {
             Some(p) => &src[p.end..it.start],
@@ -197,16 +206,34 @@ fn layout(src: &str, items: &[Item]) -> String {
                 (_, Some(l)) => l + 1,
                 (_, None) => 0,
             };
+            // A line after one that opened a bracket is already indented by
+            // that bracket (`f(fn(x) =>` then the body), so is not also a
+            // continuation.
+            let opened = stack.len() > line_depth;
+            if it.tok.is_some() {
+                line_depth = stack.len();
+            }
             let continuation = match it.tok {
+                _ if opened => false,
                 Some(t) if is_closer(t) => false,
                 Some(t) if continues_line(t) => true,
+                // `else` lines up with a `}` that ends the line above, and is
+                // a continuation after anything else (`let y = if c { 1 }`).
+                Some(Tok::Else) => !closer_line,
                 _ => last_code.is_some_and(wants_continuation) && !matches!(last_code, Some(t) if is_opener(t)),
             };
             if continuation {
                 level += 1;
             }
+            let logical = |t: Option<&Tok>| matches!(t, Some(Tok::And | Tok::Or));
+            line_match = false;
+            header_line =
+                continuation && (logical(it.tok) || logical(last_code) || matches!(it.tok, Some(Tok::Requires | Tok::Ensures | Tok::Where)));
             for _ in 0..level {
                 out.push_str(INDENT);
+            }
+            if let Some(t) = it.tok {
+                closer_line = is_closer(t);
             }
         } else if let Some(p) = prev {
             match (p.tok, it.tok) {
@@ -231,10 +258,11 @@ fn layout(src: &str, items: &[Item]) -> String {
         out.push_str(&src[it.start..it.end]);
         if let Some(t) = it.tok {
             if is_opener(t) {
-                stack.push(level);
+                stack.push(if header_line && !line_match && *t == Tok::LBrace { level - 1 } else { level });
             } else if is_closer(t) {
                 stack.pop();
             }
+            line_match |= *t == Tok::Match;
             last_code = Some(t);
             before_prev = prev.and_then(|p| p.tok);
         }
@@ -275,6 +303,15 @@ mod tests {
         assert_eq!(fmt(src), "type Shape =\n  | Circle(r: Float)\n  | Sq(s: Float)\n");
         let src = "fn f(x: Int) -> Int\nrequires x > 0\n{\nx\n}\n";
         assert_eq!(fmt(src), "fn f(x: Int) -> Int\n  requires x > 0\n{\n  x\n}\n");
+        // A block opened on a continued condition belongs to the `if`.
+        let src = "if a\nand b {\nx\n}\nwhile a or\nb {\nx\n}\n";
+        assert_eq!(fmt(src), "if a\n  and b {\n  x\n}\nwhile a or\n  b {\n  x\n}\n");
+        // `else` lines up with a `}` above it, and continues anything else.
+        let src = "if a {\nx\n}\nelse {\ny\n}\nlet v = if a { 1 }\nelse if b { 2 }\nelse { 3 }\n";
+        assert_eq!(fmt(src), "if a {\n  x\n}\nelse {\n  y\n}\nlet v = if a { 1 }\n  else if b { 2 }\n  else { 3 }\n");
+        // One level for a bracket opened on the line above, not two.
+        let src = "let ok = xs.all(fn(x) =>\nx > 0)\nprint(a +\nb)\n";
+        assert_eq!(fmt(src), "let ok = xs.all(fn(x) =>\n  x > 0)\nprint(a +\n  b)\n");
     }
 
     #[test]

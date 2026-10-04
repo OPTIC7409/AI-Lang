@@ -1767,8 +1767,13 @@ impl<'a> Resolver<'a> {
                     match self.lookup(&method.name) {
                         Some(f) => {
                             method.res = f.res;
+                            // An imported module's function of the same name
+                            // may answer instead (by the receiver's type), so
+                            // its arity cannot be checked here.
                             if let VarRes::Global(slot) = f.res {
-                                self.check_call(slot, 1, args, span);
+                                if !self.ctx.module_fns.contains(&method.name) {
+                                    self.check_call(slot, 1, args, span);
+                                }
                             }
                         }
                         None => {
@@ -1787,7 +1792,9 @@ impl<'a> Resolver<'a> {
                             // function from method-call syntax (`lines.len()` with a
                             // variable called `len` still calls the built-in).
                             let shadowing_var = match f.res {
-                                VarRes::Local(_) | VarRes::Capture(_) => !f.is_fn,
+                                // Even a local function: in `let get = fn(k) => m.get(k)`
+                                // the body's `m.get` is the built-in, as at top level.
+                                VarRes::Local(_) | VarRes::Capture(_) | VarRes::SelfFn => true,
                                 VarRes::Global(slot) => {
                                     matches!(self.ctx.globals[slot as usize].kind, GlobalKind::Let | GlobalKind::Var | GlobalKind::Const)
                                 }
@@ -1799,7 +1806,7 @@ impl<'a> Resolver<'a> {
                             };
                             let f = Found { res: method.res, ..f };
                             if let VarRes::Global(slot) = f.res {
-                                if !self.ctx.known_fields.contains(&method.name) {
+                                if !self.ctx.known_fields.contains(&method.name) && !self.ctx.module_fns.contains(&method.name) {
                                     self.check_call(slot, 1, args, span);
                                 }
                             }

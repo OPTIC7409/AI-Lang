@@ -1,0 +1,55 @@
+# Regressions found by the third round of dogfooding.
+
+import "lib/queue.cog"
+
+test "a module's function may take more arguments than the built-in it shadows" {
+  var q = queue.new()
+  q.push!(1)
+  q.insert!(0, 7, 2)
+  insert!(q, 0, 9, 1)
+  assert q.items == [9, 7, 7, 1]
+  assert q.get(5, -1) == -1 and q.get(0, -1) == 9
+}
+
+fn lookup_twice(m: Map[Str, Int]) -> (Option[Int], Int) {
+  # The body's `m.get` and `ys.len()` are the built-ins, not these locals.
+  let get = fn(k) => m.get(k)
+  let len = fn(ys) => ys.len() * 10
+  (get("a"), len([1, 2]))
+}
+
+test "a local function named like a built-in does not take over method syntax" {
+  assert lookup_twice(["a": 1]) == (Some(1), 20)
+}
+
+test "a local function is still callable with method syntax" {
+  let double = fn(x) => x * 2
+  assert 5.double() == 10
+}
+
+test "zero padding works for every number base" {
+  assert "{10:04x}" == "000a"
+  assert "{255:06X}" == "0000FF"
+  assert "{5:08b}" == "00000101"
+  assert "{-10:05x}" == "-000a"
+  assert "{inf:05}" == "  inf"
+  assert "{1234567:,}" == "1,234,567"
+}
+
+test "parse_float rejects nan and numbers too large for a Float" {
+  assert parse_float("2.5") == Some(2.5)
+  assert parse_float("nan") == None and parse_float("NaN") == None
+  assert parse_float("1e999") == None
+  assert parse_float("-inf") == Some(-inf)
+  assert parse_float(str(inf)) == Some(inf)
+  assert catch(fn() => float("nan")).is_err()
+  assert catch(fn() => float("1e999")).is_err()
+}
+
+test "nan cannot be ordered" {
+  let n = inf - inf
+  assert is_nan(n)
+  assert catch(fn() => n < 1.0).is_err()
+  assert catch(fn() => 1.0 >= n).is_err()
+  assert n != n
+}

@@ -1663,6 +1663,9 @@ impl Interp {
             (_, Value::Str(_), Value::Int(_) | Value::Float(_)) | (_, Value::Int(_) | Value::Float(_), Value::Str(_)) => {
                 Some("convert between numbers and strings explicitly with `int(s)`, `float(s)` or `str(x)`".to_string())
             }
+            (_, Value::Float(x), _) | (_, _, Value::Float(x)) if x.is_nan() => {
+                Some("nan is not less than, equal to or greater than anything; check with `is_nan(x)` first".to_string())
+            }
             _ if ta == tb => None,
             _ => Some("Cogito never converts types implicitly (except Int to Float)".to_string()),
         };
@@ -1829,14 +1832,8 @@ impl Interp {
                     BinOp::Gt => o == Ordering::Greater,
                     _ => o != Ordering::Less,
                 })),
-                None => {
-                    if let (Float(x), _) | (_, Float(x)) = (&a, &b) {
-                        if x.is_nan() {
-                            return Ok(Bool(false));
-                        }
-                    }
-                    Err(self.bad_binop(op, &a, &b, span))
-                }
+                // NaN is unordered: comparing it is an error, as in `sort`.
+                None => Err(self.bad_binop(op, &a, &b, span)),
             },
             BinOp::In | BinOp::NotIn => {
                 let r = self.contains(&b, &a, span)?;
@@ -1913,9 +1910,10 @@ impl Interp {
             (None, Value::Str(s)) if spec.precision.is_some() => s.chars().take(spec.precision.unwrap()).collect(),
             _ => display(v),
         };
-        // Only plain decimal digits are grouped (not `1e16`, `inf` or `nan`).
-        let finite_digits = !body.contains(|c: char| c.is_ascii_alphabetic());
-        if spec.group && numeric && spec.kind.is_none() && finite_digits {
+        // `inf` and `nan` are never zero-padded; only plain decimal digits
+        // are grouped (not `1e16`).
+        let finite = !matches!(v, Value::Float(f) if !f.is_finite());
+        if spec.group && numeric && spec.kind.is_none() && finite && !body.contains(['e', 'E']) {
             body = group_thousands(&body);
         }
         if spec.plus && numeric && !body.starts_with('-') {
@@ -1924,7 +1922,7 @@ impl Interp {
         let len = body.chars().count();
         if spec.width > len {
             let pad = spec.width - len;
-            if spec.zero && numeric && finite_digits && spec.align.is_none() {
+            if spec.zero && numeric && finite && spec.align.is_none() {
                 let (sign, rest) = if body.starts_with('-') || body.starts_with('+') { body.split_at(1) } else { ("", body.as_str()) };
                 body = format!("{}{}{}", sign, "0".repeat(pad), rest);
             } else {

@@ -614,7 +614,11 @@ impl<'a> Checker<'a> {
                 let arg_tys: Vec<(Option<Name>, Ty, Span)> = args.iter().map(|a| (a.name.clone(), self.expr(&a.value), a.value.span)).collect();
                 // A record's own field, or a function from the module that
                 // declared the receiver's type, may take precedence.
-                if self.field_type(&rt, &method.name).is_some() || self.has_home(&rt) || *mutating {
+                if self.field_type(&rt, &method.name).is_some()
+                    || self.has_home(&rt)
+                    || *mutating
+                    || (matches!(rt, Ty::Any) && self.ctx.module_fns.contains(&method.name))
+                {
                     return Ty::Any;
                 }
                 self.call_named(method, Some((rt, receiver.span)), &arg_tys, e.span)

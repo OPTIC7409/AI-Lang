@@ -8,3 +8,12 @@ fn push!(q: Queue, x: Int) {
 }
 
 fn len(q: Queue) -> Int => q.items.len()
+
+# Same names as built-ins, but different numbers of arguments.
+fn insert!(q: Queue, at: Int, x: Int, times: Int) {
+  for _ in 0..times {
+    q.items.insert!(at, x)
+  }
+}
+
+fn get(q: Queue, i: Int, fallback: Int) -> Int => q.items.get(i).unwrap_or(fallback)
