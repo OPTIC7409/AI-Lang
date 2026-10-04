@@ -58,6 +58,7 @@ pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
             Item::Fn(def) => c.function(def, &[]),
             Item::Test(t) => c.function(&t.func, &[]),
             Item::Property(p) => c.function(&p.func, &[]),
+            Item::Type(td) => c.invariant(td.id),
             _ => {}
         }
     }
@@ -278,6 +279,21 @@ impl<'a> Checker<'a> {
     }
 
     // ------------------------------------------------------------ functions
+
+    /// A record type's `where` clauses: Bool conditions on its fields.
+    fn invariant(&mut self, id: u32) {
+        let Some(def) = self.ctx.invariants.get(&id).cloned() else { return };
+        let Some(TypeKind::Record { tys, .. }) = self.type_def(id).map(|t| &t.kind) else { return };
+        let mut frame = Frame { name: def.name.clone(), ..Frame::default() };
+        for (p, t) in def.params.iter().zip(tys) {
+            frame.locals.insert(p.slot, erase_params(t));
+        }
+        self.frames.push(frame);
+        for c in &def.requires {
+            self.condition(c, "a type invariant (`where`)");
+        }
+        self.frames.pop();
+    }
 
     fn function(&mut self, def: &FnDef, captures: &[Ty]) {
         let mut reassigned = HashSet::new();

@@ -1,0 +1,5 @@
+# expect: E0121
+type Span = { lo: Int, hi: Int, name: Str }
+  where lo <= name
+
+print(Span(1, 2, "a"))
