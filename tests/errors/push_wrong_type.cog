@@ -1,0 +1,4 @@
+# expect: E0121
+var stack: List[Int] = []
+stack.push!("x")
+print(stack)

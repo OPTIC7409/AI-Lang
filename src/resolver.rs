@@ -173,7 +173,135 @@ pub fn resolve_program(ctx: &mut Ctx, prog: &mut Program, ns: &mut Namespace, di
     r.ctx.known_fields.extend(fields);
     r.program(prog);
     *ns = std::mem::take(&mut r.ns);
+    if !repl && !r.diags.iter().any(|d| d.is_error()) {
+        let mut out = Vec::new();
+        for item in &prog.items {
+            match item {
+                Item::Stmt(s) => unused_in_stmt(s, false, &mut out),
+                Item::Fn(def) => unused_values(&def.body, true, false, &mut out),
+                // (A test's last line is not its result: a condition there
+                // needs `assert`.)
+                Item::Test(t) => unused_values(&t.func.body, false, true, &mut out),
+                Item::Property(p) => unused_values(&p.func.body, false, true, &mut out),
+                _ => {}
+            }
+        }
+        r.diags.extend(out);
+    }
     r.diags
+}
+
+/// W0008: an expression without calls whose value is computed and then
+/// dropped (`- pad` on a line of its own, `y == x + 1` meant as `y = x +
+/// 1`, `if c { j + 1 }`). `used` says whether `e`'s value is used.
+fn unused_values(e: &Expr, used: bool, in_test: bool, out: &mut Vec<Diagnostic>) {
+    match &e.kind {
+        ExprKind::Block(stmts) => {
+            let n = stmts.len();
+            for (i, s) in stmts.iter().enumerate() {
+                unused_in_stmt_with(s, used && i + 1 == n, in_test, out);
+            }
+            return;
+        }
+        ExprKind::If { cond, then, els } => {
+            unused_values(cond, true, in_test, out);
+            // (Without `else`, the branch's value is never used.)
+            unused_values(then, used && els.is_some(), in_test, out);
+            if let Some(x) = els {
+                unused_values(x, used, in_test, out);
+            }
+            return;
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            unused_values(scrutinee, true, in_test, out);
+            for a in arms.iter() {
+                if let Some(g) = &a.guard {
+                    unused_values(g, true, in_test, out);
+                }
+                unused_values(&a.body, used, in_test, out);
+            }
+            return;
+        }
+        ExprKind::While { cond, body } => {
+            unused_values(cond, true, in_test, out);
+            unused_values(body, false, in_test, out);
+            return;
+        }
+        ExprKind::For { iter, body, .. } => {
+            unused_values(iter, true, in_test, out);
+            unused_values(body, false, in_test, out);
+            return;
+        }
+        ExprKind::Loop { body } => {
+            unused_values(body, false, in_test, out);
+            return;
+        }
+        ExprKind::Lambda(def) => {
+            unused_values(&def.body, true, false, out);
+            return;
+        }
+        _ => {}
+    }
+    // (Only for a value that is not used: `has_calls` walks the subtree.)
+    let pure = !used
+        && matches!(
+            e.kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Var(_)
+                | ExprKind::Field { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Unary { .. }
+                | ExprKind::And(..)
+                | ExprKind::Or(..)
+                | ExprKind::Tuple(_)
+                | ExprKind::List(_)
+        )
+        && !has_calls(e);
+    if !used && pure {
+        let comparison = matches!(&e.kind, ExprKind::Binary { op: BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, .. });
+        let d = match &e.kind {
+            ExprKind::Unary { op: UnOp::Neg, .. } => {
+                Diagnostic::warning("W0008", "this line's value is not used: a line that starts with `-` is a statement of its own")
+                    .at(e.span)
+                    .help("to continue the expression above, end that line with the operator (`a -`), or wrap the whole expression in parentheses")
+            }
+            _ if comparison && in_test => Diagnostic::warning("W0008", "the result of this comparison is not used, so it checks nothing")
+                .at(e.span)
+                .help("to check it, write `assert` before it"),
+            _ if comparison => Diagnostic::warning("W0008", "the result of this comparison is not used")
+                .at(e.span)
+                .help("to assign, write `=`; to check it, write `assert` before it"),
+            _ => Diagnostic::warning("W0008", "the value of this expression is not used")
+                .at(e.span)
+                .help("to change a variable, assign to it (`x = x + 1` or `x += 1`); otherwise use the value or remove it"),
+        };
+        out.push(d);
+        return;
+    }
+    for_each_child(e, &mut |c| unused_values(c, true, in_test, out));
+}
+
+fn unused_in_stmt(s: &Stmt, used: bool, out: &mut Vec<Diagnostic>) {
+    unused_in_stmt_with(s, used, false, out)
+}
+
+fn unused_in_stmt_with(s: &Stmt, used: bool, in_test: bool, out: &mut Vec<Diagnostic>) {
+    match &s.kind {
+        StmtKind::Expr(x) => unused_values(x, used, in_test, out),
+        StmtKind::Let { value, .. } => unused_values(value, true, in_test, out),
+        StmtKind::Assign { value, .. } => unused_values(value, true, in_test, out),
+        StmtKind::Assert { cond, msg } => {
+            unused_values(cond, true, in_test, out);
+            if let Some(m) = msg {
+                unused_values(m, true, in_test, out);
+            }
+        }
+        StmtKind::Fn { def, .. } => unused_values(&def.body, true, false, out),
+    }
 }
 
 fn fn_record_fields(def: &FnDef, out: &mut HashSet<Name>) {

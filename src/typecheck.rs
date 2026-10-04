@@ -948,6 +948,22 @@ impl<'a> Checker<'a> {
                 }
                 // A record's own field, or a function from the module that
                 // declared the receiver's type, may take precedence.
+                // Adding an element of the wrong type to a typed collection
+                // (`stack.push!("x")` on a List[Int]).
+                if let (true, Some(b)) = (*mutating, builtin) {
+                    let elem = match (b, &rt, arg_tys.as_slice()) {
+                        ("push!", Ty::List(e), [(None, t, sp)]) => Some((e, t, sp)),
+                        ("insert!", Ty::List(e), [_, (None, t, sp)]) => Some((e, t, sp)),
+                        ("insert!", Ty::Set(e), [(None, t, sp)]) => Some((e, t, sp)),
+                        _ => None,
+                    };
+                    if let Some((e, t, sp)) = elem {
+                        if !self.compatible(t, e) {
+                            let msg = format!("`{}` would add {} to {}", b, a(t), a(&rt));
+                            self.mismatch(*sp, msg, "wrong type", e);
+                        }
+                    }
+                }
                 if self.field_type(&rt, &method.name).is_some()
                     || self.has_home(&rt)
                     || *mutating

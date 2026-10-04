@@ -63,7 +63,7 @@ program's `args()`.
 | `Int` | `42` | `/` always gives Float; `//` floor division; `%` floor modulo |
 | `Float` | `3.0` | Int is accepted (converted) where Float is annotated |
 | `Bool` | `true` `false` | no truthiness: conditions must be Bool |
-| `Str` | `"hi"` | indexing/len count characters (constant time); `s[i]` is a one-character Str; immutable |
+| `Str` | `"hi"` | indexing/len count characters (Unicode code points: `"e\u{301}".len() == 2`; constant time); `s[i]` is a one-character Str; immutable |
 | `Unit` | `()` | value of statements, `if` without `else`, etc. |
 | `List[T]` | `[1, 2, 3]`, `[..xs, 4]` | `xs[0]`, `xs[-1]`, `xs[1..3]`, `xs[2..]`, `xs[..2]` |
 | `Map[K, V]` | `["a": 1, "b": 2]`, empty `[:]` | insertion-ordered; `m[k]`, `m.get(k)`; equal regardless of order |
@@ -205,7 +205,8 @@ and plain functions called with method syntax.
 Operators by precedence (loosest first): `or`; `and`; `not`;
 `== != < <= > >= in is` (`not in`) — **cannot be chained** (`a < b < c` is an
 error); `|>`; `..` `..=`; `+ -`; `* / // %`; unary `-`; `**` (right-assoc).
-`x in s` on a Str tests for a substring; on a Map, for a key.
+`x in s` on a Str tests for a substring; on a Map, for a key; on a List or
+Set, for an element.
 `+` concatenates strings and lists; `str * n` and `list * n` repeat.
 No implicit conversions: `"a" + 1` is an error; use `"a{1}"` or `str(1)`.
 There are no bitwise operators; use `bit_and`, `bit_or`, `bit_xor`, `shl`, `shr`.
@@ -476,7 +477,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   `lines words chars trim trim_start trim_end upper lower capitalize` (uppercases
   only the first character) `starts_with ends_with strip_prefix(p) -> Option
   strip_suffix(s) -> Option replace(a, b) pad_left(width, fill = " ") pad_right(width, fill = " ")
-  is_digit is_alpha is_alnum is_space is_upper is_lower reverse repeat
+  is_digit is_alpha is_alnum is_space is_upper is_lower (false for "") reverse repeat
   count(sub) index_of(sub)`, slicing `s[1..3]`. A fill is one character;
   `split("")` gives the characters; `replace` and `split_once` with an empty pattern are errors.
 - **Option/Result**: `unwrap expect(msg) unwrap_or(d) unwrap_or_else(f)
@@ -499,8 +500,9 @@ Result; side effects in contracts; unknown types; duplicate definitions.
 Warnings: unused variables, unreachable code, ignored results of pure
 built-ins (`xs.sort()`), `?`/`return` inside anonymous functions, an
 ignored `Result` of your own function (use `let _ = f()` if that is
-intended), and a function named like a built-in that calls itself by
-mistake (`cogito FILE` shows these warnings too, except unused variables).
+intended), a value computed and dropped (`y == x + 1` on a line of its
+own, a test's last line without `assert`), and a function named like a
+built-in that calls itself by mistake (`cogito FILE` shows these warnings too, except unused variables).
 `cogito test --json` and `cogito verify --json` print one JSON object per
 test, property or function (`file`, `kind`, `name`, `status`, and for a
 failure the `counterexample` and `diagnostic`), then a summary object.
@@ -551,6 +553,9 @@ this document. Each one is an error with a hint, but avoiding it saves a run.
 - `"{"` in a string starts an interpolation; write `"\{"` for a brace.
 - `a < b < c`: comparisons do not chain; write `a < b and b < c`.
 - `7 / 2` is `3.5`; `7 // 2` is `3`.
+- A line that starts with `-` or `+` does not continue the line above (a
+  newline ends a statement); end the line above with the operator instead.
+  Lines starting with `.`, `|>`, `and` and `or` do continue.
 - `xs.sort()` returns a sorted copy; `xs.sort!()` sorts `xs` itself.
 - A closure cannot assign to a variable it captures (`count += 1` inside
   `fn() => ...`); use a `for` loop, or pass the value to a `!` function.

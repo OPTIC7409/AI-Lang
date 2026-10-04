@@ -1,0 +1,5 @@
+# expect: W0008
+test "forgot assert" {
+  let x = 2
+  x * 2 == 4
+}

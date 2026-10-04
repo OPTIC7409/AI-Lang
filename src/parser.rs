@@ -1358,6 +1358,14 @@ impl<'s> Parser<'s> {
                 if crate::lexer::KEYWORDS.contains(&t.text()) {
                     d = d.note(format!("`{}` is a keyword", t.text()));
                 }
+                // `+ b` at the start of a line, meant to continue the line above.
+                let line_start = self.pos > 0 && self.toks[self.pos - 1].tok == Tok::Newline;
+                if line_start && matches!(t.text(), "+" | "*" | "/" | "//" | "%" | "**" | "==" | "!=" | "<" | "<=" | ">" | ">=") {
+                    d = d.help(format!(
+                        "a newline ends the statement, so a line cannot start with `{}`; end the line above with the operator instead, or wrap the expression in parentheses",
+                        t.text()
+                    ));
+                }
                 Err(d)
             }
         }

@@ -848,7 +848,6 @@ pub fn escape_str(s: &str, out: &mut String) {
             '\r' => out.push_str("\\r"),
             '\0' => out.push_str("\\0"),
             '{' => out.push_str("\\{"),
-            '}' => out.push_str("\\}"),
             c if (c as u32) < 0x20 => {
                 let _ = write!(out, "\\u{{{:x}}}", c as u32);
             }

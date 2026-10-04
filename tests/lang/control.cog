@@ -6,7 +6,7 @@ test "if is an expression" {
   assert size == "big"
   let grade = if x > 8 { "A" } else if x > 4 { "B" } else { "C" }
   assert grade == "B"
-  let nothing = if false { 1 }
+  let nothing = if false { print("never") }
   assert nothing == ()
 }
 
