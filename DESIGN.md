@@ -536,6 +536,28 @@ The round also turned up a performance cliff outside invariants: a user
 `push!` next to the built-in one made every `push!` on a typed list re-check
 the list.
 
+A fifth round repeated the two oldest areas against the current
+specification, which by then listed the habits from other languages that
+had tripped earlier agents:
+
+| Area | Round 1 | Round 2 | Round 3 | Round 5 |
+|---|---|---|---|---|
+| Algorithms and data structures | 7 of 11 | 7 of 12 | 7 of 10 | 5 of 10 |
+| Text processing, formatting, JSON, I/O | 2 of 10 | 7 of 10 | 4 of 10 | 8 of 10 |
+
+The algorithms number fell because the bar rose: every program now had
+contracts and most had type invariants, and a program only counted if
+`verify` also passed. All five failures there were bugs in the agent's own
+code that `verify` or a test found (overflow at `max_int`, a cache whose
+invariant let duplicate keys in, an incomplete precondition), and none was
+a bug in the language. The problems the round did find were in `verify`
+itself: generating values of a recursive type with an invariant (a trie)
+took minutes, the pool that lets generated values repeat was quadratic in
+the size of a value, and wide bounds such as `n <= 1_000_000` steered
+inputs to the bound, building million-element lists. The text agent found
+that `xs = xs + [x]` and `xs = [..xs, x]`, which the specification shows
+as idioms, copied the list each time; they now append in place.
+
 ## Future directions
 
 - Deeper static checking: the parameter types of passed-in functions, the
