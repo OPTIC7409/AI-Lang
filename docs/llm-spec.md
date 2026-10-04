@@ -506,9 +506,11 @@ the like get the element type: `[1, 2].map(fn(n) => n.upper())`), a
 returned value against the return type, a `let` or
 assignment against its annotation (including record fields and elements of
 declared collections), a non-Bool condition, operators on the wrong kinds
-(`"a" + 1`), and fields a record type lacks. Anything unknown (an
-unannotated parameter, a `var` that is reassigned, the result of
-`parse_json`) is not checked early; every annotation is still checked when
+(`"a" + 1`), and fields a record type lacks. A `var` without an
+annotation keeps the type of its first value (Int, Float, Str or Bool) if
+every assignment to it does (`var out = ""` then `out += 1` is an error).
+Anything unknown (an unannotated parameter, a `var` assigned values of
+different types, the result of `parse_json`) is not checked early; every annotation is still checked when
 the program runs (E0200). A `fn(A) -> B` annotation checks the number of
 parameters.
 

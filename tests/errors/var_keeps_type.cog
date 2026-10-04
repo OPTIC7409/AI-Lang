@@ -1,0 +1,9 @@
+# expect: E0121
+fn join_all(xs: List[Int]) -> Str {
+  var out = ""
+  for x in xs {
+    out += x
+  }
+  out
+}
+print(join_all([1, 2]))

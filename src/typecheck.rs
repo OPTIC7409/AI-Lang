@@ -24,7 +24,32 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// Check a resolved program; returns the errors found.
+///
+/// A `var` without an annotation whose first value is an Int, Float, Str
+/// or Bool keeps that type if every assignment to it gives a value of the
+/// same type: silent passes find the set of such variables (assuming all,
+/// then dropping those an assignment breaks, until none is broken), and a
+/// last pass reports errors with them.
 pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
+    let first = check_pass(ctx, prog, HashMap::new());
+    let mut assumed = first.candidates;
+    for _ in 0..20 {
+        let pass = check_pass(ctx, prog, assumed.clone());
+        if pass.broken.is_empty() {
+            return pass.diags;
+        }
+        assumed.retain(|span, _| !pass.broken.contains(span));
+    }
+    check_pass(ctx, prog, HashMap::new()).diags
+}
+
+struct Pass {
+    diags: Vec<Diagnostic>,
+    candidates: HashMap<Span, Ty>,
+    broken: HashSet<Span>,
+}
+
+fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>) -> Pass {
     let mut reassigned = HashSet::new();
     // Locals of the top-level code (inside a top-level `for` or `if`).
     let mut top_locals = HashSet::new();
@@ -53,6 +78,10 @@ pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
         reassigned_globals,
         divisions: HashSet::new(),
         lambda_hint: None,
+        assumed,
+        candidates: HashMap::new(),
+        broken: HashSet::new(),
+        global_vars: HashMap::new(),
     };
     // Top-level statements first (in order), so that functions see the
     // types of the globals they use.
@@ -76,12 +105,14 @@ pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
             _ => {}
         }
     }
-    c.diags
+    Pass { diags: c.diags, candidates: c.candidates, broken: c.broken }
 }
 
 #[derive(Default)]
 struct Frame {
     locals: HashMap<u32, Ty>,
+    /// The `var` declaration that each local slot holds (for assumptions).
+    vars: HashMap<u32, Span>,
     /// Local slots assigned as a whole somewhere in the function (`x = ...`).
     reassigned: HashSet<u32>,
     captures: Vec<Ty>,
@@ -103,6 +134,15 @@ struct Checker<'a> {
     /// For an anonymous function passed to a built-in such as `map`: the
     /// types its unannotated parameters will be called with.
     lambda_hint: Option<Vec<Ty>>,
+    /// Unannotated `var`s (by the span of their name) assumed to keep the
+    /// type of their first value (see `check_program`).
+    assumed: HashMap<Span, Ty>,
+    /// Unannotated `var`s whose first value is a scalar, with its type.
+    candidates: HashMap<Span, Ty>,
+    /// Assumed `var`s that an assignment (or a `!` call) may give another type.
+    broken: HashSet<Span>,
+    /// The `var` declaration of each top-level variable slot.
+    global_vars: HashMap<u32, Span>,
 }
 
 /// Record the variables that are assigned as a whole (`x = ...`), or passed
@@ -435,6 +475,25 @@ impl<'a> Checker<'a> {
                     PatKind::Bind { res: VarRes::Global(s), sub: None, .. } => !self.reassigned_globals.contains(s),
                     _ => false,
                 };
+                // A scalar `var`: a candidate for keeping its type.
+                if let (true, None, PatKind::Bind { res, sub: None, .. }) = (*mutable, &declared, &pat.kind) {
+                    if matches!(t, Ty::Int | Ty::Float | Ty::Str | Ty::Bool) {
+                        self.candidates.insert(pat.span, t.clone());
+                        match res {
+                            VarRes::Local(slot) => {
+                                self.frame().vars.insert(*slot, pat.span);
+                            }
+                            VarRes::Global(slot) => {
+                                self.global_vars.insert(*slot, pat.span);
+                            }
+                            _ => {}
+                        }
+                        if self.assumed.get(&pat.span) == Some(&t) {
+                            self.bind(pat, &t, false);
+                            return;
+                        }
+                    }
+                }
                 let bound = match declared {
                     Some(d) => d,
                     // (Without its inferred type arguments: `var b = Box(1)`
@@ -473,7 +532,15 @@ impl<'a> Checker<'a> {
                         _ => {}
                     }
                 } else if let Some(op) = op {
-                    self.binary(*op, &tt, &vt, s.span);
+                    let errors = self.diags.len();
+                    let r = self.binary(*op, &tt, &vt, s.span);
+                    // (An assignment that always fails changes nothing.)
+                    if self.diags.len() == errors {
+                        self.assigned(target, &r);
+                    }
+                }
+                if op.is_none() {
+                    self.assigned(target, &vt);
                 }
             }
             StmtKind::Fn { def, res } => {
@@ -493,6 +560,32 @@ impl<'a> Checker<'a> {
             StmtKind::Expr(e) => {
                 self.expr(e);
             }
+        }
+    }
+
+    /// After an assignment of a value of type `t` to `target`: an assumed
+    /// `var` given another type no longer keeps its type.
+    fn assigned(&mut self, target: &Expr, t: &Ty) {
+        let ExprKind::Var(v) = &target.kind else { return };
+        if let Some(span) = self.var_decl(v.res) {
+            if self.assumed.get(&span).is_some_and(|a| a != t) {
+                self.broken.insert(span);
+            }
+        }
+    }
+
+    /// A `!` call on `v`, which may give it another type.
+    fn mutated(&mut self, v: &Var) {
+        if let Some(span) = self.var_decl(v.res).filter(|s| self.assumed.contains_key(s)) {
+            self.broken.insert(span);
+        }
+    }
+
+    fn var_decl(&self, res: VarRes) -> Option<Span> {
+        match res {
+            VarRes::Local(slot) => self.frames.last().and_then(|f| f.vars.get(&slot)).copied(),
+            VarRes::Global(slot) => self.global_vars.get(&slot).copied(),
+            _ => None,
         }
     }
 
@@ -723,6 +816,11 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Call { callee, args } => {
+                if let (ExprKind::Var(f), Some(Arg { value: Expr { kind: ExprKind::Var(v), .. }, .. })) = (&callee.kind, args.first()) {
+                    if f.name.ends_with('!') {
+                        self.mutated(v);
+                    }
+                }
                 let builtin = match &callee.kind {
                     ExprKind::Var(v) => self.builtin_name(v),
                     _ => None,
@@ -748,6 +846,10 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::MethodCall { receiver, method, args, mutating, .. } => {
+                // A `!` function may give its first argument another type.
+                if let (true, ExprKind::Var(v)) = (*mutating, &receiver.kind) {
+                    self.mutated(v);
+                }
                 let rt = self.expr(receiver);
                 let builtin = self.builtin_name(method);
                 let mut arg_tys: Vec<(Option<Name>, Ty, Span)> = Vec::with_capacity(args.len());
