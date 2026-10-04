@@ -18,6 +18,8 @@ EXAMPLES = [
      "Verify generated inputs until the promise broke, then shrank the failure to a small counterexample. Fix it as the comment says."),
     ("Types with invariants", "web/examples/invariants.cog", "verify",
      "Every Span keeps lo <= hi. Verify tries valid spans only, and finds the pair that makes overlap build an invalid one."),
+    ("Habits from other languages", "web/habits.cog", "check",
+     "Code written with habits from Python and JavaScript. Press Fix to rewrite them into Cogito, then Run."),
     ("Errors explain themselves", "web/examples/errors.cog", "run",
      "The type error is found before the program runs, so nothing is printed until it is fixed."),
     ("Reading input", "web/examples/stdin.cog", "run",

@@ -38,6 +38,7 @@ const MODE_VERIFY: u32 = 2;
 const MODE_CHECK: u32 = 3;
 const MODE_VERIFY_ALL: u32 = 4;
 const MODE_FORMAT: u32 = 5;
+const MODE_FIX: u32 = 6;
 
 thread_local! {
     static RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -118,10 +119,49 @@ fn new_interp(input: Vec<u8>) -> Interp {
 }
 
 fn render(it: &Interp, diags: &[Diagnostic]) -> String {
-    diags.iter().map(|d| d.render(&it.ctx.sm, true)).collect()
+    let mut out: String = diags.iter().map(|d| d.render(&it.ctx.sm, true)).collect();
+    let fixable = diags.iter().filter(|d| !d.fixes.is_empty()).count();
+    if fixable > 0 {
+        let c = Colors::new(true);
+        let n = if fixable == 1 { "one".to_string() } else { fixable.to_string() };
+        out.push_str(&format!("{}{} of these can be fixed automatically: press Fix{}\n", c.dim, n, c.reset));
+    }
+    out
+}
+
+/// Apply the fixes that `check` suggests until none are left (`cogito fix`).
+/// `out` is the new source; `diag` says what changed.
+fn fix(src: &str) -> Outcome {
+    let c = Colors::new(true);
+    let mut code = src.to_string();
+    let mut log = String::new();
+    for _ in 0..200 {
+        let mut it = new_interp(Vec::new());
+        let mut ns = Namespace::default();
+        let ds = match cogito::load_source(&mut it, FILE, &code, Path::new("."), &mut ns, false) {
+            Ok((_, warnings)) => warnings,
+            Err(diags) => diags,
+        };
+        let (text, used) = cogito::diagnostic::apply_fixes(&code, 0, &ds);
+        if used.is_empty() {
+            break;
+        }
+        for d in &used {
+            let loc = it.ctx.sm.location(d.fixes[0].span);
+            log.push_str(&format!("{}fixed{} {}: {} {}({}){}\n", c.green, c.reset, loc, d.describe_fixes(&it.ctx.sm), c.dim, d.message, c.reset));
+        }
+        code = text;
+    }
+    if log.is_empty() {
+        log.push_str("nothing to fix: no error or warning here has a certain fix\n");
+    }
+    Outcome { out: code, diag: log, status: 0 }
 }
 
 fn run(src: &str, input: Vec<u8>, mode: u32) -> Outcome {
+    if mode == MODE_FIX {
+        return fix(src);
+    }
     if mode == MODE_FORMAT {
         // `out` is the formatted source.
         return match cogito::format::format_source(src) {

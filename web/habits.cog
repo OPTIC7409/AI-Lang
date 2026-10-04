@@ -1,0 +1,27 @@
+# This program was written with habits from Python and JavaScript.
+# Press Check to see what Cogito says, then Fix to rewrite them, then Run.
+
+fn average(xs: List[Float]): Float {
+  if xs.length() == 0 { return 0.0 }
+  xs.sum() / xs.length()
+}
+
+fn grade(score: Float) -> String {
+  if score >= 90.0 && score <= 100.0 {
+    return 'A'
+  } elif score >= 75.0 {
+    return "B"
+  }
+  "C"
+}
+
+let scores = {"ana": 93.5, "ben": 71.0, "cy": 88.0}
+var names = scores.keys()
+names.sort()
+for name in names {
+  let s = scores[name]
+  print(f"{name}: {s:.1f} -> {grade(s)}")
+}
+let passed = names.filter(fn(n) => grade(scores[n]) != "C")
+if !passed.isEmpty() { print("passed: {passed.join(", ")}") }
+print("average: {average(scores.values()):.2f}")

@@ -319,6 +319,7 @@ details.stdin textarea {
       <button id="btn-verify" disabled title="Check function contracts against generated inputs">Verify</button>
       <button id="btn-check" disabled title="Report errors and warnings without running">Check</button>
       <button id="btn-format" disabled title="Rewrite the code in the canonical layout (cogito fmt)">Format</button>
+      <button id="btn-fix" disabled title="Rewrite habits from other languages (&amp;&amp;, null, xs.length(), ...) into Cogito (cogito fix)">Fix</button>
       <button class="stop" id="btn-stop" hidden>Stop</button>
     </div>
     <p class="what" id="what">Loading the interpreter…</p>
@@ -351,7 +352,7 @@ details.stdin textarea {
   </main>
 
   <footer class="notes">
-    <p><b>Run</b> executes the program. <b>Test</b> runs its <code>test</code> and <code>property</code> blocks, generating random inputs for properties. <b>Verify</b> checks every function's <code>requires</code>/<code>ensures</code> contracts against generated inputs and shrinks any failure to a small counterexample.</p>
+    <p><b>Run</b> executes the program. <b>Test</b> runs its <code>test</code> and <code>property</code> blocks, generating random inputs for properties. <b>Verify</b> checks every function's <code>requires</code>/<code>ensures</code> contracts against generated inputs and shrinks any failure to a small counterexample. <b>Fix</b> rewrites habits from other languages (<code>&amp;&amp;</code>, <code>null</code>, <code>xs.length()</code>, <code>elif</code>) into Cogito.</p>
     <p><b>In the browser</b>, programs cannot read files or import modules, recursion stops at 300 nested calls, and a run stops after 40 million steps. The <code>cogito</code> command-line tool has none of these limits.</p>
     <p><b>Error codes</b> such as <code>E0200</code> are explained in detail by <code>cogito explain E0200</code>. The full language fits in one compact specification, written so that a language model can learn it from a single read.</p>
   </footer>
@@ -366,9 +367,9 @@ details.stdin textarea {
   "use strict";
   const $ = (id) => document.getElementById(id);
   const src = $("source"), hl = $("highlight"), gutter = $("gutter"), out = $("output"), status = $("status");
-  const buttons = { run: $("btn-run"), test: $("btn-test"), verify: $("btn-verify"), check: $("btn-check"), format: $("btn-format") };
-  const MODES = { run: 0, test: 1, verify: 2, check: 3, format: 5 };
-  const VERBS = { run: "Running", test: "Testing", verify: "Verifying", check: "Checking", format: "Formatting" };
+  const buttons = { run: $("btn-run"), test: $("btn-test"), verify: $("btn-verify"), check: $("btn-check"), format: $("btn-format"), fix: $("btn-fix") };
+  const MODES = { run: 0, test: 1, verify: 2, check: 3, format: 5, fix: 6 };
+  const VERBS = { run: "Running", test: "Testing", verify: "Verifying", check: "Checking", format: "Formatting", fix: "Fixing" };
 
   // ---------------------------------------------------------------- editor
 
@@ -600,8 +601,9 @@ details.stdin textarea {
   function finish(result, ms) {
     const action = busy.action;
     busy = null; clearInterval(timer);
-    if (action === "format" && result.status === 0) {
+    if ((action === "format" || action === "fix") && result.status === 0) {
       // Replace the code (keeping undo where the browser allows it).
+      if (action === "fix") show({ out: "", diag: result.diag, status: 0 }, ms, action);
       if (result.out !== src.value) {
         src.focus();
         src.select();
@@ -609,7 +611,7 @@ details.stdin textarea {
         src.setSelectionRange(0, 0);
         refresh(); saveDraft();
       }
-      setStatus("formatted", "ok");
+      setStatus(action === "fix" ? "fixed" : "formatted", "ok");
       setBusy(false);
       return;
     }
