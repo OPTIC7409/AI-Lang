@@ -760,8 +760,45 @@ impl Interp {
         out
     }
 
+    /// The elements of a list literal.
+    fn list_items(&mut self, items: &[ListItem], env: &mut Env) -> R<Vec<Value>> {
+        let mut out = Vec::with_capacity(items.len());
+        for it in items {
+            let v = self.eval(&it.expr, env)?;
+            if it.spread {
+                let xs = self.iter_values(v, it.expr.span)?;
+                out.extend(xs);
+            } else {
+                out.push(v);
+            }
+        }
+        Ok(out)
+    }
+
     fn assign(&mut self, target: &Expr, op: Option<BinOp>, value: &Expr, decl: Option<&Ty>, env: &mut Env) -> R<()> {
+        // `xs = [..xs, x]` on a local list appends in place, as `xs += [x]`
+        // does, instead of copying the list (when computing `x` cannot
+        // change `xs`).
+        if let (None, ExprKind::Var(Var { res: res @ (VarRes::Local(_) | VarRes::Global(_)), .. }), ExprKind::List(items)) =
+            (op, &target.kind, &value.kind)
+        {
+            let spreads_target = items.first().is_some_and(|i| i.spread && matches!(&i.expr.kind, ExprKind::Var(v) if v.res == *res));
+            let (holds_list, global) = match res {
+                VarRes::Local(s) => (matches!(env.locals[*s as usize], Value::List(_)), false),
+                VarRes::Global(s) => (matches!(self.globals[*s as usize], Some(Value::List(_))), true),
+                _ => (false, false),
+            };
+            let safe = |e: &Expr| !crate::ast::may_change_locals(e) && !(global && crate::ast::has_calls(e));
+            if spreads_target && holds_list && items[1..].iter().all(|i| safe(&i.expr)) {
+                let rest = self.list_items(&items[1..], env)?;
+                return self.assign_value(target, Some(BinOp::Add), Value::list(rest), decl, env);
+            }
+        }
         let rhs = self.operand(value, env)?;
+        self.assign_value(target, op, rhs, decl, env)
+    }
+
+    fn assign_value(&mut self, target: &Expr, op: Option<BinOp>, rhs: Value, decl: Option<&Ty>, env: &mut Env) -> R<()> {
         let span = target.span;
         // `i += 1` on a local Int.
         if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), Some(op), None | Some(Ty::Int)) = (&target.kind, op, decl) {
@@ -1487,19 +1524,7 @@ impl Interp {
                 }
                 Ok(Value::str(s))
             }
-            ExprKind::List(items) => {
-                let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    let v = self.eval(&it.expr, env)?;
-                    if it.spread {
-                        let xs = self.iter_values(v, it.expr.span)?;
-                        out.extend(xs);
-                    } else {
-                        out.push(v);
-                    }
-                }
-                Ok(Value::list(out))
-            }
+            ExprKind::List(items) => Ok(Value::list(self.list_items(items, env)?)),
             ExprKind::Comprehension { body, clauses } => {
                 let mut out = Vec::new();
                 self.comprehension(clauses, 0, body, env, &mut out)?;

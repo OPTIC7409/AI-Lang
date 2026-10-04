@@ -93,12 +93,22 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// An extreme Int, `min_int` or `max_int` half of the time (so that 200
+    /// cases almost surely try both).
+    fn extreme(&mut self) -> i64 {
+        if self.rng.below(2) == 0 {
+            [i64::MAX, i64::MIN][self.rng.below(2)]
+        } else {
+            EXTREME_INTS[self.rng.below(EXTREME_INTS.len())]
+        }
+    }
+
     /// A field of a record at `depth`. An unbounded Int field of a parameter
     /// (or of a record in one) is now and then extreme, as parameters are:
     /// an account's balance near max_int finds overflow in a deposit.
     fn field(&mut self, t: &Ty, b: &Bound, size: u32, depth: u32) -> Result<Value, String> {
         if self.extremes && depth <= 1 && b.int.is_none() && matches!(t, Ty::Int) && self.rng.below(100) < 3 {
-            return Ok(Value::Int(EXTREME_INTS[self.rng.below(EXTREME_INTS.len())]));
+            return Ok(Value::Int(self.extreme()));
         }
         self.bounded(t, b, size, depth + 1)
     }
@@ -197,8 +207,8 @@ impl<'a> Gen<'a> {
             Ty::Bool => Value::Bool(self.rng.next_u64() & 1 == 1),
             Ty::Int => {
                 let r = self.rng.below(100);
-                if self.extremes && depth == 0 && r < 4 {
-                    Value::Int(EXTREME_INTS[self.rng.below(EXTREME_INTS.len())])
+                if self.extremes && depth == 0 && r < 6 {
+                    Value::Int(self.extreme())
                 } else if r < 15 {
                     Value::Int([0, 1, -1, 2, -2, 3, 10, -10][self.rng.below(8)])
                 } else if r < 85 {

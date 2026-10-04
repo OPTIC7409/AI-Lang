@@ -1,6 +1,5 @@
 # expect: E0121
-fn main() {
-  let parts = "a,b".split(1)
-  print(parts)
+fn parts() -> List[Str] {
+  "a,b".split(1)
 }
-main()
+print(parts())

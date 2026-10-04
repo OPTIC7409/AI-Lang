@@ -753,3 +753,24 @@ impl Pattern {
         }
     }
 }
+
+/// Whether evaluating `e` might assign to a local variable or call a `!`
+/// function.
+pub fn may_change_locals(e: &Expr) -> bool {
+    let direct = match &e.kind {
+        ExprKind::MethodCall { mutating: true, .. } => true,
+        ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Var(v) if v.name.ends_with('!')),
+        ExprKind::Block(stmts) => stmts.iter().any(|s| matches!(s.kind, StmtKind::Assign { .. })),
+        _ => false,
+    };
+    let mut found = direct;
+    for_each_child(e, &mut |c| found = found || may_change_locals(c));
+    found
+}
+
+/// Whether `e` calls anything (any call may run code that changes a global).
+pub fn has_calls(e: &Expr) -> bool {
+    let mut found = matches!(e.kind, ExprKind::Call { .. } | ExprKind::MethodCall { .. });
+    for_each_child(e, &mut |c| found = found || has_calls(c));
+    found
+}

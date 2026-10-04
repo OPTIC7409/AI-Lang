@@ -11,7 +11,8 @@ Run: `cogito FILE.cog [ARGS]` · Test: `cogito test FILE.cog` · Check contracts
 `cogito eval "CODE"` (prints the last expression's value) · REPL: `cogito` ·
 Explain an error code: `cogito explain E0101` · Built-in docs: `cogito doc [NAME]` ·
 Format: `cogito fmt [--check] [PATHS]` (two-space indentation, canonical spacing;
-line breaks and comments are kept).
+line breaks and comments are kept, except that a `}` alone on its line
+followed by `else` becomes `} else`).
 Options: `--max-depth N` (before the file name); for `test`/`verify`:
 `--cases N`, `--seed N`, `--filter TEXT`, `--budget N`, and `--all` (verify
 functions without contracts too). Arguments after the file name go to the
@@ -41,6 +42,7 @@ program's `args()`.
   `{n:X}` (upper-case hex), `{s:*>6}` (fill char). Parts combine in the
   order fill+align, `+`, `0`, width, `,`, `.precision`, type: `{x:>15,.2}`
   is `   1,234,567.89`, `{n:+08}` is `+0000042`, `{10:04x}` is `000a`.
+  A precision on a string truncates it (`{s:.3}`).
   Width ≤ 1000, precision ≤ 100; for a computed width
   use `pad_left`/`pad_right`. Rounding to a precision rounds halves away from
   zero, like `round` (`"{2.5:.0}" == "3"`). An interpolation must fit on one
@@ -63,7 +65,7 @@ program's `args()`.
 | `Str` | `"hi"` | indexing/len count characters (constant time); `s[i]` is a one-character Str; immutable |
 | `Unit` | `()` | value of statements, `if` without `else`, etc. |
 | `List[T]` | `[1, 2, 3]`, `[..xs, 4]` | `xs[0]`, `xs[-1]`, `xs[1..3]`, `xs[2..]`, `xs[..2]` |
-| `Map[K, V]` | `["a": 1, "b": 2]`, empty `[:]` | insertion-ordered; `m[k]`, `m.get(k)` |
+| `Map[K, V]` | `["a": 1, "b": 2]`, empty `[:]` | insertion-ordered; `m[k]`, `m.get(k)`; equal regardless of order |
 | `Set[T]` | `to_set([1, 2])`, empty `to_set()` | distinct elements, insertion-ordered; `x in s`; equal regardless of order |
 | tuples | `(1, "a")`, `(x,)` | `t.0`, `t[1]` |
 | records | `{ x: 1, y: 2 }`, `{ ..r, y: 5 }` | see Records below |
@@ -85,7 +87,8 @@ from operations like `inf - inf` (test with `is_nan`), and ordering it with
 
 **Value semantics**: every value behaves like an independent copy.
 `let b = a` then changing `a` never changes `b`. (Implemented with
-copy-on-write, so copies are cheap.)
+copy-on-write, so copies are cheap, and `xs += [x]`, `xs = xs + [x]`,
+`xs = [..xs, x]` and `s = s + "x"` add to the variable in place.)
 
 **Equality** `==` is structural (deep). `1 == 1.0` is true (Int/Float
 comparisons are exact). Comparison `< <= > >=` works on numbers, strings,
@@ -459,13 +462,13 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   `m.update!(k, default, f)` sets `m[k]` to `f(m[k])`, starting from the
   default when `k` is missing (`counts.update!(w, 0, fn(n) => n + 1)`);
   `update(m, k, default, f)` returns a new map.
-- **Strings**: `split(sep, limit)` (no sep: whitespace, with no limit) `split_once(sep) -> Option[(Str, Str)]`
+- **Strings**: `split(sep, limit)` (at most `limit` pieces, the last holding the rest; no sep: whitespace, with no limit) `split_once(sep) -> Option[(Str, Str)]`
   `lines words chars trim trim_start trim_end upper lower capitalize` (uppercases
   only the first character) `starts_with ends_with strip_prefix(p) -> Option
   strip_suffix(s) -> Option replace(a, b) pad_left(width, fill = " ") pad_right(width, fill = " ")
   is_digit is_alpha is_alnum is_space is_upper is_lower reverse repeat
   count(sub) index_of(sub)`, slicing `s[1..3]`. A fill is one character;
-  `split("")` gives the characters; `replace` with an empty pattern is an error.
+  `split("")` gives the characters; `replace` and `split_once` with an empty pattern are errors.
 - **Option/Result**: `unwrap expect(msg) unwrap_or(d) unwrap_or_else(f)
   is_some is_none is_ok is_err map(f) and_then(f) map_err(f) ok_or(e) ok err
   unwrap_err collect_ok(list of Results) -> Result[List] collect_some(list of Options) -> Option[List]`
@@ -473,7 +476,8 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   lists and tuples → arrays, maps and records → objects (map keys must be Str
   or Int, and distinct as text), enum variants → `"Name"` or `{"Name": fields}`.
   `parse_json(s) -> Result`: objects → `Map[Str, _]`, arrays → lists, `1` → Int and `1.0` → Float,
-  `null` → `None`; nesting deeper than 500 is an error.
+  `null` → `None`; integers beyond Int's range become Floats, numbers beyond
+  Float's (`1e400`) and nesting deeper than 500 are errors.
 
 ## What `cogito check` checks
 

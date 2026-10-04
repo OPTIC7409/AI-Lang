@@ -873,6 +873,17 @@ impl<'a> Resolver<'a> {
                     if let (false, StmtKind::Expr(e)) = (self.repl || last_item, &s.kind) {
                         self.check_discarded(e);
                     }
+                    // `main()` at the bottom of the file, as in Python: `main`
+                    // already runs after the top-level statements.
+                    if let StmtKind::Expr(Expr { kind: ExprKind::Call { callee, args }, span }) = &s.kind {
+                        let main_fn = self.ns.values.get("main").is_some_and(|&slot| matches!(self.ctx.globals[slot as usize].kind, GlobalKind::Fn));
+                        if !self.repl && args.is_empty() && main_fn && matches!(&callee.kind, ExprKind::Var(v) if &*v.name == "main") {
+                            let d = Diagnostic::warning("W0007", "`main` runs twice: here, and again after the top-level statements")
+                                .at(*span)
+                                .help("`fn main()` is called automatically; remove this call");
+                            self.diags.push(d);
+                        }
+                    }
                 }
                 Item::Type(td) if !td.invariants.is_empty() => self.invariant(td),
                 Item::Type(_) | Item::Import(_) => {}
@@ -1374,9 +1385,17 @@ impl<'a> Resolver<'a> {
                     self.declare_pattern_types(pat, &t);
                 }
             }
-            StmtKind::Assign { target, op: _, value, ty } => {
+            StmtKind::Assign { target, op, value, ty } => {
                 self.expr(value);
                 *ty = self.place(target, "E0101");
+                // `xs = xs + [x]` and `xs = [..xs, x]` append in place, as
+                // `xs += [x]` does, instead of copying `xs` each time.
+                if op.is_none() {
+                    if let Some(rest) = appended_part(target, value) {
+                        *op = Some(BinOp::Add);
+                        *value = rest;
+                    }
+                }
             }
             StmtKind::Fn { def, res } => {
                 let def = Rc::get_mut(def).unwrap();
@@ -2757,6 +2776,23 @@ fn contract_effect(e: &mut Expr) -> Option<(Span, &'static str)> {
     let mut found = None;
     go(e, &mut found);
     found
+}
+
+/// For `x = x + e` with `x` a variable: `e`, when computing it cannot
+/// change `x`, so that the assignment can be done as `x += e`. (`x = [..x,
+/// a]` is handled when it runs: it appends only if `x` holds a list.)
+fn appended_part(target: &Expr, value: &mut Expr) -> Option<Expr> {
+    let ExprKind::Var(Var { res: res @ (VarRes::Local(_) | VarRes::Global(_)), .. }) = &target.kind else { return None };
+    let is_target = |e: &Expr| matches!(&e.kind, ExprKind::Var(v) if v.res == *res);
+    // A call could change a global while `e` is computed.
+    let safe = |e: &Expr| !may_change_locals(e) && !(matches!(res, VarRes::Global(_)) && has_calls(e));
+    let span = value.span;
+    match &mut value.kind {
+        ExprKind::Binary { op: BinOp::Add, lhs, rhs } if is_target(lhs) && safe(rhs) => {
+            Some(std::mem::replace(&mut **rhs, Expr { kind: ExprKind::Unit, span }))
+        }
+        _ => None,
+    }
 }
 
 /// A `return` or `?` in a contract, outside any anonymous function: it

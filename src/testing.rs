@@ -549,12 +549,15 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
     if f.diag.code == "E0207" {
         let huge = def.params.iter().zip(&f.args).find(|(_, a)| matches!(a, Value::Int(n) if n.unsigned_abs() >= 1 << 31));
         let is_huge = |v: &Value| matches!(v, Value::Int(n) if n.unsigned_abs() >= 1 << 31);
-        if let Some((p, _)) = huge {
+        if let Some((p, a)) = huge {
+            let name = param_label(it, p);
+            let (size, bound) = match a {
+                Value::Int(n) if *n < 0 => ("small", format!("{} >= -1_000_000_000", name)),
+                _ => ("large", format!("{} <= 1_000_000_000", name)),
+            };
             out.push_str(&format!(
-                "      {}verify also tries extreme Ints such as max_int; if inputs this large cannot happen, say so: `requires {} <= 1_000_000_000`{}\n",
-                c.dim,
-                param_label(it, p),
-                c.reset
+                "      {}verify also tries extreme Ints such as min_int and max_int; if inputs this {} cannot happen, say so: `requires {}`{}\n",
+                c.dim, size, bound, c.reset
             ));
         } else if let Some((ty, field)) = f.args.iter().find_map(|a| match a {
             Value::Record(r) => {

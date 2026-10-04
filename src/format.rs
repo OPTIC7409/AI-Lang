@@ -192,8 +192,9 @@ fn layout(src: &str, items: &[Item]) -> String {
             None => &src[..it.start],
         };
         let newlines = gap.matches('\n').count();
-        // `}` then `else` on the next line become `} else`.
-        let join_else = newlines > 0 && matches!(it.tok, Some(Tok::Else)) && matches!(prev.and_then(|p| p.tok), Some(Tok::RBrace));
+        // A `}` on a line of its own, then `else` on the next line, become
+        // `} else` (one-line blocks keep their line breaks).
+        let join_else = newlines > 0 && prev_first && matches!(it.tok, Some(Tok::Else)) && matches!(prev.and_then(|p| p.tok), Some(Tok::RBrace));
         let first = prev.is_none() || (newlines > 0 && !join_else);
         if first {
             if prev.is_some() {
@@ -318,7 +319,7 @@ mod tests {
         // `else` on the line after a `}` joins it; after a comment, it lines
         // up with its `if`.
         let src = "if a {\nx\n}\nelse {\ny\n}\nlet v = if a { 1 }\nelse if b { 2 }\nelse { 3 }\n";
-        assert_eq!(fmt(src), "if a {\n  x\n} else {\n  y\n}\nlet v = if a { 1 } else if b { 2 } else { 3 }\n");
+        assert_eq!(fmt(src), "if a {\n  x\n} else {\n  y\n}\nlet v = if a { 1 }\nelse if b { 2 }\nelse { 3 }\n");
         let src = "if a { x } # why\nelse { y }\n";
         assert_eq!(fmt(src), src);
         // Comment lines inside a continuation; a binary minus starting a line.

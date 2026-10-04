@@ -1,0 +1,57 @@
+# `xs = xs + [x]` and `xs = [..xs, x]` append in place (they are as fast as
+# `xs += [x]`), with the same meaning as building a new list.
+
+var g = [1]
+
+test "appending to a variable keeps the meaning of building a new value" {
+  var xs = [1, 2, 3]
+  xs = xs + [xs.pop!().unwrap()]
+  assert xs == [1, 2, 3, 3]
+  var ys = [1, 2, 3]
+  ys = [..ys, ys.pop!().unwrap()]
+  assert ys == [1, 2, 3, 3]
+  var zs = [1]
+  zs = zs + zs
+  assert zs == [1, 1]
+  var s = "ab"
+  s = s + "c"
+  assert s == "abc"
+}
+
+test "a spread of something other than a list still builds a list" {
+  var t = "ab"
+  t = [..t, "c"]
+  assert t == ["a", "b", "c"]
+  var st = to_set([1])
+  st = [..st, 2]
+  assert st == [1, 2]
+}
+
+test "typed lists check what is appended" {
+  var typed: List[Int] = [1]
+  typed = [..typed, 2]
+  typed = typed + [3]
+  assert typed == [1, 2, 3]
+  assert catch(fn() => {
+    var bad: List[Int] = [1]
+    bad = [..bad, 1.5]
+  }).is_err()
+}
+
+test "globals append in place too" {
+  g = [..g, 2]
+  g = g + [3]
+  assert g == [1, 2, 3]
+}
+
+test "long appends are fast" {
+  var xs: List[Int] = []
+  var ys: List[Int] = []
+  var s = ""
+  for i in 0..20000 {
+    xs = xs + [i]
+    ys = [..ys, i]
+    s = s + "x"
+  }
+  assert xs.len() == 20000 and ys.len() == 20000 and s.len() == 20000
+}

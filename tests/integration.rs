@@ -87,7 +87,7 @@ fn check_json_output() {
     let stdout = text(&out.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "{}", stdout);
-    assert!(lines[0].starts_with('{') && lines[0].contains("\"code\":\"E0121\"") && lines[0].contains("\"line\":3,\"column\":27"), "{}", lines[0]);
+    assert!(lines[0].starts_with('{') && lines[0].contains("\"code\":\"E0121\"") && lines[0].contains("\"line\":3,\"column\":15"), "{}", lines[0]);
     assert!(lines[1].contains("\"severity\":\"warning\"") && lines[1].contains("\"code\":\"W0006\""), "{}", lines[1]);
 }
 

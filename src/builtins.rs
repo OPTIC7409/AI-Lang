@@ -2360,6 +2360,9 @@ fn b_split(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 fn b_split_once(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = str_arg(it, &a, 0, "split_once", sp)?;
     let sep = str_arg(it, &a, 1, "split_once", sp)?;
+    if sep.is_empty() {
+        return Err(it.err(sp, "E0216", "`split_once` cannot split at the empty string"));
+    }
     let r = s.split_once(sep).map(|(x, y)| Value::tuple(vec![Value::str(x), Value::str(y)]));
     Ok(it.option(r))
 }
@@ -2950,7 +2953,13 @@ impl<'a> JsonParser<'a> {
                         return Ok(Value::Int(n));
                     }
                 }
-                text.parse::<f64>().map(Value::Float).map_err(|_| format!("invalid number `{}`", text))
+                // Integers beyond Int's range become Floats; numbers beyond
+                // Float's range are errors, as for `parse_float`.
+                match text.parse::<f64>() {
+                    Ok(f) if f.is_finite() => Ok(Value::Float(f)),
+                    Ok(_) => self.err("number too large"),
+                    Err(_) => Err(format!("invalid number `{}`", text)),
+                }
             }
             _ => self.err("unexpected character"),
         }
