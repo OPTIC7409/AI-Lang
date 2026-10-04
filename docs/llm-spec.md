@@ -150,6 +150,7 @@ let c = Circle(center: p, radius: 3.0)
 
 fn(x) => x * 2                  # anonymous functions: an expression body,
 fn(x) { let y = x * 2; y + 1 }  # or a block body
+fn(x: Int) -> Int => x * 2      # types are optional, as for named functions
 fn bump!(c: Counter) => c.n += 1   # a `=>` body may be one assignment
 ```
 
@@ -176,8 +177,9 @@ default values come last; defaults are evaluated on each call. If a top-level
   they are defined (use top-level functions for mutual recursion).
 - `return` and `?` always leave the innermost function, so inside
   `xs.map(fn(s) => ...)` they leave the anonymous function, not yours
-  (`check` warns, W0004). To stop at the first error, use a `for` loop, or
-  map to Results and call `.collect_ok()`.
+  (`check` warns, W0004, unless the anonymous function ends with `Ok(...)`
+  or `Some(...)` or declares its return type). To stop at the first error,
+  use a `for` loop, or map to Results and call `.collect_ok()`.
 - Recursion is limited to 100,000 nested calls (`cogito --max-depth N` to change).
 
 ## Expressions and control flow
@@ -412,7 +414,8 @@ by their module, though messages show only the short name.
 
 ## Built-in functions (all callable as methods: `xs.map(f)`)
 
-Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`).
+Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`,
+`s.replace(from: "a", to: "b")`); `cogito doc NAME` shows every signature.
 
 - **I/O**: `print(..)` `write(..)` (no newline; both join several arguments
   with a space) `eprint(..)` `input(prompt) -> Str` (`""` at end of input)
@@ -431,7 +434,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   with an optional matching `0x`/`0o`/`0b` prefix; `_` only between digits, as in `1_000`) `hash(x) -> Int` (equal values hash equal; the numbers may change between versions, so do not store them)
   `parse_float(s) -> Option` (`None` for NaN or numbers too large; `"inf"`
   is accepted; `_` only between digits) `ord(c)` `chr(n)`
-  `panic(msg)` `todo()` `dbg(x)` (prints and returns x) `catch(f)` `compare(a, b)`
+  `panic(message)` `todo()` `dbg(x)` (prints and returns x) `catch(f)` `compare(a, b)`
   `min(xs) -> Option` / `min(a, b, ...)`, `max` likewise
 - **Math**: `abs sqrt pow exp ln log(x, base) log2 log10 sin cos tan asin acos
   atan atan2 hypot floor ceil trunc` (floor/ceil/trunc/round return Int),
@@ -444,11 +447,11 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   `seed(n) random() random_int(lo, hi) shuffle(xs) choice(xs) -> Option`
 - **Collections** (lists; most also accept ranges, strings, tuples, maps):
   `len is_empty range(end) range(start, end, step) first -> Option last -> Option get(i) -> Option
-  get_or(k, default) push insert(i, x) remove(i) set(i, x) map filter
+  get_or(key, default) push insert(i, x) remove(i) set(i, x) map filter
   reduce(f) fold(init, f) sum product min_by(key) -> Option max_by(key) -> Option (the first on ties) sort sort_by(key)
   sort_with(cmp) reverse contains index_of -> Option find -> Option
-  find_index -> Option any(pred) all(pred) count(pred_or_value) take drop
-  take_while drop_while slice(a, b) zip enumerate flat_map flatten join(sep)
+  find_index -> Option any(pred) all(pred) count(x) take drop
+  take_while drop_while slice(start, end) zip enumerate flat_map flatten join(sep)
   unique group_by(key) -> Map tally -> Map[T, Int] partition(pred) -> (List, List)
   chunks(n) windows(n) repeat(x, n) each(f) to_list to_map(pairs)`.
   Sorting is stable. `sort_with(cmp)` takes a function returning an
@@ -466,8 +469,8 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   accept a set and give a List; wrap the result in `to_set(...)` for a set.
   A set of visited states: `var seen = to_set([start])`, then
   `if seen.insert!(next) { ... }`.
-- **Maps**: `keys values entries -> List[(K, V)] has(k) merge(other)
-  map_values(f) get(k) get_or(k, d) insert(k, v) remove(k)`. On a map,
+- **Maps**: `keys values entries -> List[(K, V)] has merge(other)
+  map_values(f)`, and `m.get(k) m.get_or(k, default) m.insert(k, v) m.remove(k)`. On a map,
   `filter each count any all find partition` pass the key and value to a
   two-parameter function (a one-parameter function gets a `(k, v)` tuple);
   `map` is an error (use `map_values`, or `entries().map(...)`).
@@ -476,13 +479,13 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   `update(m, k, default, f)` returns a new map.
 - **Strings**: `split(sep, limit)` (at most `limit` pieces, the last holding the rest; no sep: whitespace, with no limit) `split_once(sep) -> Option[(Str, Str)]`
   `lines words chars trim trim_start trim_end upper lower capitalize` (uppercases
-  only the first character) `starts_with ends_with strip_prefix(p) -> Option
-  strip_suffix(s) -> Option replace(a, b) pad_left(width, fill = " ") pad_right(width, fill = " ")
+  only the first character) `starts_with ends_with strip_prefix(prefix) -> Option
+  strip_suffix(suffix) -> Option replace(from, to) pad_left(width, fill = " ") pad_right(width, fill = " ")
   is_digit is_alpha is_alnum is_space is_upper is_lower (false for "") reverse repeat
-  count(sub) index_of(sub)`, slicing `s[1..3]`. A fill is one character;
+  count(x) index_of(x)`, slicing `s[1..3]`. A fill is one character;
   `split("")` gives the characters; `replace` and `split_once` with an empty pattern are errors.
-- **Option/Result**: `unwrap expect(msg) unwrap_or(d) unwrap_or_else(f)
-  is_some is_none is_ok is_err map(f) and_then(f) map_err(f) ok_or(e) ok err
+- **Option/Result**: `unwrap expect(message) unwrap_or(default) unwrap_or_else(f)
+  is_some is_none is_ok is_err map(f) and_then(f) map_err(f) ok_or(err) ok err
   unwrap_err collect_ok(list of Results) -> Result[List] collect_some(list of Options) -> Option[List]`
 - **JSON**: `to_json(x, indent = 0)`: Unit and `None` → `null`, `Some(x)` → `x`,
   lists and tuples → arrays, maps and records → objects (map keys must be Str

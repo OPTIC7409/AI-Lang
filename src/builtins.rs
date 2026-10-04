@@ -175,7 +175,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("collections", "find_index", 2, 2, b_find_index, "find_index(xs, pred) -> Option[Int]\nThe index of the first element for which pred is true."),
     b!("collections", "any", 1, 2, b_any, "any(xs, pred) -> Bool\nWhether pred is true for some element (or whether some element is true)."),
     b!("collections", "all", 1, 2, b_all, "all(xs, pred) -> Bool\nWhether pred is true for every element (or whether every element is true)."),
-    b!("collections", "count", 2, 2, b_count, "count(xs, pred_or_value) -> Int\nHow many elements match the predicate (or equal the value; substrings, for strings)."),
+    b!("collections", "count", 2, 2, b_count, "count(xs, x) -> Int\nHow many elements match x, a predicate, or equal the value x (for a string: how many times the substring x occurs)."),
     b!("collections", "take", 2, 2, b_take, "take(xs, n) -> List\nThe first n elements (characters, for strings)."),
     b!("collections", "drop", 2, 2, b_drop, "drop(xs, n) -> List\nAll but the first n elements (characters, for strings)."),
     b!("collections", "take_while", 2, 2, b_take_while, "take_while(xs, pred) -> List\nThe longest prefix whose elements satisfy pred (a Str for a Str)."),
@@ -205,7 +205,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     b!("collections", "intersection", 2, 2, b_intersection, "intersection(s: Set[T], t: Set[T]) -> Set[T]\nThe elements in both s and t."),
     b!("collections", "difference", 2, 2, b_difference, "difference(s: Set[T], t: Set[T]) -> Set[T]\nThe elements of s that are not in t."),
     b!("collections", "is_subset", 2, 2, b_is_subset, "is_subset(s: Set[T], t: Set[T]) -> Bool\nWhether every element of s is in t."),
-    b!("collections", "merge", 2, 2, b_merge, "merge(a: Map, b: Map) -> Map\nAll entries of a and b (b wins on conflicts)."),
+    b!("collections", "merge", 2, 2, b_merge, "merge(m: Map, other: Map) -> Map\nAll entries of m and other (other wins on conflicts)."),
     b!("collections", "map_values", 2, 2, b_map_values, "map_values(m: Map[K, V], f: fn(V) -> W) -> Map[K, W]\nApply f to every value."),
     // ---- strings
     b!("strings", "split", 1, 3, b_split, "split(s: Str, sep: Str, limit: Int) -> List[Str]\nSplit on a separator (on whitespace, when sep is omitted), into at most `limit` pieces if given."),
@@ -1042,10 +1042,22 @@ fn b_hypot(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 fn b_pow(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let x = num_arg(it, &a, 0, "pow", sp)?;
     let y = num_arg(it, &a, 1, "pow", sp)?;
-    if x < 0.0 && y.is_finite() && y.fract() != 0.0 {
-        return Err(it.err(sp, "E0216", negative_power(x, y)));
+    if let Some(m) = power_error(x, y) {
+        return Err(it.err(sp, "E0216", m));
     }
     Ok(Value::Float(x.powf(y)))
+}
+
+/// Why `x` to the power `y` has no value: a negative base with a fractional
+/// exponent, or zero to a negative power (a division by zero).
+pub fn power_error(x: f64, y: f64) -> Option<String> {
+    if x < 0.0 && y.is_finite() && y.fract() != 0.0 {
+        return Some(negative_power(x, y));
+    }
+    if x == 0.0 && y < 0.0 {
+        return Some(format!("0 to the power {} divides by zero", format_float(y)));
+    }
+    None
 }
 
 /// The message for a negative number raised to a fractional power, which
@@ -2891,6 +2903,36 @@ fn b_to_json(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     Ok(Value::str(out))
 }
 
+/// Whether `t` is a number in JSON's grammar: `-?(0|[1-9][0-9]*)`, then
+/// optionally `.` and digits, then optionally `e`, a sign and digits.
+fn json_number(t: &str) -> bool {
+    let b = t.strip_prefix('-').unwrap_or(t).as_bytes();
+    let digits = |i: usize| b[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+    let mut i = digits(0);
+    if i == 0 {
+        return false;
+    }
+    if b.get(i) == Some(&b'.') {
+        let n = digits(i + 1);
+        if n == 0 {
+            return false;
+        }
+        i += 1 + n;
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        if matches!(b.get(i), Some(b'+' | b'-')) {
+            i += 1;
+        }
+        let n = digits(i);
+        if n == 0 {
+            return false;
+        }
+        i += n;
+    }
+    i == b.len()
+}
+
 struct JsonParser<'a> {
     s: &'a [u8],
     pos: usize,
@@ -3001,6 +3043,10 @@ impl<'a> JsonParser<'a> {
                 let digits = text.trim_start_matches('-');
                 if digits.len() > 1 && digits.starts_with('0') && digits.as_bytes()[1].is_ascii_digit() {
                     return self.err("numbers may not have leading zeros");
+                }
+                if !json_number(text) {
+                    self.pos = start;
+                    return self.err(&format!("invalid number `{}`", text));
                 }
                 if !float {
                     if let Ok(n) = text.parse::<i64>() {

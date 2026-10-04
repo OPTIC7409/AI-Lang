@@ -31,6 +31,8 @@ enum FnKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LocalKind {
     Let,
+    /// A `for` loop's variable.
+    Loop,
     Var,
     Param,
     Fn,
@@ -71,6 +73,9 @@ struct FnCtx {
     loops: Vec<bool>,
     /// The declared return type, if any (used to check `?`).
     ret: Option<Ty>,
+    /// Without one: Option or Result, when the body ends with `Some(..)`/
+    /// `None` or `Ok(..)`/`Err(..)` (also used to check `?`).
+    ret_kind: Option<u32>,
 }
 
 impl FnCtx {
@@ -85,6 +90,7 @@ impl FnCtx {
             parent_visible,
             loops: Vec::new(),
             ret: None,
+            ret_kind: None,
         }
     }
 }
@@ -534,7 +540,7 @@ impl<'a> Resolver<'a> {
         let s = f.scopes.pop().unwrap();
         f.next_slot = s.start_slot;
         for l in s.locals {
-            if !l.used && !l.name.starts_with('_') && matches!(l.kind, LocalKind::Let | LocalKind::Var | LocalKind::Fn) {
+            if !l.used && !l.name.starts_with('_') && matches!(l.kind, LocalKind::Let | LocalKind::Loop | LocalKind::Var | LocalKind::Fn) {
                 self.diags.push(
                     Diagnostic::warning("W0001", format!("unused variable `{}`", l.name))
                         .at(l.span)
@@ -563,6 +569,12 @@ impl<'a> Resolver<'a> {
         let f = self.fns.last().unwrap();
         let local = f.scopes.iter().rev().flat_map(|s| s.locals.iter().rev()).find(|l| &*l.name == name);
         local.is_some_and(|l| l.kind == LocalKind::Param)
+    }
+
+    /// The kind of the local variable `name` of the current function.
+    fn local_kind(&self, name: &str) -> Option<LocalKind> {
+        let f = self.fns.last()?;
+        f.scopes.iter().rev().flat_map(|s| s.locals.iter().rev()).find(|l| &*l.name == name).map(|l| l.kind)
     }
 
     fn lookup_level(&mut self, level: usize, name: &str) -> Option<Found> {
@@ -662,8 +674,10 @@ impl<'a> Resolver<'a> {
     /// `?` on an Option inside a function returning a Result (or vice versa)
     /// cannot work; report it before the program runs.
     fn check_try_kinds(&mut self, inner: &Expr, span: Span) {
-        let fn_kind = match &self.cur().ret {
-            Some(Ty::Named { id, .. }) if *id == crate::types::OPTION_ID || *id == crate::types::RESULT_ID => *id,
+        let ret_kind = self.cur().ret_kind;
+        let fn_kind = match (&self.cur().ret, ret_kind) {
+            (Some(Ty::Named { id, .. }), _) if *id == crate::types::OPTION_ID || *id == crate::types::RESULT_ID => *id,
+            (None, Some(k)) => k,
             _ => return,
         };
         let Some(inner_kind) = self.static_result_kind(inner) else { return };
@@ -1091,6 +1105,12 @@ impl<'a> Resolver<'a> {
                     if def.name.as_deref() == Some("main") && def.ret.is_none() {
                         self.check_tail_discarded(&def.body);
                     }
+                    if def.name.as_deref() == Some("main") && def.required_params() > 0 && !self.repl {
+                        let d = Diagnostic::error("E0201", "`main` is called without arguments, so it cannot have parameters")
+                            .at(def.name_span)
+                            .help("read the command-line arguments with `args()` (a List[Str], without the program name): `fn main() { let argv = args() ... }`");
+                        self.error(d);
+                    }
                 }
                 Item::Test(t) => {
                     let def = Rc::get_mut(&mut t.func).unwrap();
@@ -1517,6 +1537,9 @@ impl<'a> Resolver<'a> {
         self.generics.extend(def.generics.iter().cloned());
         self.fns.push(FnCtx::new(kind, parent_visible, self_name));
         self.cur().ret = def.ret.as_ref().map(|t| t.ty.clone());
+        if def.ret.is_none() {
+            self.cur().ret_kind = wrapped_kind(&def.body);
+        }
         let mut seen: Vec<Name> = Vec::new();
         let mutating = def.mutating;
         if def.params.len() > 64 {
@@ -1762,7 +1785,9 @@ impl<'a> Resolver<'a> {
                     if found.span != Span::default() {
                         d = d.note(format!("`{}` is declared at {}", name, self.line_of(found.span)));
                     }
-                    d = if self.is_param(&name) {
+                    d = if self.local_kind(&name) == Some(LocalKind::Loop) {
+                        d.help(format!("a loop variable cannot change: copy it into a variable first (`var {0}2 = {0}`), or loop over indexes (`for i in 0..xs.len()`) to change the list's elements with `xs[i] = ...`", name))
+                    } else if self.is_param(&name) {
                         d.help(format!(
                             "parameters cannot change: copy it into a variable first (`var {0} = {0}`), or, to change the caller's variable, make `{0}` the first parameter of a `!` function",
                             name
@@ -1924,7 +1949,9 @@ impl<'a> Resolver<'a> {
         for a in args.iter_mut() {
             self.expr(&mut a.value);
             if let ExprKind::Lambda(def) = &mut a.value.kind {
-                if def.ret.is_none() {
+                // (Not when the function ends with `Ok(...)` or `Some(...)`:
+                // it returns a Result or Option itself, so `?` is meant.)
+                if def.ret.is_none() && !ends_wrapped(&def.body) {
                     if let Some(def) = Rc::get_mut(def) {
                         if let Some((span, is_try)) = lambda_escape(&mut def.body) {
                             let what = if is_try { "`?`" } else { "`return`" };
@@ -1944,8 +1971,6 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Warn when an expression statement throws away the result of a
-    /// built-in that has no side effects (`xs.sort()` instead of `xs.sort!()`).
     /// `e`'s value is dropped: check the calls whose results it drops
     /// (the last line of a block, the arms of a `match`, ...).
     fn check_tail_discarded(&mut self, e: &Expr) {
@@ -1969,6 +1994,8 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Warn when an expression statement throws away the result of a
+    /// built-in that has no side effects (`xs.sort()` instead of `xs.sort!()`).
     fn check_discarded(&mut self, e: &Expr) {
         let (name, res, mutating) = match &e.kind {
             ExprKind::MethodCall { method, mutating, .. } => (&method.name, method.res, *mutating),
@@ -2039,10 +2066,19 @@ impl<'a> Resolver<'a> {
         // the call do something even when its result is dropped (but `map`
         // used that way is still better written with `each`).
         let args: Vec<&Expr> = match &e.kind {
-            ExprKind::MethodCall { args, .. } | ExprKind::Call { args, .. } => args.iter().map(|a| &a.value).collect(),
+            ExprKind::MethodCall { args, receiver, .. } => std::iter::once(&**receiver).chain(args.iter().map(|a| &a.value)).collect(),
+            ExprKind::Call { args, .. } => args.iter().map(|a| &a.value).collect(),
             _ => vec![],
         };
-        if &**name != "map" && args.iter().any(|a| has_effects(a, EFFECTS)) {
+        // A callback with effects, or a named function (which may have
+        // them); or an argument that is itself a call with effects
+        // (`write_file(p, s).unwrap_or(())`).
+        let own_fn = |v: &Var| match v.res {
+            VarRes::Global(s) => !matches!(self.ctx.globals[s as usize].kind, GlobalKind::Builtin(_) | GlobalKind::Ctor(_)),
+            _ => true,
+        };
+        let named_fn = |a: &Expr| matches!(&a.kind, ExprKind::Var(Var { res: VarRes::Global(s), .. }) if matches!(self.ctx.globals[*s as usize].kind, GlobalKind::Fn));
+        if &**name != "map" && args.iter().any(|a| has_effects(a, EFFECTS) || named_fn(a) || calls_effect(a, EFFECTS, &own_fn)) {
             return;
         }
         let twin = format!("{}!", name);
@@ -2093,6 +2129,22 @@ impl<'a> Resolver<'a> {
                     }
                     let forms = crate::builtins::param_forms(*idx);
                     for n in &named {
+                        // `"ab".strip_suffix(s: "b")`: `s` is the receiver.
+                        let mut having = forms.iter().filter(|f| f.iter().any(|x| **x == ***n)).peekable();
+                        if having.peek().is_some() && having.all(|f| f.iter().position(|x| **x == ***n).is_some_and(|i| i < positional)) {
+                            let by = if extra > 0 && forms.iter().all(|f| f.first().is_some_and(|x| **x == ***n)) {
+                                format!("`{}` is the value before `.{}`", n, b.name)
+                            } else {
+                                format!("`{}` is already given by position", n)
+                            };
+                            let d = Diagnostic::error("E0108", format!("argument `{}` is given twice", n)).at(span).note(by).note(format!(
+                                "the parameters of `{}` are: {}",
+                                b.name,
+                                names.join(", ")
+                            ));
+                            self.error(d);
+                            return;
+                        }
                         if !forms.iter().any(|f| f.iter().any(|x| **x == ***n)) {
                             let mut d = Diagnostic::error("E0108", format!("`{}` has no parameter named `{}`", b.name, n))
                                 .at(span)
@@ -2526,6 +2578,9 @@ impl<'a> Resolver<'a> {
                 self.expr(iter);
                 self.push_scope();
                 self.pattern(pat, BindMode::Local);
+                for l in self.cur().scopes.last_mut().unwrap().locals.iter_mut() {
+                    l.kind = LocalKind::Loop;
+                }
                 self.cur().loops.push(false);
                 self.expr(body);
                 self.cur().loops.pop();
@@ -3251,6 +3306,62 @@ fn pattern_mismatch<'p>(p: &'p Pattern, ty: &Ty) -> Option<&'p Pattern> {
 /// Whether an anonymous function might do something besides compute a
 /// value: print, call a `!` function or another effectful built-in, or
 /// assign to a variable.
+/// Whether `e` calls a function with effects (a built-in from `effects`, a
+/// `!` function, or a function of your own) outside any anonymous function.
+fn calls_effect(e: &Expr, effects: &[&str], own_fn: &dyn Fn(&Var) -> bool) -> bool {
+    let here = match &e.kind {
+        ExprKind::MethodCall { mutating: true, .. } => true,
+        ExprKind::MethodCall { method, .. } => effects.contains(&&*method.name) || own_fn(method),
+        ExprKind::Call { callee, .. } => match &callee.kind {
+            ExprKind::Var(v) => v.name.ends_with('!') || effects.contains(&&*v.name) || own_fn(v),
+            _ => true,
+        },
+        ExprKind::Lambda(_) => return false,
+        _ => false,
+    };
+    let mut found = here;
+    if !found {
+        for_each_child(e, &mut |c| found = found || calls_effect(c, effects, own_fn));
+    }
+    found
+}
+
+/// Option or Result, when every value `e` can end with is written
+/// `Some(..)`/`None`, or every one `Ok(..)`/`Err(..)`.
+fn wrapped_kind(e: &Expr) -> Option<u32> {
+    match &e.kind {
+        ExprKind::Block(stmts) => match stmts.last() {
+            Some(Stmt { kind: StmtKind::Expr(x), .. }) => wrapped_kind(x),
+            _ => None,
+        },
+        ExprKind::If { then, els: Some(els), .. } => wrapped_kind(then).filter(|k| wrapped_kind(els) == Some(*k)),
+        ExprKind::Match { arms, .. } => {
+            let first = wrapped_kind(&arms.first()?.body)?;
+            arms.iter().all(|a| wrapped_kind(&a.body) == Some(first)).then_some(first)
+        }
+        ExprKind::Call { callee, .. } => match &callee.kind {
+            ExprKind::Var(v) if matches!(&*v.name, "Ok" | "Err") => Some(crate::types::RESULT_ID),
+            ExprKind::Var(v) if &*v.name == "Some" => Some(crate::types::OPTION_ID),
+            _ => None,
+        },
+        ExprKind::Var(v) if &*v.name == "None" => Some(crate::types::OPTION_ID),
+        _ => None,
+    }
+}
+
+/// Whether every value `e` can end with is written `Ok(..)`, `Err(..)`,
+/// `Some(..)` or `None`.
+fn ends_wrapped(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Block(stmts) => matches!(stmts.last(), Some(Stmt { kind: StmtKind::Expr(x), .. }) if ends_wrapped(x)),
+        ExprKind::If { then, els: Some(els), .. } => ends_wrapped(then) && ends_wrapped(els),
+        ExprKind::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| ends_wrapped(&a.body)),
+        ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Var(v) if matches!(&*v.name, "Ok" | "Err" | "Some")),
+        ExprKind::Var(v) => &*v.name == "None",
+        _ => false,
+    }
+}
+
 fn has_effects(e: &Expr, effects: &[&str]) -> bool {
     let ExprKind::Lambda(def) = &e.kind else { return false };
     fn walk(e: &Expr, effects: &[&str], found: &mut bool) {
@@ -3274,9 +3385,6 @@ fn has_effects(e: &Expr, effects: &[&str]) -> bool {
     found
 }
 
-/// The first use of a variable with one of these names in an expression.
-/// A call `x.f.name(...)` or `name(x.f, ...)` (on a field) inside `e` for
-/// which `calls(resolution, argument count)` holds.
 /// A call of `name` on the variable `param` itself: `xs.sort()` or
 /// `sort(xs)`.
 fn find_call_on(e: &Expr, name: &str, param: VarRes, calls: &dyn Fn(VarRes, usize) -> bool) -> Option<Span> {
@@ -3306,6 +3414,8 @@ fn find_call_on(e: &Expr, name: &str, param: VarRes, calls: &dyn Fn(VarRes, usiz
     found
 }
 
+/// A call `x.f.name(...)` or `name(x.f, ...)` (on a field) inside `e` for
+/// which `calls(resolution, argument count)` holds.
 fn find_field_call(e: &Expr, name: &str, calls: &dyn Fn(VarRes, usize) -> bool) -> Option<Span> {
     match &e.kind {
         ExprKind::MethodCall { receiver, method, method_span, args, .. }
@@ -3330,6 +3440,7 @@ fn find_field_call(e: &Expr, name: &str, calls: &dyn Fn(VarRes, usize) -> bool) 
     found
 }
 
+/// The first use of a variable with one of these names in an expression.
 fn find_var(e: &Expr, names: &[&str]) -> Option<Span> {
     if let ExprKind::Var(v) = &e.kind {
         if names.contains(&&*v.name) {

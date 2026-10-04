@@ -1,0 +1,4 @@
+# expect: E0201
+fn main(argv: List[Str]) {
+  print(argv)
+}

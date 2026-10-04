@@ -261,6 +261,12 @@ impl<'s> Parser<'s> {
                         d.help("two names in a row: is an operator or a comma missing?")
                     }
                     _ if self.looks_like_ternary() => d.help(TERNARY_HELP),
+                    // `"[" + xs |> join(",") + "]"`
+                    t if t.is_binary_operator()
+                        && self.toks[..self.pos].iter().rev().take_while(|t| !matches!(t.tok, Tok::Newline | Tok::Semi | Tok::LBrace)).any(|t| t.tok == Tok::PipeGt) =>
+                    {
+                        d.help("`|>` takes everything on its left (`a + b |> f` is `f(a + b)`), and only another `|>` can follow the call: put the pipeline in parentheses: `a + (xs |> f) + b`")
+                    }
                     _ => d.help("put each statement on its own line, or separate statements with `;`"),
                 };
                 Err(d)

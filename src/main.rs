@@ -295,7 +295,20 @@ fn cmd_test(paths: &[String], opts: &Options, verify: bool) -> ExitCode {
         it.silent = false;
         if let Err(cogito::interp::Ctrl::Error(d)) = r {
             cogito::err_out!("{}", d.render(&it.ctx.sm, opts.color));
-            cogito::err_outln!("{}error{}: the top-level code of `{}` failed, so its tests were not run", c.red, c.reset, f.display());
+            // (The failing code may be in a module the file imports.)
+            let module =
+                d.span.filter(|sp| sp.file != prog.file && (sp.file as usize) < it.ctx.sm.files.len()).map(|sp| it.ctx.sm.get(sp.file).name.clone());
+            match module {
+                Some(m) => cogito::err_outln!(
+                    "{}error{}: the top-level code of `{}`, which `{}` imports, failed, so the tests of `{}` were not run",
+                    c.red,
+                    c.reset,
+                    m,
+                    f.display(),
+                    f.display()
+                ),
+                None => cogito::err_outln!("{}error{}: the top-level code of `{}` failed, so its tests were not run", c.red, c.reset, f.display()),
+            }
             load_errors += 1;
             continue;
         }
@@ -716,6 +729,8 @@ fn main() -> ExitCode {
             // About 40 KB of stack per nested call (100,000 calls in 4 GB).
             std::env::set_var("COGITO_MAX_DEPTH", (stack / (FULL / 100_000)).max(100).to_string());
         }
+        // Leave room below the limit for the frames of one call.
+        cogito::interp::STACK_BYTES.store(size - (size / 8).max(16 << 20).min(size / 2), std::sync::atomic::Ordering::Relaxed);
         match std::thread::Builder::new().stack_size(size).spawn(real_main) {
             Ok(child) => return child.join().unwrap_or(ExitCode::from(101)),
             Err(_) if stack > (16 << 20) => stack /= 4,

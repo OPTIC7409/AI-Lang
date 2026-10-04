@@ -35,3 +35,15 @@ test "an endless range stops at max_int" {
   assert (-5..max_int).get(max_int) == Some(max_int - 5)
   assert catch(fn() => (max_int..)[1]).is_err()
 }
+
+test "zero to a negative power is an error" {
+  assert catch(fn() => pow(0, -1)).is_err()
+  assert catch(fn() => 0.0 ** -1).is_err()
+  assert pow(2, -1) == 0.5
+}
+
+test "parse_json follows JSON's number grammar" {
+  assert parse_json("1.").is_err()
+  assert parse_json("1.e3").is_err()
+  assert parse_json("-0.5e2") == Ok(-50.0)
+}

@@ -93,3 +93,8 @@ test "random numbers are reproducible with a seed" {
   assert a == b
   assert a.all(fn(x) => 1 <= x and x <= 100)
 }
+
+test "raw strings inside interpolations" {
+  assert "{r"a{b"}" == "a\{b"
+  assert "{r#"a"b"#}" == "a\"b"
+}

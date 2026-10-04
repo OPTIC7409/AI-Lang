@@ -1,0 +1,6 @@
+# expect: E0117
+fn parse(s: Str) {
+  let n = parse_int(s)?
+  Ok(n)
+}
+print(parse("1"))

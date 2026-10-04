@@ -1,0 +1,3 @@
+# expect: E0121
+type P = { x: Int }
+print(sum(P(x: 1)))

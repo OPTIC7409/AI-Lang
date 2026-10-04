@@ -107,6 +107,28 @@ pub struct Token {
     pub span: Span,
 }
 
+impl Tok {
+    /// Whether the token is a binary arithmetic or comparison operator.
+    pub fn is_binary_operator(&self) -> bool {
+        matches!(
+            self,
+            Tok::Plus
+                | Tok::Minus
+                | Tok::Star
+                | Tok::StarStar
+                | Tok::Slash
+                | Tok::SlashSlash
+                | Tok::Percent
+                | Tok::EqEq
+                | Tok::NotEq
+                | Tok::Lt
+                | Tok::Le
+                | Tok::Gt
+                | Tok::Ge
+        )
+    }
+}
+
 pub fn keyword(s: &str) -> Option<Tok> {
     Some(match s {
         "let" => Tok::Let,
@@ -981,6 +1003,11 @@ impl<'a> Lexer<'a> {
                     }
                     continue;
                 }
+                // A raw string (`r"..."`, `r#"..."#`): its braces and quotes are text.
+                b'r' if !is_ident_char(self.b[self.pos - 1]) && self.raw_end(self.pos).is_some() => {
+                    self.pos = self.raw_end(self.pos).unwrap_or(self.pos + 1);
+                    continue;
+                }
                 b'(' | b'[' | b'{' => depth += 1,
                 b')' | b']' => depth -= 1,
                 b'}' => {
@@ -1006,6 +1033,20 @@ impl<'a> Lexer<'a> {
         }
         let spec = spec_start.map(|s| self.src[s + 1..close].to_string());
         Ok(StrPart::Expr { start: expr_start as u32, end: expr_end as u32, spec })
+    }
+
+    /// The end of a one-line raw string starting at `at` (`r"..."` or
+    /// `r#"..."#`), if there is one.
+    fn raw_end(&self, at: usize) -> Option<usize> {
+        let hashes = self.b[at + 1..self.end].iter().take_while(|&&h| h == b'#').count();
+        let open = at + 1 + hashes;
+        if self.b.get(open) != Some(&b'"') || open >= self.end {
+            return None;
+        }
+        let close: Vec<u8> = std::iter::once(b'"').chain(std::iter::repeat_n(b'#', hashes)).collect();
+        let body = &self.b[open + 1..self.end];
+        let line = &body[..body.iter().position(|&c| c == b'\n').unwrap_or(body.len())];
+        line.windows(close.len()).position(|w| w == close.as_slice()).map(|i| open + 1 + i + close.len())
     }
 
     /// Skip over a string literal nested inside an interpolation.

@@ -1,0 +1,3 @@
+# expect: E0121
+let max = 5
+print(max(2, 3))

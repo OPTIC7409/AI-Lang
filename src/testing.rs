@@ -674,15 +674,24 @@ fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut Str
                 "      {}verify also tries extreme Ints such as min_int and max_int; if inputs this {} cannot happen, say so: `requires {}`{}\n",
                 c.dim, size, bound, c.reset
             ));
-        } else if let Some((ty, field)) = f.args.iter().find_map(|a| match a {
-            Value::Record(r) => {
-                r.ty.as_ref().and_then(|t| r.names.iter().zip(r.values.iter()).find(|(_, v)| is_huge(v)).map(|(n, _)| (t.name.clone(), n.clone())))
-            }
+        } else if let Some((ty, field, negative)) = f.args.iter().find_map(|a| match a {
+            Value::Record(r) => r.ty.as_ref().and_then(|t| {
+                r.names
+                    .iter()
+                    .zip(r.values.iter())
+                    .find(|(_, v)| is_huge(v))
+                    .map(|(n, v)| (t.name.clone(), n.clone(), matches!(v, Value::Int(x) if *x < 0)))
+            }),
             _ => None,
         }) {
+            let (extreme, size, bound) = if negative {
+                ("min_int", "small", format!("{} >= -1_000_000_000", field))
+            } else {
+                ("max_int", "large", format!("{} <= 1_000_000_000", field))
+            };
             out.push_str(&format!(
-                "      {}verify also tries extreme Ints such as max_int in record fields; if `{}` cannot be this large, say so in the type: `type {} = {{ ... }} where {} <= 1_000_000_000`{}\n",
-                c.dim, field, ty, field, c.reset
+                "      {}verify also tries extreme Ints such as {} in record fields; if `{}` cannot be this {}, say so in the type: `type {} = {{ ... }} where {}`{}\n",
+                c.dim, extreme, field, size, ty, bound, c.reset
             ));
         }
     }

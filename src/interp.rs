@@ -102,6 +102,9 @@ pub struct Interp {
     pub globals: Vec<Option<Value>>,
     pub stack: Vec<Frame>,
     pub max_depth: usize,
+    /// The address of the stack when the interpreter was made (see
+    /// `STACK_BYTES`).
+    stack_base: usize,
     pub rng: Rng,
     pub args: Vec<String>,
     /// Discard all program output (used while generating test inputs).
@@ -152,6 +155,14 @@ impl Default for Interp {
 }
 
 impl Interp {
+    /// Whether the native stack is nearly used up (only when `STACK_BYTES`
+    /// says how large it is).
+    #[inline]
+    fn stack_full(&self) -> bool {
+        let limit = STACK_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+        limit != 0 && self.stack_base.saturating_sub(stack_address()) > limit
+    }
+
     pub fn new() -> Interp {
         let mut ctx = Ctx::new();
         let mut globals: Vec<Option<Value>> = Vec::new();
@@ -192,6 +203,7 @@ impl Interp {
             globals,
             stack: Vec::new(),
             max_depth: std::env::var("COGITO_MAX_DEPTH").ok().and_then(|s| s.parse().ok()).unwrap_or(100_000),
+            stack_base: stack_address(),
             rng: Rng::new(seed),
             args: Vec::new(),
             silent: false,
@@ -792,6 +804,27 @@ impl Interp {
             if spreads_target && holds_list && items[1..].iter().all(|i| safe(&i.expr)) {
                 let rest = self.list_items(&items[1..], env)?;
                 return self.assign_value(target, Some(BinOp::Add), Value::list(rest), decl, env);
+            }
+        }
+        // `xs = xs.push(x)` (the built-in `push`) appends in place too.
+        if let (
+            None,
+            ExprKind::Var(Var { res: res @ (VarRes::Local(_) | VarRes::Global(_)), .. }),
+            ExprKind::MethodCall { receiver, method, args, .. },
+        ) = (op, &target.kind, &value.kind)
+        {
+            let is_push = matches!(method.res, VarRes::Global(g) if matches!(self.ctx.globals[g as usize].kind, GlobalKind::Builtin(i) if BUILTINS[i as usize].name == "push"));
+            if is_push && args.len() == 1 && args[0].name.is_none() && matches!(&receiver.kind, ExprKind::Var(v) if v.res == *res) {
+                let (holds_list, global) = match res {
+                    VarRes::Local(s) => (matches!(env.locals[*s as usize], Value::List(_)), false),
+                    VarRes::Global(s) => (matches!(self.globals[*s as usize], Some(Value::List(_))), true),
+                    _ => (false, false),
+                };
+                let x = &args[0].value;
+                if holds_list && !crate::ast::may_change_locals(x) && !(global && crate::ast::has_calls(x)) {
+                    let v = self.eval(x, env)?;
+                    return self.assign_value(target, Some(BinOp::Add), Value::list(vec![v]), decl, env);
+                }
             }
         }
         let rhs = self.operand(value, env)?;
@@ -2159,8 +2192,8 @@ impl Interp {
                     let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) else {
                         return Err(self.bad_binop(op, &a, &b, span));
                     };
-                    if x < 0.0 && y.is_finite() && y.fract() != 0.0 {
-                        return Err(self.err(span, "E0216", crate::builtins::negative_power(x, y)));
+                    if let Some(m) = crate::builtins::power_error(x, y) {
+                        return Err(self.err(span, "E0216", m));
                     }
                     Ok(Float(x.powf(y)))
                 }
@@ -2870,6 +2903,16 @@ impl Interp {
     ) -> R<(Value, Value)> {
         let def = c.def.clone();
         self.tick(span)?;
+        if self.stack_full() {
+            return Err(self.fail(
+                self.diag(
+                    span,
+                    "E0213",
+                    format!("stack overflow: the interpreter's stack is full after {} nested calls (in `{}`)", self.stack.len(), def.display_name()),
+                )
+                .help("check that the recursion has a base case that is always reached; for recursion this deep, use a loop instead"),
+            ));
+        }
         if self.stack.len() >= self.max_depth {
             return Err(self.fail(
                 self.diag(span, "E0213", format!("stack overflow: more than {} nested calls (in `{}`)", self.max_depth, def.display_name()))
@@ -3022,6 +3065,7 @@ impl Interp {
             matches!((t, v), (Ty::Int, Value::Int(_)) | (Ty::Float, Value::Float(_)) | (Ty::Str, Value::Str(_)) | (Ty::Bool, Value::Bool(_)))
         };
         let ok = self.stack.len() < self.max_depth
+            && !self.stack_full()
             && def.params.iter().all(|p| match &p.ty {
                 None => true,
                 Some(t) => scalar(&t.ty, &locals[p.slot as usize]) || self.has_type(&locals[p.slot as usize], &t.ty, false),
@@ -3938,4 +3982,17 @@ fn same_value_ref(a: &Value, b: &Value) -> bool {
         (Value::Variant(x), Value::Variant(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
+}
+
+/// How much of the native stack the interpreter may use (0: unknown). The
+/// `cogito` tool sets it for the thread it runs programs on, so that very
+/// deep recursion with a raised `--max-depth` stops with an error instead
+/// of crashing.
+pub static STACK_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The current position of the native stack.
+#[inline(always)]
+fn stack_address() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&marker) as *const u8 as usize
 }

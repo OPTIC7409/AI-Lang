@@ -416,7 +416,7 @@ pub const CATALOG: &[(&str, &str, &str)] = &[
     ("E0211", "unsupported operation", "An operator was applied to values of types it does not support, such as\n`\"a\" + 1`. Cogito never converts types implicitly (other than Int to\nFloat). Use string interpolation to build strings: \"a{1}\"."),
     ("E0212", "pattern did not match", "A `let` or `for` destructuring pattern did not match the value. Use `match`\nwhen the shape of a value is not certain."),
     ("E0213", "stack overflow", "The maximum call depth was exceeded, usually because of unbounded\nrecursion. Check that every recursive function has a base case that is\nalways reached."),
-    ("E0214", "uninitialized global", "A function read a top-level `let` or `var` before the line that defines it\nhad run."),
+    ("E0214", "global not available", "A top-level `let` or `var` was read when it had no value to give:\n\n- before the line that defines it had run (a function called from the\n  top-level code above the definition reads it): move the definition up;\n- while a `!` function is changing it (`add!(g, ...)` reads `g` inside\n  `add!`, through the global, not through its parameter): use the\n  parameter inside the function instead."),
     ("E0215", "no matching overload", "A function with several definitions (overloads) was called, but no\ndefinition's parameter types accept the given arguments."),
     ("E0216", "invalid argument", "A built-in function received an argument value it cannot handle, such as a\nnegative count for `repeat`."),
     ("E0217", "panic", "The program called `panic(message)`."),

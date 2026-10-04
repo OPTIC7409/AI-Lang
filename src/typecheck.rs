@@ -60,6 +60,35 @@ struct Pass {
     names: HashMap<Span, Ty>,
 }
 
+/// The names of the variables passed to `catch` anywhere in the program.
+fn caught_names(prog: &Program) -> HashSet<Name> {
+    fn walk(e: &Expr, out: &mut HashSet<Name>) {
+        if let ExprKind::Call { callee, args } = &e.kind {
+            if let (ExprKind::Var(f), Some(Arg { value: Expr { kind: ExprKind::Var(v), .. }, .. })) = (&callee.kind, args.first()) {
+                if &*f.name == "catch" {
+                    out.insert(v.name.clone());
+                }
+            }
+        }
+        for_each_child(e, &mut |c| walk(c, out));
+    }
+    let mut out = HashSet::new();
+    for item in &prog.items {
+        match item {
+            Item::Stmt(s) => match &s.kind {
+                StmtKind::Let { value, .. } | StmtKind::Assign { value, .. } | StmtKind::Expr(value) => walk(value, &mut out),
+                StmtKind::Assert { cond, .. } => walk(cond, &mut out),
+                StmtKind::Fn { def, .. } => walk(&def.body, &mut out),
+            },
+            Item::Fn(def) => walk(&def.body, &mut out),
+            Item::Test(t) => walk(&t.func.body, &mut out),
+            Item::Property(p) => walk(&p.func.body, &mut out),
+            _ => {}
+        }
+    }
+    out
+}
+
 fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>, record: bool) -> Pass {
     let mut reassigned = HashSet::new();
     // Locals of the top-level code (inside a top-level `for` or `if`).
@@ -94,6 +123,7 @@ fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>, record: boo
         broken: HashSet::new(),
         global_vars: HashMap::new(),
         names: record.then(HashMap::new),
+        caught: caught_names(prog),
     };
     // Top-level statements first (in order), so that functions see the
     // types of the globals they use.
@@ -136,6 +166,8 @@ struct Frame {
 struct Checker<'a> {
     ctx: &'a Ctx,
     diags: Vec<Diagnostic>,
+    /// Variables passed to `catch` (their functions are expected to fail).
+    caught: HashSet<Name>,
     /// Types of top-level variables (from annotations, or inferred for `let`).
     globals: HashMap<u32, Ty>,
     frames: Vec<Frame>,
@@ -481,7 +513,22 @@ impl<'a> Checker<'a> {
     fn stmt(&mut self, s: &Stmt) {
         match &s.kind {
             StmtKind::Let { pat, ty, value, mutable } => {
+                let errors = self.diags.len();
                 let t = self.expr(value);
+                // `let bad = fn() => ...` passed to `catch` later: like a
+                // function written in the `catch` call itself.
+                if let (PatKind::Bind { name, .. }, ExprKind::Lambda(_)) = (&pat.kind, &value.kind) {
+                    if self.caught.contains(name) {
+                        let mut k = errors;
+                        while k < self.diags.len() {
+                            if self.diags[k].code == "E0121" {
+                                self.diags.remove(k);
+                            } else {
+                                k += 1;
+                            }
+                        }
+                    }
+                }
                 let declared = ty.as_ref().map(|t| t.ty.clone()).filter(|t| !t.is_any());
                 if let Some(d) = &declared {
                     if !self.compatible(&t, d) {
@@ -1234,6 +1281,24 @@ impl<'a> Checker<'a> {
             all.push((None, t, sp));
         }
         all.extend(args.iter().cloned());
+        // Calling a variable that holds a value that is not a function.
+        let variable = match v.res {
+            VarRes::Local(_) | VarRes::Capture(_) => !receiver_given,
+            VarRes::Global(s) => !receiver_given && matches!(self.ctx.globals[s as usize].kind, GlobalKind::Let | GlobalKind::Var),
+            _ => false,
+        };
+        if variable {
+            let t = self.var(v);
+            if matches!(t, Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::Unit | Ty::Range | Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::Tuple(_)) {
+                let shadows = self.ctx.builtins.values.contains_key(&v.name);
+                let d = self.error(span, format!("`{}` is {}, not a function", v.name, a(&t)), "not callable");
+                if shadows {
+                    d.notes.push(format!("this `{}` is your variable, which hides the built-in function `{}`", v.name, v.name));
+                    d.help = Some(format!("rename the variable (for example `{}_value`)", v.name));
+                }
+                return Ty::Any;
+            }
+        }
         match v.res {
             VarRes::Global(s) => {
                 let kind = self.ctx.globals[s as usize].kind.clone();
@@ -1546,6 +1611,8 @@ enum Kind {
     Set,
     /// A List, Str, Map, Set, Tuple or Range.
     Sized,
+    /// Something to iterate over: as `Sized`, but not a record.
+    Iter,
 }
 
 fn builtin_kinds(name: &str) -> &'static [Kind] {
@@ -1566,14 +1633,18 @@ fn builtin_kinds(name: &str) -> &'static [Kind] {
         "pow" | "log" | "atan2" | "hypot" => &[Num, Num],
         "round" | "fixed" => &[Num, Int],
         "len" => &[Sized],
-        "map" | "filter" | "each" | "find" | "find_index" | "take_while" | "drop_while" | "flat_map" | "min_by" | "max_by" | "sort_by"
-        | "sort_with" | "group_by" | "partition" | "map_values" | "map_err" | "and_then" | "unwrap_or_else" | "reduce" | "any" | "all" => &[Any, Fn],
+        "sum" | "product" | "sort" | "unique" | "tally" | "enumerate" | "flatten" | "to_set" | "to_list" | "count" | "reverse" | "shuffle"
+        | "zip" => &[Iter],
+        "sort_by" | "sort_with" | "group_by" | "partition" => &[Iter, Fn],
+        "map" | "filter" | "each" | "find" | "find_index" | "take_while" | "drop_while" | "flat_map" | "min_by" | "max_by" | "map_values"
+        | "map_err" | "and_then" | "unwrap_or_else" | "reduce" | "any" | "all" => &[Any, Fn],
         "fold" => &[Any, Any, Fn],
         "update" => &[Any, Any, Any, Fn],
         "catch" => &[Fn],
-        "take" | "drop" | "chunks" | "windows" | "repeat" => &[Any, Int],
+        "chunks" | "windows" => &[Iter, Int],
+        "take" | "drop" | "repeat" => &[Any, Int],
         "pad_left" | "pad_right" => &[Any, Int, Str],
-        "join" => &[Any, Str],
+        "join" => &[Iter, Str],
         "union" | "intersection" | "difference" | "is_subset" => &[Set, Set],
         _ => &[],
     }
@@ -1595,6 +1666,7 @@ impl Kind {
                 Kind::Sized => {
                     matches!(t, Ty::List(_) | Ty::Str | Ty::Map(..) | Ty::Set(_) | Ty::Tuple(_) | Ty::Range | Ty::Record(_) | Ty::Named { .. })
                 }
+                Kind::Iter => matches!(t, Ty::List(_) | Ty::Str | Ty::Map(..) | Ty::Set(_) | Ty::Tuple(_) | Ty::Range),
             }
     }
 
@@ -1607,6 +1679,7 @@ impl Kind {
             Kind::Fn => "a function",
             Kind::Set => "a Set",
             Kind::Sized => "a collection or string",
+            Kind::Iter => "a list, range, string, map, set or tuple",
         }
     }
 }
