@@ -166,25 +166,11 @@ fn check_pass(ctx: &Ctx, prog: &Program, assumed: HashMap<Span, Ty>, record: boo
             Item::Fn(def) => {
                 c.function(def, &[]);
             }
-            Item::Test(t) => {
-                // A test passes unless it fails an `assert` or ends with an
-                // `Err`: a Bool at the end checks nothing. (Operators there
-                // are reported by the resolver.)
-                let tail = tail_expr(&t.func.body);
-                let reported =
-                    matches!(tail.kind, ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::And(..) | ExprKind::Or(..) | ExprKind::Bool(_));
-                if c.function(&t.func, &[]) == Ty::Bool && !reported {
-                    // (No fix: the test may expect `false`.)
-                    let d = Diagnostic::warning("W0008", "this test ends with a Bool, which checks nothing")
-                        .at(tail.span)
-                        .label("a `false` here would still pass")
-                        .help("to check it, write `assert` (or `assert !`) before it");
-                    c.diags.push(d);
-                }
-            }
-            Item::Property(p) => {
-                c.function(&p.func, &[]);
-            }
+            // A test or property passes unless it fails an `assert` or ends
+            // with an `Err`: a Bool at the end checks nothing. (Operators
+            // there are reported by the resolver.)
+            Item::Test(t) => c.test_body(&t.func, "test"),
+            Item::Property(p) => c.test_body(&p.func, "property"),
             Item::Type(td) => c.invariant(td.id),
             _ => {}
         }
@@ -617,6 +603,22 @@ impl<'a> Checker<'a> {
         body
     }
 
+    /// Check a test's or property's function, and warn when it ends with a
+    /// Bool from a call (which checks nothing without `assert`).
+    fn test_body(&mut self, def: &FnDef, what: &str) {
+        let tail = tail_expr(&def.body);
+        let reported =
+            matches!(tail.kind, ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::And(..) | ExprKind::Or(..) | ExprKind::Bool(_));
+        if self.function(def, &[]) == Ty::Bool && !reported {
+            // (No fix: it may expect `false`.)
+            let d = Diagnostic::warning("W0008", format!("this {} ends with a Bool, which checks nothing", what))
+                .at(tail.span)
+                .label("a `false` here would still pass")
+                .help("to check it, write `assert` (or `assert not`) before it");
+            self.diags.push(d);
+        }
+    }
+
     fn fn_type(&self, def: &FnDef) -> Ty {
         let ps = def.params.iter().map(|p| p.ty.as_ref().map_or(Ty::Any, |t| t.ty.clone())).collect();
         Ty::Fn(ps, Box::new(def.ret.as_ref().map_or(Ty::Any, |t| t.ty.clone())))
@@ -727,14 +729,37 @@ impl<'a> Checker<'a> {
                         Ty::Named { id, name, .. } => Ty::Named { id, name, args: vec![] },
                         t => t,
                     },
-                    None if *mutable => Ty::Any,
+                    // A `var` holding a list (or map or set) that is never
+                    // assigned as a whole, nor passed to a `!` function of
+                    // your own, stays one (its elements may change).
+                    None if *mutable => {
+                        let kept = match &pat.kind {
+                            PatKind::Bind { res: VarRes::Local(s), sub: None, .. } => !self.frames.last().unwrap().retyped.contains(s),
+                            PatKind::Bind { res: VarRes::Global(s), sub: None, .. } => !self.retyped_globals.contains(s),
+                            _ => false,
+                        };
+                        match t {
+                            Ty::List(_) if kept => list(Ty::Any),
+                            Ty::Map(..) if kept => Ty::Map(Box::new(Ty::Any), Box::new(Ty::Any)),
+                            Ty::Set(_) if kept => Ty::Set(Box::new(Ty::Any)),
+                            _ => Ty::Any,
+                        }
+                    }
                     None => t,
                 };
                 self.bind(pat, &bound, false);
             }
             StmtKind::Assign { target, op, value, ty } => {
                 let vt = self.expr(value);
+                let errors = self.diags.len();
                 let tt = self.expr(target);
+                // (`xs.length = 0`: no `.len()` fix for a place.)
+                for d in &mut self.diags[errors..] {
+                    if d.fixes.iter().any(|f| f.text == "len()") {
+                        d.help = Some("a length cannot be assigned: to empty a `var`, write `xs = []` or `xs.clear!()`".into());
+                    }
+                    d.fixes.clear();
+                }
                 if op.is_none() {
                     match (&target.kind, ty) {
                         (ExprKind::Var(v), Some(decl)) => {
@@ -1105,6 +1130,9 @@ impl<'a> Checker<'a> {
                                 d.fixes.push(crate::diagnostic::Fix { span: *name_span, text: "len()".into() });
                             } else if callable && fieldless && !receiver_only {
                                 d.help = Some(format!("`{}` is a function: call it with its arguments, `.{}(...)`", name, name));
+                            } else if callable && fieldless && matches!(t, Ty::Fn(..) | Ty::AnyFn) {
+                                // (`str.len`, as in Python: not `str.len()`.)
+                                d.help = Some(format!("functions have no fields; to call `{}` on each element, pass `fn(x) => x.{}()`", name, name));
                             } else if callable && fieldless {
                                 d.help = Some(format!("to call the function `{}`, write `.{}()`", name, name));
                                 d.fixes.push(crate::diagnostic::Fix { span: Span { start: name_span.end, ..*name_span }, text: "()".into() });
@@ -1124,7 +1152,7 @@ impl<'a> Checker<'a> {
                     (Ty::List(e), Ty::Int) => (**e).clone(),
                     (Ty::Str, Ty::Int) => Ty::Str,
                     // (Fails at run time: a position is an Int.)
-                    (Ty::List(_) | Ty::Str, Ty::Float | Ty::Str | Ty::Bool) => {
+                    (Ty::List(_) | Ty::Str | Ty::Range, Ty::Float | Ty::Str | Ty::Bool) => {
                         let msg = format!("{} is indexed by an Int (or a range), but this is {}", a(&t), a(&i));
                         self.mismatch(index.span, msg, "not an Int", &Ty::Int);
                         Ty::Any
@@ -1149,8 +1177,8 @@ impl<'a> Checker<'a> {
                 };
                 let mut arg_tys: Vec<(Option<Name>, Ty, Span)> = Vec::with_capacity(args.len());
                 for (i, a) in args.iter().enumerate() {
-                    if let (Some(b), Some(first), ExprKind::Lambda(_)) = (builtin, arg_tys.first(), &a.value.kind) {
-                        self.lambda_hint = callback_params(b, &first.1, i).map(|h| (h, b));
+                    if let (Some(b), Some(first), ExprKind::Lambda(def)) = (builtin, arg_tys.first(), &a.value.kind) {
+                        self.lambda_hint = callback_params(b, &first.1, i, def.params.len()).map(|h| (h, b));
                         if a.name.is_none() {
                             let coll = first.1.clone();
                             self.callback_arity(b, &coll, i, &a.value);
@@ -1159,6 +1187,10 @@ impl<'a> Checker<'a> {
                     let errors = self.diags.len();
                     let t = self.expr(&a.value);
                     self.lambda_hint = None;
+                    if let (Some(b), Some(first)) = (builtin, arg_tys.first()) {
+                        let coll = first.1.clone();
+                        self.named_callback(b, &coll, i, &a.value, &t);
+                    }
                     // `catch(fn() => ...)` expects the function to fail: what
                     // would fail there is not an error (tests do this).
                     if builtin == Some("catch") {
@@ -1200,14 +1232,17 @@ impl<'a> Checker<'a> {
                 let builtin = self.builtin_name(method);
                 let mut arg_tys: Vec<(Option<Name>, Ty, Span)> = Vec::with_capacity(args.len());
                 for (i, a) in args.iter().enumerate() {
-                    if let (Some(b), ExprKind::Lambda(_)) = (builtin, &a.value.kind) {
-                        self.lambda_hint = callback_params(b, &rt, i + 1).map(|h| (h, b));
+                    if let (Some(b), ExprKind::Lambda(def)) = (builtin, &a.value.kind) {
+                        self.lambda_hint = callback_params(b, &rt, i + 1, def.params.len()).map(|h| (h, b));
                         if a.name.is_none() {
                             self.callback_arity(b, &rt, i + 1, &a.value);
                         }
                     }
                     let t = self.expr(&a.value);
                     self.lambda_hint = None;
+                    if let Some(b) = builtin {
+                        self.named_callback(b, &rt, i + 1, &a.value, &t);
+                    }
                     let t = self.enforced(&a.value, t);
                     arg_tys.push((a.name.clone(), t, a.value.span));
                 }
@@ -1306,7 +1341,27 @@ impl<'a> Checker<'a> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.expr(lhs);
                 let r = self.expr(rhs);
-                self.binary(*op, &l, &r, e.span)
+                let errors = self.diags.len();
+                let t = self.binary(*op, &l, &r, e.span);
+                // `let timeout = 5 // min`: a comment in the style of C,
+                // ending with a word that happens to name a built-in.
+                if let (BinOp::FloorDiv, Ty::AnyFn, true) = (op, &r, self.diags.len() > errors) {
+                    let src = &self.ctx.sm.get(rhs.span.file).src;
+                    let word = &src[rhs.span.start as usize..rhs.span.end as usize];
+                    let before = src[..rhs.span.start as usize].trim_end_matches([' ', '\t']);
+                    let at = before.strip_suffix("//").map(str::len);
+                    let ends_line = src[rhs.span.end as usize..].split('\n').next().is_some_and(|rest| rest.trim().is_empty());
+                    let plain = word.chars().all(|c| c.is_ascii_lowercase()) && crate::lexer::whole_word_count(src, word) == 1;
+                    if let (Some(at), true, true) = (at, ends_line, plain) {
+                        let d = self.diags.last_mut().unwrap();
+                        d.help = Some(format!("`{}` is a built-in function; comments start with `#`: `//` is floor division", word));
+                        d.fixes.push(crate::diagnostic::Fix {
+                            span: Span { start: at as u32, end: at as u32 + 2, file: rhs.span.file },
+                            text: "#".into(),
+                        });
+                    }
+                }
+                t
             }
             ExprKind::And(x, y) | ExprKind::Or(x, y) => {
                 let what = if matches!(e.kind, ExprKind::And(..)) { "`and`" } else { "`or`" };
@@ -1452,6 +1507,9 @@ impl<'a> Checker<'a> {
                         }
                         _ => Ty::Any,
                     },
+                    // A built-in used as a value (`xs.map(str)`, or `5 // min`
+                    // where `# min` was meant).
+                    GlobalKind::Builtin(_) => Ty::AnyFn,
                     // A constructor with no fields is a value of its type.
                     GlobalKind::Ctor(c) => match self.type_def(c.type_id) {
                         Some(td) if !c.is_record && td.fields_of(c.tag).1.is_empty() => {
@@ -1534,6 +1592,28 @@ impl<'a> Checker<'a> {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// A named function passed to a built-in that calls it with values its
+    /// parameters do not accept (`stock.filter(in_stock)` where `in_stock`
+    /// takes an Int but gets a `(key, value)` tuple).
+    fn named_callback(&mut self, b: &str, coll: &Ty, pos: usize, arg: &Expr, t: &Ty) {
+        let (ExprKind::Var(f), Ty::Fn(params, _)) = (&arg.kind, t) else { return };
+        let Some(expected) = callback_params(b, coll, pos, params.len()) else { return };
+        if expected.len() != params.len() {
+            return;
+        }
+        for (i, (e, p)) in expected.iter().zip(params).enumerate() {
+            if !e.is_any() && !p.is_any() && !self.compatible(e, p) {
+                let which = if params.len() == 1 { "its parameter".to_string() } else { format!("its parameter {}", i + 1) };
+                let msg = format!("`{}` calls `{}` with {}, but {} is declared as {}", b, f.name, a(e), which, p);
+                let d = self.error(arg.span, msg, "wrong type");
+                if matches!(coll, Ty::Map(..)) && params.len() == 1 {
+                    d.help = Some("a map's entries are `(key, value)` tuples; a two-parameter function gets the key and the value".into());
+                }
+                return;
+            }
         }
     }
 
@@ -1796,7 +1876,14 @@ impl<'a> Checker<'a> {
                     )
                     || matches!((l, r), (Ty::Named { id: x, .. }, Ty::Named { id: y, .. }) if x == y);
                 if !comparable {
+                    let option = |t: &Ty| matches!(t, Ty::Named { id, .. } if *id == OPTION_ID);
                     bad(self, format!("cannot compare {} with {}", a(l), a(r)));
+                    if (option(l) && num(r)) || (num(l) && option(r)) {
+                        if let Some(d) = self.diags.last_mut() {
+                            d.help =
+                                Some("get the number out of the Option first: `x.unwrap_or(0)`, `match`, or `if let`-style `x is Some(n)`".into());
+                        }
+                    }
                 }
                 Ty::Bool
             }
@@ -1912,7 +1999,9 @@ fn leaves_early(e: &Expr) -> bool {
 /// The types a built-in calls its callback argument (at position `pos`,
 /// counting the collection as 0) with, given the collection's type:
 /// `xs.map(fn(x) => ...)` on a `List[Int]` calls it with an Int.
-fn callback_params(name: &str, coll: &Ty, pos: usize) -> Option<Vec<Ty>> {
+/// `nparams`: how many parameters the function has (a map's entries go to
+/// a two-parameter function as a key and a value, else as a tuple).
+fn callback_params(name: &str, coll: &Ty, pos: usize, nparams: usize) -> Option<Vec<Ty>> {
     let seq = matches!(coll, Ty::List(_) | Ty::Set(_) | Ty::Range | Ty::Str);
     let elem = element(coll);
     let known = |t: &Ty| !matches!(t, Ty::Any | Ty::Generic(_) | Ty::Param(..));
@@ -1932,7 +2021,8 @@ fn callback_params(name: &str, coll: &Ty, pos: usize) -> Option<Vec<Ty>> {
             if matches!(coll, Ty::Map(..)) =>
         {
             match coll {
-                Ty::Map(k, v) => vec![(**k).clone(), (**v).clone()],
+                Ty::Map(k, v) if nparams == 2 => vec![(**k).clone(), (**v).clone()],
+                Ty::Map(k, v) => vec![Ty::Tuple(vec![(**k).clone(), (**v).clone()])],
                 _ => return None,
             }
         }
@@ -2101,6 +2191,7 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
         | "is_some" | "is_none" | "is_ok" | "is_err" | "has" | "any" | "all" | "file_exists" | "is_nan" => Ty::Bool,
         "split" | "lines" | "words" | "chars" | "args" => list(Ty::Str),
         "bytes" => list(Ty::Int),
+        "print" | "eprint" | "write" | "flush" | "sleep" | "seed" => Ty::Unit,
         "from_bytes" => option(Ty::Str),
         "parse_int" | "index_of" | "find_index" => option(Ty::Int),
         "parse_float" => option(Ty::Float),

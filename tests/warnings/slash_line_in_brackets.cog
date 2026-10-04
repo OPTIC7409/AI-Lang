@@ -1,0 +1,7 @@
+# expect: W0011
+let ports = [
+  8080,
+  8081
+  // 8082
+]
+print(ports)

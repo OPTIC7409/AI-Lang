@@ -524,7 +524,12 @@ impl<'a> Resolver<'a> {
         let s = f.scopes.pop().unwrap();
         f.next_slot = s.start_slot;
         for l in s.locals {
-            if !l.used && !l.name.starts_with('_') && matches!(l.kind, LocalKind::Let | LocalKind::Loop | LocalKind::Var | LocalKind::Fn) {
+            // (Not a local `fn name!`, which is an error already.)
+            if !l.used
+                && !l.name.starts_with('_')
+                && !l.name.ends_with('!')
+                && matches!(l.kind, LocalKind::Let | LocalKind::Loop | LocalKind::Var | LocalKind::Fn)
+            {
                 self.diags.push(
                     Diagnostic::warning("W0001", format!("unused variable `{}`", l.name))
                         .at(l.span)
@@ -743,6 +748,19 @@ impl<'a> Resolver<'a> {
         out.sort();
         out.dedup();
         out
+    }
+
+    /// W0012: a hex, binary or octal literal above `max_int` (so negative)
+    /// as a bound: `n <= 0xffffffffffffffff` is always false.
+    fn negative_hex(&mut self, e: &Expr) {
+        let ExprKind::Int(n) = e.kind else { return };
+        let text = self.ctx.sm.snippet(e.span);
+        if n < 0 && (text.starts_with("0x") || text.starts_with("0b") || text.starts_with("0o")) {
+            let d = Diagnostic::warning("W0012", format!("`{}` is {} here: a hex literal above `max_int` is negative", text, n))
+                .at(e.span)
+                .help("hex, binary and octal literals are 64-bit patterns; for the largest Int use `max_int`");
+            self.diags.push(d);
+        }
     }
 
     /// Whether `name` is declared somewhere in the file (`let name`, `var
@@ -2268,19 +2286,41 @@ impl<'a> Resolver<'a> {
                 }
                 let positional = positional + named.len();
                 if positional < b.min as usize || positional > b.max as usize {
-                    let expect = if b.min == b.max {
-                        format!("{}", b.min)
-                    } else if b.max == crate::builtins::VARIADIC {
-                        format!("at least {}", b.min)
+                    // (With method syntax, counted after the receiver.)
+                    let (min, max, given_n) = if extra > 0 && b.min > 0 {
+                        (b.min as usize - 1, if b.max == crate::builtins::VARIADIC { usize::MAX } else { b.max as usize - 1 }, positional - 1)
                     } else {
-                        format!("{} to {}", b.min, b.max)
+                        (b.min as usize, if b.max == crate::builtins::VARIADIC { usize::MAX } else { b.max as usize }, positional)
                     };
-                    let d =
-                        Diagnostic::error("E0107", format!("`{}` takes {} argument{}, but {}", b.name, expect, plural(&expect), given(positional)))
-                            .at(span)
-                            .note(format!("usage: {}", b.doc.lines().next().unwrap_or("")));
-                    // `set([1, 2])` from Python: a set of values is `to_set`.
-                    let d = if b.name == "set" && positional <= 1 { d.help("for a set of values, use `to_set(xs)`") } else { d };
+                    let expect = if min == max {
+                        format!("{}", min)
+                    } else if max == usize::MAX {
+                        format!("at least {}", min)
+                    } else {
+                        format!("{} to {}", min, max)
+                    };
+                    let msg = if extra > 0 && b.min > 0 {
+                        format!(
+                            "`.{}()` takes {} argument{} after the value it is called on, but {}",
+                            b.name,
+                            expect,
+                            plural(&expect),
+                            given(given_n)
+                        )
+                    } else {
+                        format!("`{}` takes {} argument{}, but {}", b.name, expect, plural(&expect), given(given_n))
+                    };
+                    let mut d = Diagnostic::error("E0107", msg).at(span).note(format!("usage: {}", b.doc.lines().next().unwrap_or("")));
+                    // Habits: `set([1, 2])` from Python, `d.get(k, default)`,
+                    // `xs.sort(cmp)`.
+                    d = match b.name {
+                        "set" if positional <= 1 => d.help("for a set of values, use `to_set(xs)`"),
+                        "get" if positional == 3 => d.help("for a default, use `m.get_or(key, default)`"),
+                        "sort" if positional == 2 => {
+                            d.help("to sort with a comparison, use `xs.sort_with(fn(a, b) => compare(a, b))`; by a key, `xs.sort_by(fn(x) => key)`")
+                        }
+                        _ => d,
+                    };
                     self.error(d);
                 }
             }
@@ -2592,14 +2632,44 @@ impl<'a> Resolver<'a> {
                 }
             }
             ExprKind::Unary { expr, .. } => self.expr(expr),
-            ExprKind::Binary { lhs, rhs, .. } | ExprKind::And(lhs, rhs) | ExprKind::Or(lhs, rhs) => {
+            ExprKind::Binary { op: BinOp::FloorDiv, lhs, rhs } => {
+                self.expr(lhs);
+                self.expr(rhs);
+                // A line inside brackets starting with `//`: commented-out
+                // code in the style of C (`[8080,\n 8081\n // 8082\n]`).
+                let src = &self.ctx.sm.get(span.file).src;
+                if lhs.span.file == span.file && lhs.span.end <= rhs.span.start {
+                    let between = &src[lhs.span.end as usize..rhs.span.start as usize];
+                    if let Some(at) = between.rfind("//") {
+                        if between[..at].contains('\n') {
+                            let start = lhs.span.end as usize + at;
+                            let d = Diagnostic::warning("W0011", "this line divides the line above: `//` is floor division, not a comment")
+                                .at(Span::new(span.file, start, start + 2))
+                                .label("floor division")
+                                .help("comments start with `#`; to divide, end the line above with `//` instead");
+                            self.diags.push(d);
+                        }
+                    }
+                }
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                self.expr(lhs);
+                self.expr(rhs);
+                if op.is_comparison() {
+                    self.negative_hex(lhs);
+                    self.negative_hex(rhs);
+                }
+            }
+            ExprKind::And(lhs, rhs) | ExprKind::Or(lhs, rhs) => {
                 self.expr(lhs);
                 self.expr(rhs);
             }
             ExprKind::Range { start, end, .. } => {
                 self.expr(start);
+                self.negative_hex(start);
                 if let Some(e) = end {
                     self.expr(e);
+                    self.negative_hex(e);
                 }
             }
             ExprKind::Is { expr, pat } => {

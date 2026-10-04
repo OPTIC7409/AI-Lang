@@ -229,8 +229,64 @@ impl<'s> Parser<'s> {
             let line = before.matches('\n').count() + 1;
             let col = before.chars().rev().take_while(|c| *c != '\n').count() + 1;
             let d = self.unexpected(what).note(format!("the `{}` that needs closing is at line {}, column {}", open, line, col));
-            Err(self.arrow_function(d))
+            Err(self.python_lambda(self.arrow_function(d)))
         }
+    }
+
+    /// At the `:` of a slice from Python (`xs[1:3]`, `xs[:2]`, `xs[1:]`):
+    /// Cogito writes `xs[1..3]`, `xs[..2]`, `xs[1..]`. (Not with a step.)
+    fn python_slice(&self) -> Diagnostic {
+        let colon = self.span();
+        let d = Diagnostic::error("E0010", "slices are written with `..`: `xs[1..3]`, `xs[..2]`, `xs[1..]`").at(colon).label("`:` is Python's slice");
+        // The rest of the index, up to its `]`: no other `:` (a step).
+        let mut depth = 0;
+        let mut i = self.pos + 1;
+        while i < self.toks.len() {
+            match self.toks[i].tok {
+                Tok::LBracket | Tok::LParen | Tok::LBrace => depth += 1,
+                Tok::RBracket if depth == 0 => break,
+                Tok::RBracket | Tok::RParen | Tok::RBrace => depth -= 1,
+                Tok::Colon if depth == 0 => return d.help("a slice has no step in Cogito: use `xs.chunks(n).map(fn(c) => c[0])` or a comprehension"),
+                Tok::Newline | Tok::Eof if depth == 0 => return d,
+                _ => {}
+            }
+            i += 1;
+        }
+        let bare =
+            self.pos > 0 && self.toks[self.pos - 1].tok == Tok::LBracket && self.toks.get(self.pos + 1).is_some_and(|t| t.tok == Tok::RBracket);
+        if bare {
+            // (`xs[:]` copies: in Cogito, `xs` itself is already a value.)
+            return d.help("`xs[:]` copies the list in Python; in Cogito, use `xs` itself: values never change behind your back");
+        }
+        d.fix(colon, "..")
+    }
+
+    /// At the parameters after `lambda` (Python): `lambda x, y: x + y` is
+    /// `fn(x, y) => x + y`.
+    fn python_lambda(&self, d: Diagnostic) -> Diagnostic {
+        let at = self.pos - 1;
+        if !matches!(&self.toks[at].tok, Tok::Ident(w) if &**w == "lambda") {
+            return d;
+        }
+        let starts = at > 0 && matches!(self.toks[at - 1].tok, Tok::Assign | Tok::LParen | Tok::Comma | Tok::LBracket | Tok::Colon | Tok::Return);
+        // `lambda` then names separated by commas, then `:`.
+        let mut i = self.pos;
+        let mut names = Vec::new();
+        while let Tok::Ident(n) = &self.toks[i].tok {
+            names.push(n.to_string());
+            i += 1;
+            if self.toks[i].tok == Tok::Comma {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let d = d.help("an anonymous function is written `fn(x) => x * 2`");
+        if !starts || self.toks[i].tok != Tok::Colon {
+            return d;
+        }
+        let span = self.toks[at].span.to(self.toks[i].span);
+        d.fix(span, format!("fn({}) =>", names.join(", ")))
     }
 
     /// At a `=>` after `x` or `(a, b)` that starts an expression: an arrow
@@ -303,11 +359,14 @@ impl<'s> Parser<'s> {
                     Tok::Ident(_) if matches!(prev_word, Some("const" | "val")) && self.peek_at(1) == &Tok::Assign => {
                         d.help("use `let` (a `let` never changes)").fix(prev.span, "let")
                     }
-                    // (No fix: the name must change too, everywhere it is used.)
-                    Tok::Upper(n) if matches!(prev_word, Some("const" | "val")) && self.peek_at(1) == &Tok::Assign => d.help(format!(
-                        "use `let` with a lowercase name: `let {} = ...` (a `let` never changes; uppercase names are for types and constructors)",
-                        snake_case(n)
-                    )),
+                    // (The name is fixed next, everywhere it is used.)
+                    Tok::Upper(n) if matches!(prev_word, Some("const" | "val")) && self.peek_at(1) == &Tok::Assign => d
+                        .help(format!(
+                            "use `let` with a lowercase name: `let {} = ...` (a `let` never changes; uppercase names are for types and constructors)",
+                            self.free_lowercase_name(n)
+                        ))
+                        .fix(prev.span, "let"),
+                    Tok::Ident(_) | Tok::Colon if prev_word == Some("lambda") => self.python_lambda(d),
                     Tok::Ident(_) | Tok::Upper(_) if matches!(self.toks[self.pos - 1].tok, Tok::Ident(_) | Tok::Upper(_)) => {
                         d.help("two names in a row: is an operator or a comma missing?")
                     }
@@ -323,6 +382,68 @@ impl<'s> Parser<'s> {
                 Err(d)
             }
         }
+    }
+
+    /// The lowercase name for the uppercase variable `n` (`MAX_SIZE` is
+    /// `max_size`): one that is neither a built-in (`MAX` would hide `max`)
+    /// nor a name already in the file.
+    fn free_lowercase_name(&self, n: &str) -> String {
+        let base = snake_case(n);
+        let taken = |name: &str| {
+            crate::builtins::BUILTINS.iter().any(|b| b.name == name)
+                || matches!(name, "pi" | "tau" | "e" | "inf" | "max_int" | "min_int")
+                || self.toks.iter().any(|t| matches!(&t.tok, Tok::Ident(x) if &**x == name))
+        };
+        if !taken(&base) {
+            return base;
+        }
+        let value = format!("{}_value", base.trim_end_matches('_'));
+        if !taken(&value) {
+            return value;
+        }
+        format!("my_{}", base.trim_end_matches('_'))
+    }
+
+    /// Every use of the uppercase variable `n` in the file (as a name, and
+    /// inside interpolations), if it is certainly that variable: not a type
+    /// or constructor (nothing declares it as one, nor calls it).
+    fn uses_of_constant(&self, n: &str) -> Option<Vec<Span>> {
+        let mut out = Vec::new();
+        for (i, t) in self.toks.iter().enumerate() {
+            match &t.tok {
+                Tok::Upper(x) if &**x == n => {
+                    let prev = i.checked_sub(1).map(|j| &self.toks[j].tok);
+                    let next = self.toks.get(i + 1).map(|t| &t.tok);
+                    // (A type's or variant's declaration, a constructor call,
+                    // a qualified name, or a pattern `MAX => ...`, where a
+                    // lowercase name would bind anything.)
+                    if matches!(prev, Some(Tok::Type | Tok::Bar | Tok::Dot))
+                        || matches!(next, Some(Tok::LParen | Tok::LBrace | Tok::Bar | Tok::FatArrow | Tok::If))
+                    {
+                        return None;
+                    }
+                    out.push(t.span);
+                }
+                Tok::Str(parts) => {
+                    for p in parts {
+                        if let StrPart::Expr { start, end, .. } = p {
+                            let code = &self.src[*start as usize..*end as usize];
+                            let is_word = |c: char| c.is_alphanumeric() || c == '_';
+                            for (at, _) in code.match_indices(n) {
+                                let before = code[..at].chars().next_back();
+                                let after = code[at + n.len()..].chars().next();
+                                if !before.is_some_and(is_word) && !after.is_some_and(is_word) && before != Some('.') {
+                                    let s = *start as usize + at;
+                                    out.push(Span::new(t.span.file, s, s + n.len()));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(out)
     }
 
     fn lower_ident(&mut self, what: &str) -> PResult<(Name, Span)> {
@@ -763,12 +884,18 @@ impl<'s> Parser<'s> {
                 }
                 if let Tok::Upper(n) = self.peek().clone() {
                     if !matches!(self.peek_at(1), Tok::LParen) {
+                        let new_name = self.free_lowercase_name(&n);
                         let mut d = Diagnostic::error("E0013", format!("variable `{}` must start with a lowercase letter", n))
                             .at(self.span())
                             .label("uppercase names are reserved for types and constructors")
-                            .help(format!("rename it to `{}`", snake_case(&n)));
+                            .help(format!("rename it to `{}` (everywhere it is used)", new_name));
                         if n.chars().all(|c| !c.is_lowercase()) {
                             d = d.note("Cogito has no separate constant syntax: a `let` never changes");
+                        }
+                        if let Some(spans) = self.uses_of_constant(&n) {
+                            for sp in spans {
+                                d = d.fix(sp, new_name.clone());
+                            }
                         }
                         return Err(d);
                     }
@@ -1224,6 +1351,10 @@ impl<'s> Parser<'s> {
                 }
                 Tok::LBracket => {
                     let open = self.bump().span;
+                    // `xs[:n]` from Python.
+                    if self.at(&Tok::Colon) {
+                        return Err(self.python_slice());
+                    }
                     // `xs[..n]` and `xs[..=n]` slice from the start.
                     let index = if matches!(self.peek(), Tok::DotDot | Tok::DotDotEq) {
                         let inclusive = self.bump().tok == Tok::DotDotEq;
@@ -1233,6 +1364,10 @@ impl<'s> Parser<'s> {
                     } else {
                         self.expr()?
                     };
+                    // `xs[a:b]` from Python.
+                    if self.at(&Tok::Colon) {
+                        return Err(self.python_slice());
+                    }
                     let close = self.expect_closing(&Tok::RBracket, open, "`]` after index")?;
                     let span = e.span.to(close);
                     e = mk(ExprKind::Index { target: Box::new(e), index: Box::new(index) }, span);
@@ -2066,7 +2201,9 @@ impl<'s> Parser<'s> {
                 let inclusive = self.bump().tok == Tok::DotDotEq;
                 let neg2 = self.eat(&Tok::Minus);
                 let Some(hi) = self.literal_pattern(neg2)? else {
-                    return Err(self.unexpected("a literal for the end of the range pattern"));
+                    return Err(self
+                        .unexpected("a literal for the end of the range pattern")
+                        .help("a range pattern needs both ends (`1..=9`); for an open one, use a guard: `n if n >= 1 => ...`"));
                 };
                 return Ok(Pattern { kind: PatKind::Range { lo, hi, inclusive }, span: start.to(self.prev_span()) });
             }

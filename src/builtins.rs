@@ -1513,6 +1513,7 @@ fn m_insert(it: &mut Interp, t: &mut Value, mut a: Vec<Value>, sp: Span) -> R {
             Rc::make_mut(m).insert(take_arg(&mut a, 0), x);
             Ok(Value::Unit)
         }
+        Value::Set(_) => Err(it.err(sp, "E0201", "a set's `insert!` takes just the value: `s.insert!(x)`")),
         v => Err(type_err(it, "insert!", 0, "a List, Map or Set", v, sp)),
     }
 }

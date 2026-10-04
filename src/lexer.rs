@@ -923,6 +923,21 @@ impl<'a> Lexer<'a> {
                 _ => (Tok::Star, 1),
             },
             b'/' => match c1 {
+                // `/* ... */` from C: when it ends its line, `# ...`.
+                b'*' => {
+                    let rest = &self.src[start..self.end];
+                    let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+                    let mut d = self
+                        .err("E0001", "block comments `/* */` are not supported", start, start + 2)
+                        .help("comments start with `#` and run to the end of the line");
+                    if let Some(close) = line.find("*/") {
+                        if line[close + 2..].trim().is_empty() {
+                            let text = line[2..close].trim();
+                            d = d.fix(Span::new(self.file, start, start + close + 2), format!("# {}", text).trim_end().to_string());
+                        }
+                    }
+                    return Err(d);
+                }
                 b'/' if c2 == b'=' => (Tok::SlashSlashAssign, 3),
                 b'/' => (Tok::SlashSlash, 2),
                 b'=' => (Tok::SlashAssign, 2),
