@@ -1,0 +1,10 @@
+# `verify` checks that a `!` function leaves its first argument valid.
+# expect: when `widen!` returns, its first argument breaks it
+type Span = { lo: Int, hi: Int } where lo <= hi
+
+fn widen!(s: Span, d: Int)
+  requires d > 0
+  ensures s.lo == old(s.lo) + d
+{
+  s.lo += d
+}

@@ -387,7 +387,15 @@ impl<'a> Checker<'a> {
                             _ => "this pattern".into(),
                         };
                         let (shown_t, shown_d) = self.pair(&t, d);
-                        self.mismatch(value.span, format!("{} is declared as {}, but the value is {}", what, shown_d, shown_t), "wrong type", d);
+                        let diag =
+                            self.mismatch(value.span, format!("{} is declared as {}, but the value is {}", what, shown_d, shown_t), "wrong type", d);
+                        if matches!(&value.kind, ExprKind::Block(stmts) if stmts.is_empty()) {
+                            diag.help = Some(match d {
+                                Ty::Map(..) => "`{}` is an empty block, not a map; an empty map is `[:]`".into(),
+                                Ty::Set(_) => "`{}` is an empty block, not a set; an empty set is `to_set([])`".into(),
+                                _ => "`{}` is an empty block, whose value is `()`".into(),
+                            });
+                        }
                     }
                 }
                 // A `var` without an annotation may later hold anything, unless

@@ -1304,6 +1304,12 @@ impl<'a> Resolver<'a> {
                     .help("a contract only states a condition; move the change into the function body");
                 self.error(d);
                 effectful.push(i);
+            } else if let Some((span, what)) = contract_escape(c) {
+                let d = Diagnostic::error("E0122", format!("{} cannot be used in a contract", what))
+                    .at(span)
+                    .label("this would leave the function the contract is checked in")
+                    .help("a contract is a condition, not a statement: write it as one expression, using `match` or `if` instead of `?`, and `or`/`and` instead of `return`");
+                self.error(d);
             }
         }
         let n_requires = def.requires.len();
@@ -2732,6 +2738,25 @@ fn contract_effect(e: &mut Expr) -> Option<(Span, &'static str)> {
     }
     let mut found = None;
     go(e, &mut found);
+    found
+}
+
+/// A `return` or `?` in a contract, outside any anonymous function: it
+/// would leave the function the contract is checked in (the caller, for a
+/// `requires` or a type's `where` clause).
+fn contract_escape(e: &Expr) -> Option<(Span, &'static str)> {
+    match &e.kind {
+        ExprKind::Lambda(_) => return None,
+        ExprKind::Return(_) => return Some((e.span, "`return`")),
+        ExprKind::Try(_) => return Some((e.span, "`?`")),
+        _ => {}
+    }
+    let mut found = None;
+    for_each_child(e, &mut |c| {
+        if found.is_none() {
+            found = contract_escape(c);
+        }
+    });
     found
 }
 

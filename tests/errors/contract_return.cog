@@ -1,0 +1,15 @@
+# expect: E0122
+type Pos = { a: Int }
+  where a > 0 or (return "escaped")
+
+fn make(n: Int) {
+  let p = Pos(n)
+  print("built {p}")
+  "normal"
+}
+
+print(make(5))
+print(make(-1))
+print("before top-level construction")
+let q = Pos(-3)
+print("after top-level construction: {q}")

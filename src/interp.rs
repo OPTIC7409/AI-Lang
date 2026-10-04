@@ -335,19 +335,32 @@ impl Interp {
 
     // ------------------------------------------------------------ errors
 
+    /// The stack trace for an error at `span`, outermost call first. Deep
+    /// stacks keep their 6 innermost and 6 outermost entries around a
+    /// marker, so that building an error costs the same at any depth.
     fn trace(&self, span: Span, skip_top: bool) -> Vec<TraceFrame> {
         let frames = if skip_top && !self.stack.is_empty() { &self.stack[..self.stack.len() - 1] } else { &self.stack[..] };
-        if frames.is_empty() {
+        let n = frames.len();
+        if n == 0 {
             return vec![];
         }
-        let mut out = Vec::new();
-        let mut loc = span;
-        for f in frames.iter().rev() {
-            out.push(TraceFrame { name: f.name.clone(), span: loc });
-            loc = f.call_span;
-        }
-        if loc != Span::default() {
-            out.push(TraceFrame { name: Rc::from("<top level>"), span: loc });
+        // Entry k, counting from the innermost call.
+        let entry = |k: usize| {
+            if k < n {
+                TraceFrame { name: frames[n - 1 - k].name.clone(), span: if k == 0 { span } else { frames[n - k].call_span } }
+            } else {
+                TraceFrame { name: Rc::from("<top level>"), span: frames[0].call_span }
+            }
+        };
+        let total = n + usize::from(frames[0].call_span != Span::default());
+        const KEEP: usize = 6;
+        let mut out = Vec::with_capacity(total.min(2 * KEEP + 1));
+        if total <= 2 * KEEP + 1 {
+            out.extend((0..total).map(entry));
+        } else {
+            out.extend((0..KEEP).map(entry));
+            out.push(TraceFrame { name: Rc::from(format!("... {} more frames ...", total - 2 * KEEP)), span: Span::default() });
+            out.extend((total - KEEP..total).map(entry));
         }
         out.reverse();
         out
@@ -607,28 +620,49 @@ impl Interp {
     }
 
     /// The first `where` clause of its type that a record breaks, if any.
-    pub fn broken_invariant(&mut self, v: &Value) -> R<Option<BrokenInvariant>> {
+    /// The first `where` clause of `v`'s type that `v` breaks. `span` is
+    /// where the value was built or changed (for the stack trace).
+    pub fn broken_invariant(&mut self, v: &Value, span: Span) -> R<Option<BrokenInvariant>> {
         if !self.contracts || self.ctx.invariants.is_empty() {
             return Ok(None);
         }
         let Value::Record(r) = v else { return Ok(None) };
         let Some(td) = &r.ty else { return Ok(None) };
         let Some(def) = self.ctx.invariants.get(&td.id).cloned() else { return Ok(None) };
+        // A clause that builds a value of its own type (directly, or through
+        // another type) checks it again, without end.
+        if self.stack.len() >= self.max_depth {
+            return Err(self.fail(
+                self.diag(span, "E0213", format!("stack overflow: more than {} nested calls (checking the invariant of `{}`)", self.max_depth, td.name))
+                    .help(format!("a `where` clause of `{}` builds a value whose invariant is checked in turn, without end; compare fields instead of building values in the clause", td.name)),
+            ));
+        }
         let mut env = Env::new(def.num_slots);
         for (p, val) in def.params.iter().zip(r.values.iter()) {
             env.locals[p.slot as usize] = val.clone();
         }
+        self.stack.push(Frame { name: Rc::from(format!("invariant of `{}`", td.name)), call_span: span });
+        let mut out = Ok(None);
         for c in &def.requires {
-            match self.eval(c, &mut env)? {
-                Value::Bool(true) => {}
-                Value::Bool(false) => {
+            match self.eval(c, &mut env) {
+                Ok(Value::Bool(true)) => {}
+                Ok(Value::Bool(false)) => {
                     let values = self.where_values(c, &env);
-                    return Ok(Some(BrokenInvariant { ty: td.name.clone(), clause: self.snippet(c.span).to_string(), at: c.span, values }));
+                    out = Ok(Some(BrokenInvariant { ty: td.name.clone(), clause: self.snippet(c.span).to_string(), at: c.span, values }));
+                    break;
                 }
-                other => return Err(self.fail(self.not_bool(c.span, "a type's invariant (`where`)", &other))),
+                Ok(other) => {
+                    out = Err(self.fail(self.not_bool(c.span, "a type's invariant (`where`)", &other)));
+                    break;
+                }
+                Err(e) => {
+                    out = Err(e);
+                    break;
+                }
             }
         }
-        Ok(None)
+        self.stack.pop();
+        out
     }
 
     /// Whether a `!` call on a place may change a record whose type has an
@@ -674,7 +708,7 @@ impl Interp {
     /// along its path (and of the value at the end, with `leaf`), innermost
     /// first. Inside a `!` function, its first parameter may break its own
     /// invariant until the function returns.
-    fn check_path_invariants(&mut self, root: &PlaceRoot, steps: &[Step], leaf: bool, env: &Env) -> R<Option<BrokenInvariant>> {
+    fn check_path_invariants(&mut self, root: &PlaceRoot, steps: &[Step], leaf: bool, env: &Env, span: Span) -> R<Option<BrokenInvariant>> {
         if !self.contracts || self.ctx.invariants.is_empty() {
             return Ok(None);
         }
@@ -699,7 +733,7 @@ impl Interp {
             }
         }
         for v in found.iter().rev() {
-            if let Some(b) = self.broken_invariant(v)? {
+            if let Some(b) = self.broken_invariant(v, span)? {
                 return Ok(Some(b));
             }
         }
@@ -980,7 +1014,7 @@ impl Interp {
     /// [`Interp::check_path_invariants`]); `call` names the `!` function
     /// that made the change.
     fn after_write(&mut self, root: &PlaceRoot, steps: &[Step], leaf: bool, span: Span, env: &Env, call: Option<&str>) -> R<()> {
-        let Some(b) = self.check_path_invariants(root, steps, leaf, env)? else { return Ok(()) };
+        let Some(b) = self.check_path_invariants(root, steps, leaf, env, span)? else { return Ok(()) };
         let (label, help) = match call {
             Some(f) => (
                 format!("after this call to `{}`, {} `{}` breaks it", f, crate::diagnostic::a_an(&b.ty), b.ty),
@@ -1516,7 +1550,7 @@ impl Interp {
                             rec.names = nn.into();
                         }
                         let v = Value::Record(r);
-                        if let Some(b) = self.broken_invariant(&v)? {
+                        if let Some(b) = self.broken_invariant(&v, e.span)? {
                             let help = format!("`{{ ..x, field: value }}` builds a new `{}`, which must satisfy its `where` clauses", b.ty);
                             return Err(self.invariant_error(e.span, b, "this builds a value that breaks it".into(), help));
                         }
@@ -2467,13 +2501,18 @@ impl Interp {
                             values.push(self.conform(v, &t.subst(args)).map_err(|e| format!("expected {}, but field `{}` is wrong: {}", ty, f, e))?);
                         }
                         let v = Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values }));
-                        return match self.broken_invariant(&v) {
+                        return match self.broken_invariant(&v, Span::default()) {
                             Ok(None) => Ok(v),
                             Ok(Some(b)) => {
                                 let wh = if b.values.is_empty() { String::new() } else { format!(" (where {})", b.values.join(", ")) };
                                 Err(format!("it breaks the invariant of `{}`: `{}`{}", b.ty, b.clause, wh))
                             }
-                            Err(Ctrl::Error(d)) => Err(format!("checking the invariant of `{}` failed: {}", td.name, d.message)),
+                            Err(Ctrl::Error(d)) => {
+                                // Keep only the cause of an overflow, which is
+                                // wrapped once per level otherwise.
+                                let cause = d.message.find("stack overflow: ").map_or(&*d.message, |i| &d.message[i..]);
+                                Err(format!("checking the invariant of `{}` failed: {}", td.name, cause))
+                            }
                             Err(_) => Err(format!("checking the invariant of `{}` failed", td.name)),
                         };
                     }
@@ -2687,7 +2726,7 @@ impl Interp {
             Ok(Value::Variant(Rc::new(VariantVal { ty: td.clone(), tag, values })))
         } else {
             let v = Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values }));
-            if let Some(b) = self.broken_invariant(&v)? {
+            if let Some(b) = self.broken_invariant(&v, span)? {
                 let help = format!("every `{}` must satisfy its `where` clauses, from the moment it is built", b.ty);
                 return Err(self.invariant_error(
                     span,
@@ -2698,6 +2737,24 @@ impl Interp {
             }
             Ok(v)
         }
+    }
+
+    /// Call a function as a test case: a `!` function must also leave its
+    /// first argument satisfying its type's invariant, as when it is called
+    /// on a variable.
+    pub fn call_case(&mut self, c: &Rc<Closure>, args: Vec<Value>) -> R {
+        if !c.def.mutating {
+            return self.call_closure(c, args, vec![], Span::default());
+        }
+        let (r, first) = self.call_closure_full(c, args, vec![], Span::default(), true)?;
+        if let Some(b) = self.broken_invariant(&first, c.def.name_span)? {
+            let name = c.def.display_name();
+            let label = format!("when `{}` returns, its first argument breaks it", name);
+            let help =
+                "a `!` function may break the invariant of its first argument while it runs, but must restore it before it returns".to_string();
+            return Err(self.invariant_error(c.def.name_span, b, label, help));
+        }
+        Ok(r)
     }
 
     pub fn call_closure(&mut self, c: &Rc<Closure>, args: Vec<Value>, named: Vec<(Name, Value)>, span: Span) -> R {
@@ -3261,6 +3318,17 @@ impl Interp {
                     let _ = self.with_place(&root, &steps, false, env, receiver.span, |p| *p = b);
                 }
                 return Err(e);
+            }
+        }
+        // A copy of the first argument taken while it was broken (`let c =
+        // s` inside the function) must not escape as the result.
+        if let (Ok(r), Value::Func(_)) = (&result, &f) {
+            if self.has_invariant(r) {
+                if let Some(b) = self.broken_invariant(r, span)? {
+                    let label = format!("`{}` returns {} `{}` that breaks it", method.name, crate::diagnostic::a_an(&b.ty), b.ty);
+                    let help = "a `!` function may break the invariant of its first argument while it runs, but copies it makes then are still values of the type".to_string();
+                    return Err(self.invariant_error(span, b, label, help));
+                }
             }
         }
         result

@@ -50,14 +50,21 @@ impl Ty {
     }
 
     /// A non-zero fingerprint of this type, used to memoize annotation checks.
-    /// A hash of the type, used to remember that a collection was already
-    /// checked against it. (It is computed on every checked write, so it
-    /// uses a fast hash rather than the default SipHash.)
+    /// A number that identifies the type exactly (never 0), used to
+    /// remember that a collection was already checked against it. Types are
+    /// interned, so two different types never share a number, as two
+    /// hashes could. (The lookup is on every checked write, so it uses a
+    /// fast hash rather than the default SipHash.)
     pub fn fingerprint(&self) -> u64 {
-        use std::hash::Hash;
-        let mut h = FastHasher(0);
-        self.hash(&mut h);
-        std::hash::Hasher::finish(&h) | 1
+        INTERNED.with(|m| {
+            let mut m = m.borrow_mut();
+            if let Some(&id) = m.get(self) {
+                return id;
+            }
+            let id = m.len() as u64 + 1;
+            m.insert(self.clone(), id);
+            id
+        })
     }
 
     pub fn is_any(&self) -> bool {
@@ -235,8 +242,13 @@ pub fn builtin_types() -> Vec<Rc<TypeDef>> {
     vec![Rc::new(option), Rc::new(result), Rc::new(ordering)]
 }
 
+thread_local! {
+    static INTERNED: std::cell::RefCell<std::collections::HashMap<Ty, u64, std::hash::BuildHasherDefault<FastHasher>>> = Default::default();
+}
+
 /// A small, fast, non-cryptographic hasher (the multiply-rotate step of
 /// FxHash, with a final mix so that the low bits depend on every input).
+#[derive(Default)]
 struct FastHasher(u64);
 
 impl std::hash::Hasher for FastHasher {

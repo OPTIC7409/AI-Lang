@@ -1,0 +1,8 @@
+# A crash while checking a generated value's invariant is a failure.
+# expect: checking the invariant of a generated value failed
+fn valid(x: Int) -> Bool => 100 // x > 0
+type L = { x: Int } where valid(x)
+
+fn f(d: L) -> Int
+  ensures result == d.x
+=> d.x

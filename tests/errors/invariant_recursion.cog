@@ -1,0 +1,5 @@
+# expect: E0213
+type S = { a: Int } where S(a).a == a
+print("start")
+let s = S(1)
+print(s)

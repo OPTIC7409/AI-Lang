@@ -94,6 +94,16 @@ property "values random inputs rarely satisfy are still generated" (r: Rare) {
   assert (r.a * 7 + r.b) % 61 == 5
 }
 
+type Big = { items: List[Int], size: Int }
+  where size == items.len()
+  where size >= 3
+
+type Equal = { x: Int, y: Int } where x == y where x > 1000
+
+property "a computed field's bounds apply to what it is computed from" (b: Big, e: Equal) {
+  assert b.items.len() >= 3 and e.y > 1000
+}
+
 property "generated stacks satisfy their invariant" (s: Stack) {
   assert s.size == s.items.len()
 }

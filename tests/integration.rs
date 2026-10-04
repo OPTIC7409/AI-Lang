@@ -5,6 +5,8 @@
 //!   error code (`# expect: E0101`), or the exact message (`# expect: error: ...`).
 //! * `tests/warnings/*.cog` — programs that `check` accepts with exactly the
 //!   warning on the first line (`# expect: W0003`, or `# expect: nothing`).
+//! * `tests/verify/*.cog` — programs that `verify` must reject, with a line
+//!   `# expect: text` giving part of the report.
 //! * `examples/*.cog`     — example programs; when `examples/NAME.out` exists,
 //!   the program's output must match it exactly.
 
@@ -91,6 +93,21 @@ fn warning_codes() {
         let wanted: Vec<&str> = if expect.trim() == "nothing" { vec![] } else { vec![expect.trim()] };
         if !out.status.success() || codes != wanted {
             failures.push(format!("{}: expected warnings {:?}, got:\n{}", f.display(), wanted, stderr));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn verify_failures() {
+    let mut failures = Vec::new();
+    for f in files("tests/verify", "cog") {
+        let src = std::fs::read_to_string(&f).unwrap();
+        let expect = src.lines().find_map(|l| l.strip_prefix("# expect: ")).unwrap_or_else(|| panic!("{} has no `# expect:` line", f.display()));
+        let out = cogito(&["verify", f.to_str().unwrap()]);
+        let stdout = text(&out.stdout);
+        if out.status.success() || !stdout.contains(expect) {
+            failures.push(format!("{}: expected a failure containing {:?}, got:\n{}{}", f.display(), expect, stdout, text(&out.stderr)));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

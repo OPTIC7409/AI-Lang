@@ -2,7 +2,10 @@
 //! Used by `property` blocks and by `cogito verify` (contract fuzzing).
 
 use crate::ast::{ExprKind, FnDef};
+use crate::diagnostic::Diagnostic;
+use crate::interp::Ctrl;
 use crate::interp::{Env, Interp, Rng};
+use crate::span::Span;
 use crate::types::{Ty, TypeDef, TypeKind};
 use crate::value::*;
 use std::collections::HashMap;
@@ -48,6 +51,9 @@ pub struct Gen<'a> {
     /// found: the type and the clause broken most often. Unlike other
     /// generation errors this one may not happen again for the next case.
     pub missed: Option<(Rc<str>, String)>,
+    /// Set when checking the invariant of a generated value failed with an
+    /// error (a bug in the invariant): the error and the value.
+    pub crashed: Option<(Box<Diagnostic>, Value)>,
 }
 
 /// Extreme Int values, likely to expose overflow.
@@ -70,7 +76,7 @@ fn mentions(ty: &Ty, id: u32) -> bool {
 
 impl<'a> Gen<'a> {
     pub fn new(it: &'a mut Interp, rng: &'a mut Rng, extremes: bool, plans: Rc<HashMap<u32, InvPlan>>) -> Gen<'a> {
-        Gen { it, rng, extremes, pool: Vec::new(), plans, missed: None }
+        Gen { it, rng, extremes, pool: Vec::new(), plans, missed: None, crashed: None }
     }
 
     /// A value of type `t` within the bounds `b`.
@@ -97,6 +103,8 @@ impl<'a> Gen<'a> {
             // Smaller values satisfy more invariants (an empty edge list is
             // always in range), so retries shrink.
             let size = (size * (100 - attempt) / 100).max(1);
+            // Checking a candidate gets the step budget of a whole case.
+            self.it.ticks = 0;
             let mut vals = Vec::with_capacity(tys.len());
             for (i, t) in tys.iter().enumerate() {
                 vals.push(match plan.derived[i] {
@@ -109,7 +117,7 @@ impl<'a> Gen<'a> {
             }
             let v = Value::Record(Rc::new(RecordVal { ty: Some(td.clone()), names: fields.clone(), values: vals }));
             let depth_before = self.it.stack.len();
-            let r = self.it.broken_invariant(&v);
+            let r = self.it.broken_invariant(&v, Span::default());
             self.it.stack.truncate(depth_before);
             match r {
                 Ok(None) => return Ok(v),
@@ -117,6 +125,10 @@ impl<'a> Gen<'a> {
                     Some((_, n)) => *n += 1,
                     None => broken.push((b.clause, 1)),
                 },
+                Err(Ctrl::Error(d)) => {
+                    self.crashed = Some((d, v));
+                    return Err(format!("checking the invariant of `{}` failed", td.name));
+                }
                 Err(_) => {}
             }
         }
@@ -504,13 +516,15 @@ pub fn repair(it: &mut Interp, plans: &HashMap<u32, InvPlan>, v: &Value) -> Opti
                 let td = r.ty.clone().unwrap();
                 let TypeKind::Record { tys, .. } = &td.kind else { return None };
                 let tys: Vec<Ty> = tys.iter().map(|t| t.subst(&[])).collect();
+                it.ticks = 0;
                 if !compute_derived(it, plan, &tys, &mut values) {
                     return None;
                 }
             }
             let nv = Value::Record(Rc::new(RecordVal { ty: r.ty.clone(), names: r.names.clone(), values }));
             let depth = it.stack.len();
-            let ok = matches!(it.broken_invariant(&nv), Ok(None));
+            it.ticks = 0;
+            let ok = matches!(it.broken_invariant(&nv, Span::default()), Ok(None));
             it.stack.truncate(depth);
             if !ok {
                 return None;

@@ -1,0 +1,17 @@
+# expect: E0303
+type Span = { lo: Int, hi: Int } where lo <= hi
+
+var saved: List[Span] = []
+
+fn leak!(s: Span) -> Span {
+  s.lo = 100
+  saved.push!(s)
+  let copy = s
+  s.lo = 0
+  copy
+}
+
+var x = Span(1, 2)
+let y: Span = x.leak!()
+print(y, y.lo <= y.hi)
+print(saved)

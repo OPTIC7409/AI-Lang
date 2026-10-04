@@ -321,11 +321,14 @@ type Graph = { n: Int, adj: List[List[Int]] }
 ```
 
 The invariant is checked (E0303) whenever a value of the type is built (by
-its constructor, from an anonymous record, by `{ ..s, lo: 9 }`) and after
-every change to one of its fields (`s.lo = 9`, `g.adj[0].push!(1)`). A `!`
-function may break the invariant of its first argument while it runs:
-changes made through that parameter, at any depth, are checked when the
-function returns. To change several fields of a value outside a `!`
+its constructor or by `{ ..s, lo: 9 }`) and after every change to one of its
+fields (`s.lo = 9`, `g.adj[0].push!(1)`). Converting an anonymous record
+(`let s: Span = { lo: 3, hi: 1 }`) that breaks it is a type mismatch, E0200.
+A `!` function may break the invariant of its first argument while it runs:
+changes made through that parameter, at any depth and including by the `!`
+functions it calls on it, are checked when the outermost such call returns,
+as is the value it returns. (Copies of the broken argument that it stores
+elsewhere meanwhile are not checked.) To change several fields of a value outside a `!`
 function, build a new value. Inside `catch` (and in tests), a change that
 breaks an invariant is undone before the error is returned, so the value is
 still valid afterwards. Clauses may call functions and read constants, but
@@ -411,7 +414,7 @@ Built-ins accept named arguments using the names shown (`to_json(x, indent: 2)`)
   "Tuple" "Record" "Range" "Option" "Result" "Fn" "Ordering"`, or a declared
   type's name) `str(x)` `repr(x)` `int(x)` `float(x)`
   `parse_int(s, base = 10) -> Option` (surrounding spaces allowed; base 2–36,
-  with an optional matching `0x`/`0o`/`0b` prefix) `hash(x) -> Int`
+  with an optional matching `0x`/`0o`/`0b` prefix) `hash(x) -> Int` (equal values hash equal; the numbers may change between versions, so do not store them)
   `parse_float(s) -> Option` (`None` for NaN or numbers too large; `"inf"`
   is accepted) `ord(c)` `chr(n)`
   `panic(msg)` `todo()` `dbg(x)` (prints and returns x) `catch(f)` `compare(a, b)`

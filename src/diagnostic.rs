@@ -120,13 +120,11 @@ impl Diagnostic {
         }
         if self.trace.len() >= 2 {
             let _ = writeln!(out, "  {}stack trace (most recent call first):{}", c.dim, c.reset);
-            let max = 12;
-            let n = self.trace.len();
-            for (i, frame) in self.trace.iter().rev().enumerate() {
-                if n > max && i == max / 2 {
-                    let _ = writeln!(out, "    {}... {} more frames ...{}", c.dim, n - max, c.reset);
-                }
-                if n > max && i >= max / 2 && i < n - max / 2 {
+            // (The interpreter keeps only the innermost and outermost
+            // frames of a deep stack, with a `... N more frames ...` marker.)
+            for frame in self.trace.iter().rev() {
+                if frame.span == Span::default() && frame.name.starts_with("... ") {
+                    let _ = writeln!(out, "    {}{}{}", c.dim, frame.name, c.reset);
                     continue;
                 }
                 if frame.span == Span::default() {
@@ -281,6 +279,7 @@ pub const CATALOG: &[(&str, &str, &str)] = &[
     ("E0119", "pattern of the wrong type", "A `match` arm's pattern is for a different type than the value being matched,\nwhich is declared with a type annotation, so the arm can never be taken:\n\n    fn name(c: Color) -> Str => match c {\n      Less => \"less\"          # error: `Less` is an Ordering, not a Color\n      ...\n    }\n\nUse the constructors of the declared type, or fix the annotation."),
     ("E0120", "binding in an `is` pattern", "`value is Pattern` is a Bool that says whether the value matches the\npattern. It cannot bind names, because there would be nowhere to use them:\n\n    if result is Ok(v) { ... }      # error\n    if result is Ok(_) { ... }      # fine\n\nTo use the parts of the value, write a `match`:\n\n    match result {\n      Ok(v) => ...\n      Err(e) => ...\n    }"),
     ("E0121", "type error found before running", "Cogito checks type annotations when the program runs, and it also checks\nthem before it runs wherever the types are already known: from literals,\nannotations, and the signatures of functions and built-ins. This error means\na value can never have the type that is expected, so the program would fail\nwhen it reached this line:\n\n    fn area(w: Float, h: Float) -> Float => w * h\n    area(\"3\", 4.0)          # error: `w` must be a Float, this is a Str\n\n    let total: Int = 1.5    # error: a Float is not an Int\n    if count { ... }        # error: an `if` condition needs a Bool\n\nThe check is gradual: where a type is not known (a parameter without an\nannotation, a value from `parse_json`), nothing is reported and the check\nhappens when the program runs (error E0200)."),
+    ("E0122", "`return` or `?` in a contract", "A `requires` or `ensures` clause, or a type's `where` clause, is a condition.\n`return` and `?` inside it would leave the function that checks it (for\n`requires` and `where`, the caller), skipping the check:\n\n    type Pos = { a: Int }\n      where a > 0 or (return \"no\")     # error\n\nWrite the condition as one expression. Instead of `?`, use `match` or\n`is` (`where parse_int(s) is Ok(_)`); `?` and `return` are fine inside an\nanonymous function in the condition."),
     ("E0200", "type mismatch", "A value did not have the type that a type annotation requires.\n\nCogito checks type annotations at runtime, at every function boundary: when\nan annotated parameter receives an argument, when an annotated function\nreturns, and when a value is stored in a typed field. Int values are\naccepted (and converted) where Float is expected."),
     ("E0201", "wrong number of arguments", "A function was called with too many or too few arguments."),
     ("E0202", "not callable", "Only functions and constructors can be called with `(...)`."),

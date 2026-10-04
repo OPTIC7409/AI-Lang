@@ -120,7 +120,7 @@ fn run_case(it: &mut Interp, c: &Rc<Closure>, args: Vec<Value>) -> Outcome {
         Err(_) => Outcome::Discard,
         Ok(true) => {
             it.catching += 1;
-            let r = it.call_closure(c, args, vec![], Span::default());
+            let r = it.call_case(c, args);
             it.catching -= 1;
             // For properties, an early `?` or an Err result is a failure.
             let r = if c.def.ensures.is_empty() && c.def.global_slot.is_none() { check_test_result(it, r) } else { r };
@@ -136,7 +136,10 @@ fn run_case(it: &mut Interp, c: &Rc<Closure>, args: Vec<Value>) -> Outcome {
 }
 
 struct Failure {
+    /// Empty when checking the invariant of `generated` (a value being
+    /// generated for an argument) failed.
     args: Vec<Value>,
+    generated: Option<Value>,
     diag: Box<Diagnostic>,
     shrinks: u32,
     after: u32,
@@ -223,6 +226,9 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
                 }
             }
         }
+        if let Some((diag, v)) = gen.crashed.take() {
+            break PropOutcome::Failed(Failure { args: vec![], generated: Some(v), diag, shrinks: 0, after: passed + 1 });
+        }
         if let Some(m) = gen_err {
             // A record whose invariant random values rarely satisfy: skip
             // this attempt, unless no attempt ever succeeds.
@@ -249,7 +255,7 @@ fn quickcheck_inner(it: &mut Interp, def: &Rc<FnDef>, cases: u32, seed: u64, ext
             Outcome::Discard => discarded += 1,
             Outcome::Fail(d) => {
                 let (args, diag, shrinks) = shrink_failure(it, &c, args, d, &plans);
-                break PropOutcome::Failed(Failure { args, diag, shrinks, after: passed + 1 });
+                break PropOutcome::Failed(Failure { args, generated: None, diag, shrinks, after: passed + 1 });
             }
         }
     };
@@ -274,9 +280,65 @@ fn invariant_plans(it: &Interp) -> Rc<HashMap<u32, InvPlan>> {
                 }
             }
         }
-        out.insert(*id, InvPlan { def: def.clone(), bounds: bounds(def), derived });
+        // A computed field's bounds apply to what it is computed from:
+        // with `x == y where x > 1000`, generate `y > 1000`; with
+        // `size == items.len() where size >= 3`, at least 3 items.
+        let mut bs = bounds(def);
+        for (i, d) in derived.iter().enumerate() {
+            let Some((ci, left)) = *d else { continue };
+            let ExprKind::Binary { lhs, rhs, .. } = &def.requires[ci].kind else { continue };
+            let other = if left { rhs } else { lhs };
+            let (int, float) = (bs[i].int, bs[i].float);
+            match source_field(def, other) {
+                Some((j, false)) if derived[j].is_none() => {
+                    bs[j].int = meet(bs[j].int, int);
+                    bs[j].float = meet_f(bs[j].float, float);
+                }
+                Some((j, true)) if derived[j].is_none() => bs[j].len = meet(bs[j].len, int),
+                _ => {}
+            }
+        }
+        out.insert(*id, InvPlan { def: def.clone(), bounds: bs, derived });
     }
     Rc::new(out)
+}
+
+/// The parameter that `e` is (`y`), or whose length it is (`items.len()`,
+/// `len(items)`): its index, and whether it is the length.
+fn source_field(def: &FnDef, e: &Expr) -> Option<(usize, bool)> {
+    let param = |e: &Expr| def.params.iter().position(|p| matches!(&e.kind, ExprKind::Var(v) if v.res == VarRes::Local(p.slot)));
+    match &e.kind {
+        ExprKind::MethodCall { receiver, method, args, .. } if &*method.name == "len" && args.is_empty() => param(receiver).map(|j| (j, true)),
+        ExprKind::Call { callee, args } if args.len() == 1 && matches!(&callee.kind, ExprKind::Var(v) if &*v.name == "len") => {
+            param(&args[0].value).map(|j| (j, true))
+        }
+        _ => param(e).map(|j| (j, false)),
+    }
+}
+
+/// The intersection of two ranges (each end inclusive, `None` for none).
+fn meet(a: Option<(Option<i64>, Option<i64>)>, b: Option<(Option<i64>, Option<i64>)>) -> Option<(Option<i64>, Option<i64>)> {
+    match (a, b) {
+        (Some((alo, ahi)), Some((blo, bhi))) => Some((
+            alo.max(blo).or(alo).or(blo),
+            match (ahi, bhi) {
+                (Some(x), Some(y)) => Some(x.min(y)),
+                (x, y) => x.or(y),
+            },
+        )),
+        (a, b) => a.or(b),
+    }
+}
+
+fn meet_f(a: Option<(Option<f64>, Option<f64>)>, b: Option<(Option<f64>, Option<f64>)>) -> Option<(Option<f64>, Option<f64>)> {
+    let pick = |x: Option<f64>, y: Option<f64>, f: fn(f64, f64) -> f64| match (x, y) {
+        (Some(x), Some(y)) => Some(f(x, y)),
+        (x, y) => x.or(y),
+    };
+    match (a, b) {
+        (Some((alo, ahi)), Some((blo, bhi))) => Some((pick(alo, blo, f64::max), pick(ahi, bhi, f64::min))),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Whether an expression reads the local in `slot`.
@@ -472,7 +534,11 @@ fn indent(s: &str, n: usize) -> String {
 fn show_failure(it: &Interp, def: &FnDef, f: &Failure, c: &Colors, out: &mut String) {
     let what = if f.after == 1 { "on the first case".to_string() } else { format!("after {} cases", f.after) };
     let shr = if f.shrinks > 0 { format!(", shrunk {} time{}", f.shrinks, if f.shrinks == 1 { "" } else { "s" }) } else { String::new() };
-    out.push_str(&format!("      counterexample ({}{}):\n", what, shr));
+    if let Some(v) = &f.generated {
+        out.push_str(&format!("      checking the invariant of a generated value failed ({}):\n        {}\n", what, repr(v)));
+    } else {
+        out.push_str(&format!("      counterexample ({}{}):\n", what, shr));
+    }
     for (p, a) in def.params.iter().zip(&f.args) {
         out.push_str(&format!("        {}{}{} = {}\n", c.bold, param_label(it, p), c.reset, repr(a)));
     }
