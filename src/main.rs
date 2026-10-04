@@ -20,7 +20,7 @@ USAGE:
     cogito run FILE.cog [ARGS...]   run a program
     cogito test [PATH...]           run `test` and `property` blocks (files or directories)
     cogito verify FILE.cog          check function contracts against random inputs
-    cogito check FILE.cog...        report errors and warnings without running
+    cogito check [--json] FILE.cog... report errors and warnings without running (--json: one JSON object per line)
     cogito fmt [--check] [PATH...]  format files in the canonical layout (--check: only report; - for stdin)
     cogito lsp                      run the language server (for editors) on stdin/stdout
     cogito eval \"CODE\"              run a snippet of code
@@ -302,24 +302,30 @@ fn cmd_fmt(paths: &[String], check: bool, color: bool) -> ExitCode {
     }
 }
 
-fn cmd_check(paths: &[String], color: bool) -> ExitCode {
+fn cmd_check(paths: &[String], color: bool, json: bool) -> ExitCode {
     let files = collect_files(paths);
     let mut errors = 0;
     let mut warnings = 0;
     for f in &files {
         let mut it = Interp::new();
         let mut ns = Namespace::default();
-        match cogito::load_file(&mut it, f, &mut ns) {
-            Ok((_, ws)) => {
-                warnings += ws.len();
-                print_diags(&it, &ws, color);
+        let ds = match cogito::load_file(&mut it, f, &mut ns) {
+            Ok((_, ws)) => ws,
+            Err(ds) => ds,
+        };
+        errors += ds.iter().filter(|d| d.is_error()).count();
+        warnings += ds.iter().filter(|d| !d.is_error()).count();
+        if json {
+            // One JSON object per line, on stdout.
+            for d in &ds {
+                cogito::outln!("{}", d.to_json(&it.ctx.sm));
             }
-            Err(ds) => {
-                errors += ds.iter().filter(|d| d.is_error()).count();
-                warnings += ds.iter().filter(|d| !d.is_error()).count();
-                print_diags(&it, &ds, color);
-            }
+        } else {
+            print_diags(&it, &ds, color);
         }
+    }
+    if json {
+        return if errors == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) };
     }
     let c = Colors::new(color);
     if errors == 0 {
@@ -534,8 +540,9 @@ fn real_main() -> ExitCode {
             cmd_fmt(&paths, check, color)
         }
         "check" => {
+            let json = args[1..].iter().any(|a| a == "--json");
             let paths: Vec<String> = args[1..].iter().filter(|a| !a.starts_with("--")).cloned().collect();
-            cmd_check(&paths, color)
+            cmd_check(&paths, color, json)
         }
         "explain" => match args.get(1) {
             Some(code) => match explain(code) {

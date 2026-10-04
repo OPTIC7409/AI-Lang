@@ -30,6 +30,35 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    /// The diagnostic as a JSON object (for `cogito check --json`): lines
+    /// and columns are 1-based, columns count characters.
+    pub fn to_json(&self, sm: &SourceMap) -> crate::json::Json {
+        use crate::json::Json;
+        let mut fields = vec![
+            ("severity", Json::str(if self.is_error() { "error" } else { "warning" })),
+            ("code", Json::str(self.code)),
+            ("message", Json::str(self.message.clone())),
+        ];
+        if let Some(sp) = self.span.filter(|s| (s.file as usize) < sm.files.len()) {
+            let f = sm.get(sp.file);
+            let (line, col) = f.line_col(sp.start as usize);
+            let (end_line, end_col) = f.line_col(sp.end as usize);
+            fields.push(("file", Json::str(f.name.clone())));
+            fields.push(("line", Json::num(line as f64)));
+            fields.push(("column", Json::num(col as f64)));
+            fields.push(("end_line", Json::num(end_line as f64)));
+            fields.push(("end_column", Json::num(end_col as f64)));
+        }
+        if let Some(l) = &self.label {
+            fields.push(("label", Json::str(l.clone())));
+        }
+        fields.push(("notes", Json::Arr(self.notes.iter().map(|n| Json::str(n.clone())).collect())));
+        if let Some(h) = &self.help {
+            fields.push(("help", Json::str(h.clone())));
+        }
+        Json::obj(fields)
+    }
+
     pub fn error(code: &'static str, message: impl Into<String>) -> Diagnostic {
         Diagnostic {
             severity: Severity::Error,

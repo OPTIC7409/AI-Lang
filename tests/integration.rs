@@ -81,6 +81,17 @@ fn examples_produce_expected_output() {
 }
 
 #[test]
+fn check_json_output() {
+    let out = cogito(&["check", "--json", "tests/errors/builtin_arg_kind.cog", "tests/warnings/ignored_result.cog"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = text(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{}", stdout);
+    assert!(lines[0].starts_with('{') && lines[0].contains("\"code\":\"E0121\"") && lines[0].contains("\"line\":3,\"column\":27"), "{}", lines[0]);
+    assert!(lines[1].contains("\"severity\":\"warning\"") && lines[1].contains("\"code\":\"W0006\""), "{}", lines[1]);
+}
+
+#[test]
 fn warning_codes() {
     let mut failures = Vec::new();
     for f in files("tests/warnings", "cog") {
