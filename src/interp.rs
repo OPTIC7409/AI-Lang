@@ -1979,13 +1979,13 @@ impl Interp {
                 }
             }
             Value::Map(m) => {
-                for (k, v) in m.entries.iter() {
+                for (k, v) in m.iter() {
                     self.bind_loop(pat, Value::tuple(vec![k.clone(), v.clone()]), env)?;
                     run_body!();
                 }
             }
             Value::Set(m) => {
-                for (k, _) in m.entries.iter() {
+                for (k, _) in m.iter() {
                     self.bind_loop(pat, k.clone(), env)?;
                     run_body!();
                 }
@@ -2022,8 +2022,8 @@ impl Interp {
                 None => Err(self.err(span, "E0216", "cannot collect an unbounded range").map_help("give the range an end: `0..n`")),
             },
             Value::Str(s) => Ok(s.chars().map(Value::char_str).collect()),
-            Value::Map(m) => Ok(m.entries.iter().map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()])).collect()),
-            Value::Set(m) => Ok(m.entries.iter().map(|(k, _)| k.clone()).collect()),
+            Value::Map(m) => Ok(m.iter().map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()])).collect()),
+            Value::Set(m) => Ok(m.iter().map(|(k, _)| k.clone()).collect()),
             other => Err(self.fail(self.not_iterable(&other, span))),
         }
     }
@@ -2418,7 +2418,8 @@ impl Interp {
             }
             (Some('%'), x) if numeric => {
                 let f = x.as_f64().unwrap() * 100.0;
-                format!("{}%", format_fixed(f, spec.precision.unwrap_or(0)))
+                // (6 decimals by default, as for `f` and `e`, and in Python.)
+                format!("{}%", format_fixed(f, spec.precision.unwrap_or(6)))
             }
             (Some(k), _) => {
                 let help = match k {
@@ -2600,7 +2601,7 @@ impl Interp {
                 if fp != 0 && m.checked() == fp {
                     return true;
                 }
-                let ok = m.entries.iter().all(|(a, _)| self.has_type(a, t, coerce));
+                let ok = m.iter().all(|(a, _)| self.has_type(a, t, coerce));
                 if ok && fp != 0 {
                     m.set_checked(fp);
                 }
@@ -2614,7 +2615,7 @@ impl Interp {
                 if fp != 0 && m.checked() == fp {
                     return true;
                 }
-                let ok = m.entries.iter().all(|(a, b)| self.has_type(a, k, coerce) && self.has_type(b, t, coerce));
+                let ok = m.iter().all(|(a, b)| self.has_type(a, k, coerce) && self.has_type(b, t, coerce));
                 if ok && fp != 0 {
                     m.set_checked(fp);
                 }
@@ -2691,7 +2692,7 @@ impl Interp {
             }
             (Ty::Set(t), Value::Set(m)) => {
                 let mut out = MapVal::with_capacity(m.len());
-                for (k, _) in m.entries.iter() {
+                for (k, _) in m.iter() {
                     let k2 = self.conform(k.clone(), t).map_err(|e| format!("expected {}, but an element is wrong: {}", ty, e))?;
                     out.insert(k2, Value::Unit);
                 }
@@ -2699,7 +2700,7 @@ impl Interp {
             }
             (Ty::Map(kt, vt), Value::Map(m)) => {
                 let mut out = MapVal::with_capacity(m.len());
-                for (k, x) in m.entries.iter() {
+                for (k, x) in m.iter() {
                     let k2 = self.conform(k.clone(), kt).map_err(|e| format!("expected {}, but a key is wrong: {}", ty, e))?;
                     let x2 = self
                         .conform(x.clone(), vt)

@@ -1563,14 +1563,19 @@ impl<'s> Parser<'s> {
             _ => String::new(),
         });
         let (what, empty) = match declared.as_deref() {
-            Some("Set") => ("an empty set", "to_set([])"),
-            Some("List") => ("an empty list", "[]"),
-            _ => ("an empty map", "[:]"),
+            Some("Set") => ("an empty set", Some("to_set([])")),
+            Some("List") => ("an empty list", Some("[]")),
+            None | Some("Map") => ("an empty map", Some("[:]")),
+            // (A record type, or an alias: what it should be is not known here.)
+            Some(_) => ("an empty value", None),
         };
-        Diagnostic::error("E0010", format!("`{{}}` is an empty block, not {}", what))
-            .at(e.span)
-            .help("an empty map is `[:]` (with entries: `[\"a\": 1]`), an empty list `[]`, an empty set `to_set([])`")
-            .fix(e.span, empty)
+        let d = Diagnostic::error("E0010", format!("`{{}}` is an empty block, not {}", what)).at(e.span).help(
+            "an empty map is `[:]` (with entries: `[\"a\": 1]`), an empty list `[]`, an empty set `to_set([])`; a record is built with its fields",
+        );
+        match empty {
+            Some(text) => d.fix(e.span, text),
+            None => d,
+        }
     }
 
     fn brace_is_record(&self) -> bool {
@@ -1670,6 +1675,25 @@ impl<'s> Parser<'s> {
             }
             let close = self.expect_closing(&Tok::RBracket, open, "`for`, `if` or `]` in list comprehension")?;
             return Ok(mk(ExprKind::Comprehension { body: Box::new(first), clauses }, open.to(close)));
+        }
+        // `[for x in xs { x * x }]`: a loop, whose value is `()`.
+        if let (false, ExprKind::For { pat, iter, body }) = (first_spread, &first.kind) {
+            let mut d = Diagnostic::error("E0010", "a `for` loop inside `[...]` gives a list holding one `()`")
+                .at(first.span)
+                .help("a list comprehension puts the value first: `[x * x for x in xs]` (with an optional filter: `[x for x in xs if x > 0]`)");
+            // The loop's body is one expression (not an `if` without `else`,
+            // which is likely meant as a filter).
+            if let ExprKind::Block(stmts) = &body.kind {
+                if let [Stmt { kind: StmtKind::Expr(value), .. }] = stmts.as_slice() {
+                    let filter_like = matches!(&value.kind, ExprKind::If { els: None, .. });
+                    let loop_like = matches!(&value.kind, ExprKind::For { .. } | ExprKind::While { .. } | ExprKind::Loop { .. });
+                    if !filter_like && !loop_like && self.at(&Tok::RBracket) {
+                        let text = |sp: Span| self.src[sp.start as usize..sp.end as usize].to_string();
+                        d = d.fix(first.span, format!("{} for {} in {}", text(value.span), text(pat.span), text(iter.span)));
+                    }
+                }
+            }
+            return Err(d);
         }
         let mut items = vec![ListItem { expr: first, spread: first_spread }];
         while self.eat(&Tok::Comma) {

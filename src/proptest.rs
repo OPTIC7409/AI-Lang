@@ -842,7 +842,7 @@ pub fn repair(it: &mut Interp, plans: &HashMap<u32, InvPlan>, v: &Value) -> Opti
             Value::Variant(Rc::new(VariantVal { ty: vv.ty.clone(), tag: vv.tag, values }))
         }
         Value::Map(m) | Value::Set(m) => {
-            if m.entries.iter().any(|(k, x)| repair(it, plans, k).is_none() || repair(it, plans, x).is_none()) {
+            if m.iter().any(|(k, x)| repair(it, plans, k).is_none() || repair(it, plans, x).is_none()) {
                 return None;
             }
             v.clone()
@@ -948,7 +948,7 @@ pub fn shrink(v: &Value) -> Vec<Value> {
         Value::Set(m) => {
             if !m.is_empty() {
                 out.push(Value::Set(Rc::new(MapVal::new())));
-                for (k, _) in m.entries.iter().take(16) {
+                for (k, _) in m.iter().take(16) {
                     let mut c = (**m).clone();
                     c.remove(k);
                     out.push(Value::Set(Rc::new(c)));
@@ -958,12 +958,12 @@ pub fn shrink(v: &Value) -> Vec<Value> {
         Value::Map(m) => {
             if !m.is_empty() {
                 out.push(Value::Map(Rc::new(MapVal::new())));
-                for (k, _) in m.entries.iter().take(16) {
+                for (k, _) in m.iter().take(16) {
                     let mut c = (**m).clone();
                     c.remove(k);
                     out.push(Value::Map(Rc::new(c)));
                 }
-                for (k, x) in m.entries.iter().take(8) {
+                for (k, x) in m.iter().take(8) {
                     for s in shrink(x).into_iter().take(3) {
                         let mut c = (**m).clone();
                         c.insert(k.clone(), s);

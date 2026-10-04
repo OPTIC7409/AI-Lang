@@ -16,7 +16,7 @@ var mut count = 0
 const limit = 10
 print(x === 1, x !== 2)
 let name = "a"
-print(f"hi {name} {x:.2f}")
+print(f"hi {name} {x:>6}")
 print(`total: ${x + 1} {braces} "q"`)
 fn h(a: Int): Int => a
 match x {

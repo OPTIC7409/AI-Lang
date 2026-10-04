@@ -16,7 +16,7 @@ var count = 0
 let limit = 10
 print(x == 1, x != 2)
 let name = "a"
-print("hi {name} {x:.2f}")
+print("hi {name} {x:>6}")
 print("total: {x + 1} \{braces\} \"q\"")
 fn h(a: Int) -> Int => a
 match x {

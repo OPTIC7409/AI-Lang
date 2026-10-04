@@ -421,12 +421,12 @@ fn hash_inner<H: Hasher>(v: &Value, h: &mut H, memo: &mut HashMemo) {
         Value::Map(m) => {
             6u8.hash(h);
             m.len().hash(h);
-            unordered(m.entries.iter().map(|(k, v)| [k, v]), h, memo);
+            unordered(m.iter().map(|(k, v)| [k, v]), h, memo);
         }
         Value::Set(m) => {
             13u8.hash(h);
             m.len().hash(h);
-            unordered(m.entries.iter().map(|(k, _)| [k, k]), h, memo);
+            unordered(m.iter().map(|(k, _)| [k, k]), h, memo);
         }
         Value::Record(r) => {
             7u8.hash(h);
@@ -466,10 +466,14 @@ fn hash_inner<H: Hasher>(v: &Value, h: &mut H, memo: &mut HashMemo) {
     }
 }
 
-/// An insertion-ordered hash map.
+/// An insertion-ordered hash map. A removed entry leaves a hole, so that
+/// removing is O(1); the holes are squeezed out when they outnumber the
+/// entries.
 #[derive(Clone, Default)]
 pub struct MapVal {
-    pub entries: Vec<(Value, Value)>,
+    slots: Vec<Option<(Value, Value)>>,
+    /// The number of entries (slots that are not holes).
+    live: usize,
     index: HashMap<HKey, usize>,
     /// Memo of the last type annotation the map was checked against (see `List`).
     checked: Cell<u64>,
@@ -481,19 +485,32 @@ impl MapVal {
     }
 
     pub fn with_capacity(n: usize) -> MapVal {
-        MapVal { entries: Vec::with_capacity(n), index: HashMap::with_capacity(n), checked: Cell::new(0) }
+        MapVal { slots: Vec::with_capacity(n), live: 0, index: HashMap::with_capacity(n), checked: Cell::new(0) }
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.live
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.live == 0
+    }
+
+    /// The entries, in insertion order.
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &(Value, Value)> + '_ {
+        self.slots.iter().flatten()
+    }
+
+    pub fn first(&self) -> Option<&(Value, Value)> {
+        self.iter().next()
+    }
+
+    pub fn last(&self) -> Option<&(Value, Value)> {
+        self.iter().next_back()
     }
 
     pub fn get(&self, k: &Value) -> Option<&Value> {
-        self.index.get(&HKey(k.clone())).map(|&i| &self.entries[i].1)
+        self.index.get(&HKey(k.clone())).and_then(|&i| self.slots[i].as_ref()).map(|(_, v)| v)
     }
 
     pub fn checked(&self) -> u64 {
@@ -507,7 +524,7 @@ impl MapVal {
     pub fn get_mut(&mut self, k: &Value) -> Option<&mut Value> {
         self.checked.set(0);
         match self.index.get(&HKey(k.clone())) {
-            Some(&i) => Some(&mut self.entries[i].1),
+            Some(&i) => self.slots[i].as_mut().map(|(_, v)| v),
             None => None,
         }
     }
@@ -519,10 +536,11 @@ impl MapVal {
     pub fn insert(&mut self, k: Value, v: Value) -> Option<Value> {
         self.checked.set(0);
         match self.index.get(&HKey(k.clone())) {
-            Some(&i) => Some(std::mem::replace(&mut self.entries[i].1, v)),
+            Some(&i) => self.slots[i].as_mut().map(|(_, old)| std::mem::replace(old, v)),
             None => {
-                self.index.insert(HKey(k.clone()), self.entries.len());
-                self.entries.push((k, v));
+                self.index.insert(HKey(k.clone()), self.slots.len());
+                self.slots.push(Some((k, v)));
+                self.live += 1;
                 None
             }
         }
@@ -531,18 +549,34 @@ impl MapVal {
     pub fn remove(&mut self, k: &Value) -> Option<Value> {
         self.checked.set(0);
         let i = self.index.remove(&HKey(k.clone()))?;
-        let (_, v) = self.entries.remove(i);
-        for idx in self.index.values_mut() {
-            if *idx > i {
-                *idx -= 1;
-            }
+        let (_, v) = self.slots[i].take()?;
+        self.live -= 1;
+        // (Trailing holes go at once; the others when there are many.)
+        while matches!(self.slots.last(), Some(None)) {
+            self.slots.pop();
+        }
+        if self.slots.len() > 32 && self.slots.len() > 2 * self.live {
+            self.compact();
         }
         Some(v)
     }
 
+    /// Squeeze out the holes left by removals.
+    fn compact(&mut self) {
+        self.slots.retain(Option::is_some);
+        for (i, slot) in self.slots.iter().enumerate() {
+            if let Some((k, _)) = slot {
+                if let Some(at) = self.index.get_mut(&HKey(k.clone())) {
+                    *at = i;
+                }
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.checked.set(0);
-        self.entries.clear();
+        self.slots.clear();
+        self.live = 0;
         self.index.clear();
     }
 }
@@ -701,12 +735,12 @@ fn eq_inner(a: &Value, b: &Value, memo: &mut EqMemo) -> bool {
         (Value::Map(x), Value::Map(y)) => {
             Rc::ptr_eq(x, y)
                 || (x.len() == y.len()
-                    && memo_eq(memo, shared_pair(x, y, || any_nested(x.entries.iter().flat_map(|(k, v)| [k, v]))), |m| {
-                        x.entries.iter().all(|(k, v)| y.get(k).is_some_and(|w| eq_inner(v, w, m)))
+                    && memo_eq(memo, shared_pair(x, y, || any_nested(x.iter().flat_map(|(k, v)| [k, v]))), |m| {
+                        x.iter().all(|(k, v)| y.get(k).is_some_and(|w| eq_inner(v, w, m)))
                     }))
         }
         // Sets are equal when they have the same elements, in any order.
-        (Value::Set(x), Value::Set(y)) => Rc::ptr_eq(x, y) || (x.len() == y.len() && x.entries.iter().all(|(k, _)| y.get(k).is_some())),
+        (Value::Set(x), Value::Set(y)) => Rc::ptr_eq(x, y) || (x.len() == y.len() && x.iter().all(|(k, _)| y.get(k).is_some())),
         (Value::Record(x), Value::Record(y)) => {
             let same_ty = match (&x.ty, &y.ty) {
                 (Some(a), Some(b)) => a.id == b.id,
@@ -931,7 +965,7 @@ pub fn write_value(out: &mut String, v: &Value, quote: bool) {
         // `to_set([1, 2])`, which builds the same set again.
         Value::Set(m) => {
             out.push_str("to_set([");
-            for (i, (k, _)) in m.entries.iter().enumerate() {
+            for (i, (k, _)) in m.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
@@ -945,7 +979,7 @@ pub fn write_value(out: &mut String, v: &Value, quote: bool) {
                 return;
             }
             out.push('[');
-            for (i, (k, v)) in m.entries.iter().enumerate() {
+            for (i, (k, v)) in m.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }

@@ -459,8 +459,6 @@ fn confusion_fix(name: &str, call: bool) -> Option<&'static str> {
         "split_whitespace" => "words",
         "items" | "iteritems" => "entries",
         "isEmpty" | "empty" => "is_empty",
-        "parseInt" | "atoi" => "parse_int",
-        "parseFloat" | "atof" => "parse_float",
         _ => return None,
     })
 }
@@ -747,6 +745,24 @@ impl<'a> Resolver<'a> {
         out
     }
 
+    /// Whether `name` is declared somewhere in the file (`let name`, `var
+    /// name`, `for name`, `fn name`, or a parameter `(name: ...`): then an
+    /// undefined use of it may be meant as that variable, used too early.
+    fn declared_in_file(&self, file: u32, name: &str) -> bool {
+        let src = &self.ctx.sm.get(file).src;
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        src.match_indices(name).any(|(i, _)| {
+            let (before, after) = (&src[..i], &src[i + name.len()..]);
+            if before.chars().next_back().is_some_and(is_word) || after.chars().next().is_some_and(is_word) {
+                return false;
+            }
+            let b = before.trim_end();
+            let keyword = ["let", "var", "for", "fn"].iter().any(|k| b.strip_suffix(k).is_some_and(|r| !r.chars().next_back().is_some_and(is_word)));
+            let param = (b.ends_with('(') || b.ends_with(',')) && after.trim_start().starts_with([':', ',', ')']);
+            keyword || param
+        })
+    }
+
     /// The `//` before an undefined name that ends its line (`x // word`),
     /// which can only be meant as a comment.
     fn slash_comment_before(&self, span: Span) -> Option<Span> {
@@ -755,19 +771,26 @@ impl<'a> Resolver<'a> {
         let gap = before.len() - before.trim_end_matches([' ', '\t']).len();
         let rest_of_line = src[span.end as usize..].split('\n').next().unwrap_or("");
         let at = before.trim_end_matches([' ', '\t']).strip_suffix("//")?.len();
-        (gap > 0 && rest_of_line.trim().is_empty() && !before[..at].ends_with('/')).then(|| Span::new(span.file, at, at + 2))
+        // (A word, not a name: `x // seconds`, not `x // bucket_count`,
+        // and not a name declared anywhere in the file.)
+        let name = &src[span.start as usize..span.end as usize];
+        let word = name.chars().all(|c| c.is_ascii_lowercase()) && crate::lexer::whole_word_count(src, name) == 1;
+        (gap > 0 && word && rest_of_line.trim().is_empty() && !before[..at].ends_with('/')).then(|| Span::new(span.file, at, at + 2))
     }
 
     /// `Math.floor(x)` (JavaScript, Java), `math.sqrt(x)` (Python),
     /// `console.log(x)`: an error (with the built-in to use instead) when
     /// the namespace is not a name of this program. `args`: the number of
     /// arguments, for a method call.
-    fn foreign_member(&mut self, target: &Expr, member: &str, member_span: Span, args: Option<usize>) -> bool {
+    fn foreign_member(&mut self, target: &Expr, member: &str, member_span: Span, args: Option<usize>, first: Option<&Expr>) -> bool {
         let ExprKind::Var(v) = &target.kind else { return false };
         if !matches!(&*v.name, "Math" | "math" | "console") || self.lookup(&v.name).is_some() || self.global_slot(&v.name).is_some() {
             return false;
         }
+        // (`console.log("%s items", n)` formats; `print` would not.)
+        let printf = matches!(first.map(|e| &e.kind), Some(ExprKind::Str(t)) if ["%s", "%d", "%i", "%f", "%o", "%O", "%j", "%c"].iter().any(|p| t.as_str().contains(p)));
         let builtin = match (&*v.name, member, args) {
+            ("console", "log" | "info" | "error" | "warn", Some(_)) if printf => None,
             ("console", "log" | "info", Some(_)) => Some("print"),
             ("console", "error" | "warn", Some(_)) => Some("eprint"),
             ("console", ..) => None,
@@ -776,11 +799,12 @@ impl<'a> Resolver<'a> {
             (_, "log", Some(1)) => Some("ln"),
             (_, "log", Some(2)) if v.name.as_ref() == "math" => Some("log"),
             (_, "isnan", Some(_)) => Some("is_nan"),
-            (_, "fabs", Some(_)) => Some("abs"),
+            // (`Math.round` rounds halves up and `round` away from zero;
+            // `math.fabs` gives a Float: help only.)
             (
                 _,
                 m @ ("abs" | "sqrt" | "pow" | "exp" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "hypot" | "floor" | "ceil"
-                | "round" | "trunc" | "sign" | "gcd" | "lcm" | "min" | "max" | "random" | "log2" | "log10"),
+                | "trunc" | "sign" | "gcd" | "lcm" | "min" | "max" | "random" | "log2" | "log10"),
                 Some(_),
             ) => Some(m),
             (_, "PI" | "pi", None) => Some("pi"),
@@ -789,9 +813,15 @@ impl<'a> Resolver<'a> {
             (_, "inf", None) => Some("inf"),
             _ => None,
         };
+        // The built-in must be what its name means here (not a variable
+        // named `e` or `min`).
+        let shadowed = builtin.is_some_and(|b| self.is_local(b) || self.ns.values.get(b).is_some_and(|s| self.ctx.builtins.values.get(b) != Some(s)));
         let what = if v.name.as_ref() == "console" { "object" } else { "namespace" };
         let mut d = Diagnostic::error("E0100", format!("Cogito has no `{}` {}", v.name, what)).at(Span { end: member_span.end, ..target.span });
         d = match builtin {
+            Some(b) if shadowed => d
+                .label("not found in this scope")
+                .help(format!("it is the built-in `{}`, but your variable `{}` hides it here: rename the variable", b, b)),
             Some(b) => {
                 let shown = if args.is_some() { format!("`{}(...)`", b) } else { format!("`{}`", b) };
                 d.label("not found in this scope")
@@ -848,7 +878,11 @@ impl<'a> Resolver<'a> {
             // (Only the name: the span of a pattern covers its fields too.
             // Not when a local variable hides the module's name.)
             let name_span = Span::new(span.file, span.start as usize, span.start as usize + name.len());
-            if self.modules_with(name) == 1 && self.ctx.sm.snippet(name_span) == name && !self.is_local(&alias) {
+            if self.modules_with(name) == 1
+                && self.ctx.sm.snippet(name_span) == name
+                && !self.is_local(&alias)
+                && !self.declared_in_file(span.file, name)
+            {
                 d = d.fix(name_span, format!("{}.{}", alias, name));
             }
         } else if let Some(h) = confusion_hint(name) {
@@ -1524,18 +1558,19 @@ impl<'a> Resolver<'a> {
                                 d = Diagnostic::error("E0106", format!("the type alias `{}` refers to itself", name))
                                     .at(span)
                                     .help(format!("an alias is only another name for an existing type; for a recursive type, declare an enum or record: `type {} = | Leaf | Node(List[{}])`", name, name));
+                            } else if let Some(alias) = self.module_with(&name) {
+                                // (Before the other languages' names: a module's own `String`.)
+                                d = d.help(format!("`{}` is defined in the imported module `{}`: write `{}.{}`", name, alias, alias, name));
+                                let name_span = Span::new(span.file, span.start as usize, span.start as usize + name.len());
+                                if self.modules_with(&name) == 1 && self.ctx.sm.snippet(name_span) == &*name {
+                                    d = d.fix(name_span, format!("{}.{}", alias, name));
+                                }
                             } else if let Some(h) = crate::parser::type_name_hint(&name) {
                                 // (The span covers type arguments too: `HashMap[Str, Int]`.)
                                 let name_span = Span::new(span.file, span.start as usize, span.start as usize + name.len());
                                 d = d.help(format!("did you mean `{}`?", h));
                                 if self.ctx.sm.snippet(name_span) == &*name {
                                     d = d.fix(name_span, h);
-                                }
-                            } else if let Some(alias) = self.module_with(&name) {
-                                d = d.help(format!("`{}` is defined in the imported module `{}`: write `{}.{}`", name, alias, alias, name));
-                                let name_span = Span::new(span.file, span.start as usize, span.start as usize + name.len());
-                                if self.modules_with(&name) == 1 && self.ctx.sm.snippet(name_span) == &*name {
-                                    d = d.fix(name_span, format!("{}.{}", alias, name));
                                 }
                             } else if let Some(s) = suggest(&name, cands.iter().map(|s| s.as_str())) {
                                 d = d.help(format!("did you mean `{}`?", s));
@@ -2142,6 +2177,10 @@ impl<'a> Resolver<'a> {
         if b.name.ends_with('!') || EFFECTS.contains(&b.name) {
             return;
         }
+        // `logger.log(msg)` may call a record's field holding a function.
+        if matches!(e.kind, ExprKind::MethodCall { .. }) && self.ctx.known_fields.contains(&**name) {
+            return;
+        }
         // A callback with effects (`xs.any(fn(x) { print(x); ... })`) makes
         // the call do something even when its result is dropped (but `map`
         // used that way is still better written with `each`).
@@ -2169,7 +2208,10 @@ impl<'a> Resolver<'a> {
         } else {
             format!("`{}` returns a new value and does not change its arguments; store the result, e.g. `let y = ...`", name)
         };
-        let d = Diagnostic::warning("W0003", format!("the result of `{}` is unused", name)).at(e.span).help(help);
+        let mut d = Diagnostic::warning("W0003", format!("the result of `{}` is unused", name)).at(e.span).help(help);
+        if &**name == "remove" {
+            d = d.note("on a list, `remove!(i)` removes the element at index `i`; to remove the value `x` (as Python's `remove(x)` does), write `xs.remove!(xs.index_of(x).unwrap())`");
+        }
         self.diags.push(d);
     }
 
@@ -2344,9 +2386,9 @@ impl<'a> Resolver<'a> {
         // `Math.max(a, b)`, `math.pi`, `console.log(x)`: other languages'
         // namespaces for what are built-ins here.
         match &mut e.kind {
-            ExprKind::Field { target, name, name_span } if self.foreign_member(target, name, *name_span, None) => return,
+            ExprKind::Field { target, name, name_span } if self.foreign_member(target, name, *name_span, None, None) => return,
             ExprKind::MethodCall { receiver, method, method_span, args, mutating: false, .. }
-                if self.foreign_member(receiver, &method.name, *method_span, Some(args.len())) =>
+                if self.foreign_member(receiver, &method.name, *method_span, Some(args.len()), args.first().map(|a| &a.value)) =>
             {
                 self.args(args);
                 return;

@@ -1481,7 +1481,9 @@ impl<'a> Checker<'a> {
         let suits = matches!(
             (b, &known),
             ("sort" | "reverse" | "push" | "extend" | "sort_by" | "swap", Ty::List(_))
-                | ("insert" | "remove" | "clear", Ty::List(_) | Ty::Map(..) | Ty::Set(_))
+                | ("insert" | "clear", Ty::List(_) | Ty::Map(..) | Ty::Set(_))
+                // (Not a list's `remove(i)`, by index: Python's `remove(x)` is by value.)
+                | ("remove", Ty::Map(..) | Ty::Set(_))
         );
         if suits && self.ctx.builtins.values.contains_key(format!("{}!", b).as_str()) && !self.has_home(&known) {
             self.twins.push((call, crate::diagnostic::Fix { span: at, text: "!".into() }));
@@ -1630,9 +1632,37 @@ impl<'a> Checker<'a> {
             let Some(k) = kinds.get(i) else { break };
             if k.excludes(t) {
                 let which = if method && i == 0 { format!("the receiver of `.{}()`", name) } else { format!("argument {} of `{}`", i + 1, name) };
-                self.error(*span, format!("{} must be {}, but this is {}", which, k.describe(), a(t)), &format!("not {}", k.describe()));
+                let fix = self.python_join(name, method, args);
+                let d = self.error(*span, format!("{} must be {}, but this is {}", which, k.describe(), a(t)), &format!("not {}", k.describe()));
+                if let Some(fix) = fix {
+                    d.help = Some("Python's `sep.join(xs)` is written `xs.join(sep)` here: the list comes first".into());
+                    d.fixes.push(fix);
+                }
             }
         }
+    }
+
+    /// `", ".join(parts)` with `parts` a List: `parts.join(", ")`.
+    fn python_join(&self, name: &str, method: bool, args: &[(Option<Name>, Ty, Span)]) -> Option<crate::diagnostic::Fix> {
+        let [(None, Ty::Str, sep), (None, Ty::List(_), list)] = args else { return None };
+        if name != "join" || !method || sep.file != list.file {
+            return None;
+        }
+        let src = &self.ctx.sm.get(sep.file).src;
+        let text = |sp: &Span| &src[sp.start as usize..sp.end as usize];
+        // The separator is a string literal, and `)` closes the call.
+        let close = list.end as usize + src[list.end as usize..].len() - src[list.end as usize..].trim_start().len();
+        let literal = text(sep).starts_with('"') && text(sep).ends_with('"') && text(sep).len() >= 2;
+        if !literal || !src[close..].starts_with(')') || !src[sep.end as usize..].starts_with(".join(") {
+            return None;
+        }
+        let xs = text(list);
+        let simple = xs.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+        let xs = if simple { xs.to_string() } else { format!("({})", xs) };
+        Some(crate::diagnostic::Fix {
+            span: Span { start: sep.start, end: close as u32 + 1, file: sep.file },
+            text: format!("{}.join({})", xs, text(sep)),
+        })
     }
 
     fn call_user(&mut self, slot: u32, name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
@@ -2115,6 +2145,8 @@ fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
         "first" | "last" | "get" => match &first {
             Ty::List(_) | Ty::Str | Ty::Range => option(elem),
             Ty::Map(_, v) if name == "get" => option((**v).clone()),
+            Ty::Map(k, v) => option(Ty::Tuple(vec![(**k).clone(), (**v).clone()])),
+            Ty::Set(e) if name != "get" => option((**e).clone()),
             _ => Ty::Any,
         },
         "enumerate" => match &first {

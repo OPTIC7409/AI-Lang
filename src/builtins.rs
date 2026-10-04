@@ -1650,8 +1650,10 @@ fn b_first(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
             }
         }
         // (Sets keep the order in which elements were added.)
-        Value::Set(m) => m.entries.first().map(|(k, _)| k.clone()),
-        v => return Err(type_err(it, "first", 0, "a List, Str, Range or Set", v, sp)),
+        Value::Set(m) => m.first().map(|(k, _)| k.clone()),
+        // (Maps too: the entry added first.)
+        Value::Map(m) => m.first().map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()])),
+        v => return Err(type_err(it, "first", 0, "a List, Str, Range, Set or Map", v, sp)),
     };
     Ok(it.option(r))
 }
@@ -1665,8 +1667,9 @@ fn b_last(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
             Some(_) => None,
             None => return Err(it.err(sp, "E0216", "an unbounded range has no last element")),
         },
-        Value::Set(m) => m.entries.last().map(|(k, _)| k.clone()),
-        v => return Err(type_err(it, "last", 0, "a List, Str, Range or Set", v, sp)),
+        Value::Set(m) => m.last().map(|(k, _)| k.clone()),
+        Value::Map(m) => m.last().map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()])),
+        v => return Err(type_err(it, "last", 0, "a List, Str, Range, Set or Map", v, sp)),
     };
     Ok(it.option(r))
 }
@@ -1713,7 +1716,7 @@ fn b_filter(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     if let Value::Map(m) = &v {
         let two = wants_two(&f);
         let mut out = MapVal::new();
-        for (k, x) in m.entries.iter() {
+        for (k, x) in m.iter() {
             let keep = if two {
                 bool_result(it, &f, vec![k.clone(), x.clone()], sp, "filter")?
             } else {
@@ -2033,6 +2036,10 @@ fn b_take(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
             it.tick_n(count as u64, sp)?;
             Ok(Value::list((0..count as i128).map(|i| Value::Int((r.start as i128 + i) as i64)).collect()))
         }
+        // (Without copying the rest.)
+        Value::List(xs) | Value::Tuple(xs) => Ok(Value::list(xs[..n.min(xs.len())].to_vec())),
+        Value::Map(m) => Ok(Value::list(m.iter().take(n).map(|(k, x)| Value::tuple(vec![k.clone(), x.clone()])).collect())),
+        Value::Set(m) => Ok(Value::list(m.iter().take(n).map(|(k, _)| k.clone()).collect())),
         v => {
             let mut xs = items(it, v, "take", 0, sp)?;
             xs.truncate(n);
@@ -2049,6 +2056,7 @@ fn b_drop(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
             let len = s.char_len();
             Ok(Value::str(s.slice_chars(n.min(len), len)))
         }
+        Value::List(xs) | Value::Tuple(xs) => Ok(Value::list(xs[n.min(xs.len())..].to_vec())),
         v => {
             let xs = items(it, v, "drop", 0, sp)?;
             Ok(Value::list(xs.into_iter().skip(n).collect()))
@@ -2060,6 +2068,14 @@ fn b_take_while(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let f = fn_arg(it, &a, 1, "take_while", sp)?;
     let v = take_arg(&mut a, 0);
     let was_str = matches!(v, Value::Str(_));
+    // (A list: without copying the rest.)
+    if let Value::List(xs) = &v {
+        let mut n = 0;
+        while n < xs.len() && bool_result1(it, &f, xs[n].clone(), sp, "take_while")? {
+            n += 1;
+        }
+        return Ok(Value::list(xs[..n].to_vec()));
+    }
     let xs = items(it, v, "take_while", 0, sp)?;
     let mut out = Vec::new();
     for x in xs {
@@ -2147,6 +2163,11 @@ fn b_flatten(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 }
 
 fn b_join(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
+    // `", ".join(xs)` from Python.
+    if let [Value::Str(_), Value::List(_)] = a.as_slice() {
+        let d = it.diag(sp, "E0200", format!("argument 2 of `join` must be a Str, got {}", describe(&a[1])));
+        return Err(it.fail(d.help("Python's `sep.join(xs)` is written `xs.join(sep)` here: the list comes first")));
+    }
     let sep = if a.len() == 2 { str_arg(it, &a, 1, "join", sp)?.to_string() } else { String::new() };
     let v = take_arg(&mut a, 0);
     let xs = items(it, v, "join", 0, sp)?;
@@ -2298,17 +2319,17 @@ fn b_to_map(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
 
 fn b_keys(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let m = map_arg(it, &a, 0, "keys", sp)?;
-    Ok(Value::list(m.entries.iter().map(|(k, _)| k.clone()).collect()))
+    Ok(Value::list(m.iter().map(|(k, _)| k.clone()).collect()))
 }
 
 fn b_values(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let m = map_arg(it, &a, 0, "values", sp)?;
-    Ok(Value::list(m.entries.iter().map(|(_, v)| v.clone()).collect()))
+    Ok(Value::list(m.iter().map(|(_, v)| v.clone()).collect()))
 }
 
 fn b_entries(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let m = map_arg(it, &a, 0, "entries", sp)?;
-    Ok(Value::list(m.entries.iter().map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()])).collect()))
+    Ok(Value::list(m.iter().map(|(k, v)| Value::tuple(vec![k.clone(), v.clone()])).collect()))
 }
 
 fn set_arg(it: &Interp, a: &[Value], i: usize, f: &str, sp: Span) -> R<Rc<MapVal>> {
@@ -2338,7 +2359,7 @@ fn b_union(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let mut m = set_arg(it, &a, 0, "union", sp)?;
     let t = set_arg(it, &a, 1, "union", sp)?;
     let mm = Rc::make_mut(&mut m);
-    for (k, _) in t.entries.iter() {
+    for (k, _) in t.iter() {
         mm.insert(k.clone(), Value::Unit);
     }
     Ok(Value::Set(m))
@@ -2348,7 +2369,7 @@ fn b_intersection(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = set_arg(it, &a, 0, "intersection", sp)?;
     let t = set_arg(it, &a, 1, "intersection", sp)?;
     let mut out = MapVal::new();
-    for (k, _) in s.entries.iter().filter(|(k, _)| t.contains(k)) {
+    for (k, _) in s.iter().filter(|(k, _)| t.contains(k)) {
         out.insert(k.clone(), Value::Unit);
     }
     Ok(Value::Set(Rc::new(out)))
@@ -2358,7 +2379,7 @@ fn b_difference(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = set_arg(it, &a, 0, "difference", sp)?;
     let t = set_arg(it, &a, 1, "difference", sp)?;
     let mut out = MapVal::new();
-    for (k, _) in s.entries.iter().filter(|(k, _)| !t.contains(k)) {
+    for (k, _) in s.iter().filter(|(k, _)| !t.contains(k)) {
         out.insert(k.clone(), Value::Unit);
     }
     Ok(Value::Set(Rc::new(out)))
@@ -2367,7 +2388,8 @@ fn b_difference(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
 fn b_is_subset(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let s = set_arg(it, &a, 0, "is_subset", sp)?;
     let t = set_arg(it, &a, 1, "is_subset", sp)?;
-    Ok(Value::Bool(s.entries.iter().all(|(k, _)| t.contains(k))))
+    let all = s.iter().all(|(k, _)| t.contains(k));
+    Ok(Value::Bool(all))
 }
 
 fn b_has(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
@@ -2383,7 +2405,7 @@ fn b_merge(it: &mut Interp, mut a: Vec<Value>, sp: Span) -> R {
     let v = take_arg(&mut a, 0);
     let Value::Map(mut m) = v else { return Err(type_err(it, "merge", 0, "a Map", &v, sp)) };
     let mm = Rc::make_mut(&mut m);
-    for (k, x) in b.entries.iter() {
+    for (k, x) in b.iter() {
         mm.insert(k.clone(), x.clone());
     }
     Ok(Value::Map(m))
@@ -2393,7 +2415,7 @@ fn b_map_values(it: &mut Interp, a: Vec<Value>, sp: Span) -> R {
     let m = map_arg(it, &a, 0, "map_values", sp)?;
     let f = fn_arg(it, &a, 1, "map_values", sp)?;
     let mut out = MapVal::with_capacity(m.len());
-    for (k, v) in m.entries.iter() {
+    for (k, v) in m.iter() {
         let nv = it.call1(&f, v.clone(), sp)?;
         out.insert(k.clone(), nv);
     }
@@ -2819,7 +2841,7 @@ fn to_json(v: &Value, indent: usize, level: usize, out: &mut String) -> Result<(
         Value::Str(s) => json_escape(s, out),
         // A set becomes an array of its elements.
         Value::Set(m) => {
-            let xs: Vec<Value> = m.entries.iter().map(|(k, _)| k.clone()).collect();
+            let xs: Vec<Value> = m.iter().map(|(k, _)| k.clone()).collect();
             return to_json(&Value::list(xs), indent, level, out);
         }
         Value::List(xs) | Value::Tuple(xs) => {
@@ -2847,7 +2869,7 @@ fn to_json(v: &Value, indent: usize, level: usize, out: &mut String) -> Result<(
             // become their decimal text), as long as no two become the same.
             let mut seen = std::collections::HashSet::new();
             out.push('{');
-            for (i, (k, x)) in m.entries.iter().enumerate() {
+            for (i, (k, x)) in m.iter().enumerate() {
                 let key = match k {
                     Value::Str(s) => s.to_string(),
                     Value::Int(n) => n.to_string(),

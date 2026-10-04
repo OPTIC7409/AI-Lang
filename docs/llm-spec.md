@@ -44,7 +44,7 @@ program's `args()`.
   width 8), `{n:05}` (zero pad), `{n:+}`, `{n:,}` (thousands separators),
   `{n:x}` `{n:b}` `{n:o}` (hex/binary/octal), `{f:e}` (`1.500000e+03`; `{f:.1e}` gives `1.5e+03`), `{f:.1%}`,
   `{n:X}` (upper-case hex), `{s:*>6}` (fill char); Python's `f`, `d` and
-  `s` types also work (`{x:.2f}` is `{x:.2}`, `{x:f}` has 6 decimals). Parts combine in the
+  `s` types also work (`{x:.2f}` is `{x:.2}`; `{x:f}`, `{x:e}` and `{x:%}` have 6 decimals). Parts combine in the
   order fill+align, `+`, `0`, width, `,`, `.precision`, type: `{x:>15,.2}`
   is `   1,234,567.89`, `{n:+08}` is `+0000042`, `{10:04x}` is `000a`.
   A precision on a string truncates it (`{s:.3}`). Alignment works on any

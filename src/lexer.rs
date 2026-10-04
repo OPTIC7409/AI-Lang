@@ -597,24 +597,48 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Whether the `//` here can only be meant as a comment: it starts a
-    /// line (where a newline ends the statement), or prose follows it (two
-    /// words in a row, which floor division cannot be followed by).
+    /// Whether the `//` here can only be meant as a comment: nothing it
+    /// could divide comes before it, or what follows it is empty (or `/`,
+    /// `!` for a doc comment) at the start of a line, or prose: two words
+    /// in a row, the first not a name used anywhere else in the file
+    /// (`x // b mod 2` and a line `// size` continuing the one above may
+    /// be meant as division).
     fn slash_comment(&self) -> bool {
         let rest = &self.b[self.pos..self.end];
         if !rest.starts_with(b"//") || rest.starts_with(b"//=") {
             return false;
         }
-        let before = &self.b[..self.pos];
-        let line_start = before.iter().rev().take_while(|&&c| c != b'\n').all(|&c| c == b' ' || c == b'\t');
-        if line_start && self.newline_significant() {
+        let last = self.toks.iter().rev().find(|t| t.tok != Tok::Newline).map(|t| &t.tok);
+        let operand_before = matches!(
+            last,
+            Some(
+                Tok::Int(_)
+                    | Tok::Float(_)
+                    | Tok::Str(_)
+                    | Tok::Ident(_)
+                    | Tok::Upper(_)
+                    | Tok::True
+                    | Tok::False
+                    | Tok::RParen
+                    | Tok::RBracket
+                    | Tok::RBrace
+                    | Tok::Question
+            )
+        );
+        if !operand_before {
             return true;
         }
         let line = rest[2..].split(|&c| c == b'\n').next().unwrap_or(&[]);
-        let line = std::str::from_utf8(line).unwrap_or("");
+        let line = std::str::from_utf8(line).unwrap_or("").trim_end_matches('\r');
+        let before = &self.b[..self.pos];
+        let line_start = before.iter().rev().take_while(|&&c| c != b'\n').all(|&c| c == b' ' || c == b'\t');
+        if line_start && self.newline_significant() && (line.trim().is_empty() || line.starts_with(['/', '!'])) {
+            return true;
+        }
         let mut words = line.split([' ', '\t']).filter(|w| !w.is_empty());
-        let word = |w: Option<&str>| w.filter(|w| w.chars().all(|c| c.is_ascii_alphabetic()) && !KEYWORDS.contains(w)).is_some();
-        line.starts_with([' ', '\t']) && word(words.next()) && word(words.next())
+        let (Some(first), Some(second)) = (words.next(), words.next()) else { return false };
+        let word = |w: &str| w.chars().all(|c| c.is_ascii_alphabetic()) && !KEYWORDS.contains(&w);
+        line.starts_with([' ', '\t']) && word(first) && word(second) && whole_word_count(self.src, first) == 1
     }
 
     fn continuation_ahead(&self) -> bool {
@@ -690,7 +714,13 @@ impl<'a> Lexer<'a> {
                 let mut d = self
                     .err("E0001", "strings need no `f` prefix", start, start + 1)
                     .help("every string interpolates: \"total: {n}\" (write `\\{` for a literal brace)");
-                if !line.contains("{{") && !line.contains("}}") {
+                // (Not when a spec rounds: Python rounds exact halves to even,
+                // Cogito away from zero, as `round` does.)
+                let rounds = line.split('{').skip(1).any(|part| {
+                    let spec = part.split('}').next().unwrap_or("").rsplit_once(':').map_or("", |(_, spec)| spec);
+                    spec.contains('%') || spec.split('.').nth(1).is_some_and(|p| p.starts_with(|c: char| c.is_ascii_digit()))
+                });
+                if !line.contains("{{") && !line.contains("}}") && !rounds {
                     d = d.fix(Span::new(self.file, start, start + 1), "");
                 }
                 self.substituted.push(d);
@@ -1287,7 +1317,25 @@ impl<'a> Lexer<'a> {
         let close;
         loop {
             if p + 3 > self.end {
-                return Err(self.err("E0002", "unterminated triple-quoted string", start, start + 3).label("string starts here"));
+                let mut d = self.err("E0002", "unterminated triple-quoted string", start, start + 3).label("string starts here");
+                // The text of an earlier triple-quoted string held `"""`,
+                // which ended it early (`"Book ""Dune""",1`): the quotes
+                // here were meant to close that one.
+                let last_str = self.toks.iter().rev().find(|t| matches!(t.tok, Tok::Str(_)));
+                if let Some(prev) = last_str.filter(|t| self.src[t.span.start as usize..].starts_with("\"\"\"")) {
+                    let end = prev.span.end as usize;
+                    let rest_of_line = self.src[end..].split('\n').next().unwrap_or("");
+                    if !rest_of_line.trim().is_empty() {
+                        let (line, col) = line_col(self.src, end - 3);
+                        d = d
+                            .note(format!(
+                                "the triple-quoted string before this one was closed early, by the `\"\"\"` at line {}, column {}",
+                                line, col
+                            ))
+                            .help("inside a triple-quoted string, write quotes as `\\\"`, or use a raw string `r#\"\"\"...\"\"\"#`");
+                    }
+                }
+                return Err(d);
             }
             if self.b[p] == b'\\' {
                 p += 2;
@@ -1384,6 +1432,24 @@ pub fn dedent(raw: &str) -> String {
     }
     let indent = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start_matches([' ', '\t']).len()).min().unwrap_or(0);
     lines.iter().map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() }).collect::<Vec<_>>().join("\n")
+}
+
+/// How many times `word` occurs in `src` as a whole word.
+pub fn whole_word_count(src: &str, word: &str) -> usize {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    src.match_indices(word)
+        .filter(|(i, _)| {
+            let before = src[..*i].chars().next_back();
+            let after = src[i + word.len()..].chars().next();
+            !before.is_some_and(is_word) && !after.is_some_and(is_word)
+        })
+        .count()
+}
+
+/// The 1-based line and column (in characters) of a byte offset.
+fn line_col(src: &str, offset: usize) -> (usize, usize) {
+    let before = &src[..offset];
+    (before.matches('\n').count() + 1, before.chars().rev().take_while(|&c| c != '\n').count() + 1)
 }
 
 /// Where a string body ends: the index of the unescaped `quote` in `s`, on
