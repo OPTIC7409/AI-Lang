@@ -1138,6 +1138,25 @@ impl Interp {
     }
 
     fn eval_cond(&mut self, e: &Expr, env: &mut Env, what: &str) -> R<bool> {
+        // `i < n` and the like on Ints: no Bool value in between.
+        if let ExprKind::Binary { op: op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne), lhs, rhs } = &e.kind {
+            let a = self.operand(lhs, env)?;
+            let b = self.operand(rhs, env)?;
+            if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+                return Ok(match op {
+                    BinOp::Lt => x < y,
+                    BinOp::Le => x <= y,
+                    BinOp::Gt => x > y,
+                    BinOp::Ge => x >= y,
+                    BinOp::Eq => x == y,
+                    _ => x != y,
+                });
+            }
+            return match self.binop(*op, a, b, e.span)? {
+                Value::Bool(b) => Ok(b),
+                other => Err(self.fail(self.not_bool(e.span, what, &other))),
+            };
+        }
         match self.eval(e, env)? {
             Value::Bool(b) => Ok(b),
             other => Err(self.fail(self.not_bool(e.span, what, &other))),
@@ -1180,7 +1199,7 @@ impl Interp {
         }
         let mut named = Vec::new();
         for a in args {
-            let v = self.eval(&a.value, env)?;
+            let v = self.operand(&a.value, env)?;
             match &a.name {
                 None => {
                     if !named.is_empty() {
@@ -1192,6 +1211,17 @@ impl Interp {
             }
         }
         Ok((pos, named))
+    }
+
+    /// An operand: a local variable or an Int literal is read directly,
+    /// without a call to `eval`.
+    #[inline(always)]
+    fn operand(&mut self, e: &Expr, env: &mut Env) -> R {
+        match &e.kind {
+            ExprKind::Var(Var { res: VarRes::Local(s), .. }) => Ok(env.locals[*s as usize].clone()),
+            ExprKind::Int(n) => Ok(Value::Int(*n)),
+            _ => self.eval(e, env),
+        }
     }
 
     pub fn eval(&mut self, e: &Expr, env: &mut Env) -> R {
@@ -1226,6 +1256,18 @@ impl Interp {
             }
             ExprKind::Call { callee, args } => {
                 let f = self.eval(callee, env)?;
+                if let Value::Func(c) = &f {
+                    let d = &c.def;
+                    if args.len() == d.params.len()
+                        && !d.mutating
+                        && d.requires.is_empty()
+                        && d.ensures.is_empty()
+                        && args.iter().all(|a| a.name.is_none())
+                        && d.params.iter().all(|p| p.pat.is_none())
+                    {
+                        return self.call_simple(c, args, env, e.span);
+                    }
+                }
                 let (pos, named) = self.eval_args(args, env, None)?;
                 self.call_value(&f, pos, named, e.span)
             }
@@ -1242,8 +1284,15 @@ impl Interp {
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                let a = self.eval(lhs, env)?;
-                let b = self.eval(rhs, env)?;
+                let a = self.operand(lhs, env)?;
+                let b = self.operand(rhs, env)?;
+                // Int arithmetic and comparisons without the general `binop`
+                // (which also reports the overflow, if there is one).
+                if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+                    if let Some(v) = int_binop(*op, *x, *y) {
+                        return Ok(v);
+                    }
+                }
                 self.binop(*op, a, b, e.span)
             }
             ExprKind::And(a, b) => {
@@ -2622,6 +2671,100 @@ impl Interp {
         Ok((r?, first))
     }
 
+    /// Run a function's body (its parameters already bound) and check the
+    /// result against the declared return type.
+    fn run_body(&mut self, def: &Rc<FnDef>, env: &mut Env) -> R {
+        let mut from_try = None;
+        self.last_try_return = None;
+        let mut result = match self.eval(&def.body, env) {
+            Ok(v) => v,
+            Err(Ctrl::Return(v)) => {
+                from_try = self.try_span.take();
+                v
+            }
+            Err(Ctrl::Break(_)) | Err(Ctrl::Continue) => Value::Unit,
+            Err(e) => return Err(e),
+        };
+        self.last_try_return = from_try;
+        // (Scalars of the declared type are the common case: no further check.)
+        let fits = |t: &Ty, v: &Value| {
+            matches!((t, v), (Ty::Int, Value::Int(_)) | (Ty::Float, Value::Float(_)) | (Ty::Str, Value::Str(_)) | (Ty::Bool, Value::Bool(_)))
+        };
+        if let Some(t) = def.ret.as_ref().filter(|t| !fits(&t.ty, &result)) {
+            if let Some(tsp) = from_try.filter(|_| !self.has_type(&result, &t.ty, false)) {
+                let (what, help) = if result.is_option() {
+                    ("`None`", "convert the Option first: `.ok_or(\"what went wrong\")?`")
+                } else {
+                    ("an `Err(..)`", "convert the Result first: `.ok()?`")
+                };
+                return Err(self.fail(
+                    self.diag(
+                        tsp,
+                        "E0117",
+                        format!("`?` returned {} early from `{}`, which is declared to return {}", what, def.display_name(), t.ty),
+                    )
+                    .label("returns early here")
+                    .help(help),
+                ));
+            }
+            if !self.has_type(&result, &t.ty, false) {
+                result = self.conform(result, &t.ty).map_err(|m| {
+                    self.fail(
+                        self.diag(t.span, "E0200", format!("`{}` returned the wrong type: {}", def.display_name(), m))
+                            .label("declared return type")
+                            .help("this is a bug in the function: it returned a value that does not match its declared return type"),
+                    )
+                })?;
+            }
+        }
+        Ok(result)
+    }
+
+    /// A call of a plain function: an argument for every parameter, given
+    /// by position, and no contracts or parameter patterns. This is the
+    /// common case, so it skips the general path's bookkeeping; anything
+    /// unusual (an argument that needs converting, the depth limit) is left
+    /// to `call_closure_full`, which reports it in the usual way.
+    #[inline(never)]
+    fn call_simple(&mut self, c: &Rc<Closure>, args: &[Arg], env: &mut Env, span: Span) -> R {
+        let def = c.def.clone();
+        let mut locals = self.take_vec(def.num_slots as usize);
+        locals.resize(def.num_slots as usize, Value::Unit);
+        for (p, a) in def.params.iter().zip(args) {
+            match self.operand(&a.value, env) {
+                Ok(v) => locals[p.slot as usize] = v,
+                Err(e) => {
+                    self.give_vec(locals);
+                    return Err(e);
+                }
+            }
+        }
+        let scalar = |t: &Ty, v: &Value| {
+            matches!((t, v), (Ty::Int, Value::Int(_)) | (Ty::Float, Value::Float(_)) | (Ty::Str, Value::Str(_)) | (Ty::Bool, Value::Bool(_)))
+        };
+        let ok = self.stack.len() < self.max_depth
+            && def.params.iter().all(|p| match &p.ty {
+                None => true,
+                Some(t) => scalar(&t.ty, &locals[p.slot as usize]) || self.has_type(&locals[p.slot as usize], &t.ty, false),
+            });
+        if !ok {
+            let pos: Vec<Value> = def.params.iter().map(|p| std::mem::take(&mut locals[p.slot as usize])).collect();
+            self.give_vec(locals);
+            return self.call_closure(c, pos, vec![], span);
+        }
+        if let Err(e) = self.tick(span) {
+            self.give_vec(locals);
+            return Err(e);
+        }
+        let mut env = Env { locals, closure: Some(c.clone()) };
+        self.stack.push(Frame { name: def.display_name(), call_span: span });
+        let r = self.run_body(&def, &mut env);
+        self.stack.pop();
+        let locals = std::mem::take(&mut env.locals);
+        self.give_vec(locals);
+        r
+    }
+
     fn call_body(&mut self, def: &Rc<FnDef>, env: &mut Env, filled: u64, span: Span) -> R {
         for (i, p) in def.params.iter().enumerate() {
             if filled & (1 << i) == 0 {
@@ -2725,45 +2868,7 @@ impl Interp {
                 env.locals[*slot as usize] = v;
             }
         }
-        let mut from_try = None;
-        self.last_try_return = None;
-        let mut result = match self.eval(&def.body, env) {
-            Ok(v) => v,
-            Err(Ctrl::Return(v)) => {
-                from_try = self.try_span.take();
-                v
-            }
-            Err(Ctrl::Break(_)) | Err(Ctrl::Continue) => Value::Unit,
-            Err(e) => return Err(e),
-        };
-        self.last_try_return = from_try;
-        if let Some(t) = &def.ret {
-            if let (Some(tsp), false) = (from_try, self.has_type(&result, &t.ty, false)) {
-                let (what, help) = if result.is_option() {
-                    ("`None`", "convert the Option first: `.ok_or(\"what went wrong\")?`")
-                } else {
-                    ("an `Err(..)`", "convert the Result first: `.ok()?`")
-                };
-                return Err(self.fail(
-                    self.diag(
-                        tsp,
-                        "E0117",
-                        format!("`?` returned {} early from `{}`, which is declared to return {}", what, def.display_name(), t.ty),
-                    )
-                    .label("returns early here")
-                    .help(help),
-                ));
-            }
-            if !self.has_type(&result, &t.ty, false) {
-                result = self.conform(result, &t.ty).map_err(|m| {
-                    self.fail(
-                        self.diag(t.span, "E0200", format!("`{}` returned the wrong type: {}", def.display_name(), m))
-                            .label("declared return type")
-                            .help("this is a bug in the function: it returned a value that does not match its declared return type"),
-                    )
-                })?;
-            }
-        }
+        let result = self.run_body(def, env)?;
         if self.contracts && !def.ensures.is_empty() {
             env.locals[def.result_slot as usize] = result.clone();
             for en in &def.ensures {
@@ -3082,6 +3187,33 @@ impl Interp {
             other => Err(self.err(span, "E0209", format!("{} must return a Bool, but it returned {}", what, describe(&other)))),
         }
     }
+}
+
+/// Int arithmetic and comparisons that need no error: `None` for overflow
+/// (and for operators handled only by `binop`).
+#[inline(always)]
+fn int_binop(op: BinOp, x: i64, y: i64) -> Option<Value> {
+    Some(match op {
+        BinOp::Add => Value::Int(x.checked_add(y)?),
+        BinOp::Sub => Value::Int(x.checked_sub(y)?),
+        BinOp::Mul => Value::Int(x.checked_mul(y)?),
+        // (Division by zero and `min_int // -1` are left to `binop`.)
+        BinOp::Mod if y != 0 => {
+            let r = x.checked_rem(y).unwrap_or(0);
+            Value::Int(if r != 0 && ((r < 0) != (y < 0)) { r + y } else { r })
+        }
+        BinOp::FloorDiv if y != 0 => {
+            let q = x.checked_div(y)?;
+            Value::Int(if (x % y != 0) && ((x < 0) != (y < 0)) { q - 1 } else { q })
+        }
+        BinOp::Lt => Value::Bool(x < y),
+        BinOp::Le => Value::Bool(x <= y),
+        BinOp::Gt => Value::Bool(x > y),
+        BinOp::Ge => Value::Bool(x >= y),
+        BinOp::Eq => Value::Bool(x == y),
+        BinOp::Ne => Value::Bool(x != y),
+        _ => return None,
+    })
 }
 
 /// `+=` on strings and lists appends in place when the value is not shared.
