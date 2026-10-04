@@ -512,6 +512,30 @@ inputs in 4,000. And four of five `verify` failures were overflows from
 inputs such as `max_int`, which is right but tedious, so those reports now
 say how to rule such inputs out.
 
+A fourth round tested type invariants, added after round 3, with eight
+programs whose data structures state their conditions in `where` clauses
+(fractions in lowest terms, a ledger whose balance is the sum of its
+transactions, a generic heap and ring buffer, calendar dates). Three of
+the eight passed `run`, `test` and `verify` on the first attempt. The other
+five were the agent's own mistakes (an uppercase `let`, a closure assigning
+to a captured `var`, a ring buffer with no bound on its capacity), each
+reported clearly, but the round found rough edges in the new feature:
+`verify` gave up on any type whose invariant random values rarely satisfy
+instead of skipping those attempts; a violation caught by `catch` left the
+broken value behind; and `.unwrap()` used as a check was reported as an
+unused result. An adversarial agent then found that a `return` inside a
+`where` clause escaped into the code building the value, that a clause
+building a value of its own type overflowed the native stack, that
+`verify` never checked a `!` function's argument when it returned, that a
+crafted field name could make two types share a fingerprint and skip a
+check, and that errors re-raised at every level of a deep recursion took
+quadratic time to build their stack traces. All of these are fixed: `return`
+and `?` in contracts are compile errors, invariant checks count as calls,
+types are interned instead of hashed, and stack traces keep only their ends.
+The round also turned up a performance cliff outside invariants: a user
+`push!` next to the built-in one made every `push!` on a typed list re-check
+the list.
+
 ## Future directions
 
 - Deeper static checking: arguments of built-ins, the parameter types of
