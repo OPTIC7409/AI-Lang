@@ -63,9 +63,15 @@ pub fn check_program(ctx: &Ctx, prog: &Program) -> Vec<Diagnostic> {
     }
     for item in &prog.items {
         match item {
-            Item::Fn(def) => c.function(def, &[]),
-            Item::Test(t) => c.function(&t.func, &[]),
-            Item::Property(p) => c.function(&p.func, &[]),
+            Item::Fn(def) => {
+                c.function(def, &[]);
+            }
+            Item::Test(t) => {
+                c.function(&t.func, &[]);
+            }
+            Item::Property(p) => {
+                c.function(&p.func, &[]);
+            }
             Item::Type(td) => c.invariant(td.id),
             _ => {}
         }
@@ -308,7 +314,8 @@ impl<'a> Checker<'a> {
         self.frames.pop();
     }
 
-    fn function(&mut self, def: &FnDef, captures: &[Ty]) {
+    /// Check a function's body; returns the type of the body's value.
+    fn function(&mut self, def: &FnDef, captures: &[Ty]) -> Ty {
         let mut reassigned = HashSet::new();
         scan(&def.body, &mut reassigned);
         let mut frame = Frame {
@@ -375,6 +382,7 @@ impl<'a> Checker<'a> {
             self.condition(e, "an `ensures` clause");
         }
         self.frames.pop();
+        body
     }
 
     fn fn_type(&self, def: &FnDef) -> Ty {
@@ -851,8 +859,16 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Lambda(def) => {
                 let caps = self.capture_types(def);
-                self.function(def, &caps);
-                self.fn_type(def)
+                let body = self.function(def, &caps);
+                let mut t = self.fn_type(def);
+                // Without a declared result type, the body's type is the
+                // result's (unless a `return` or `?` may leave early).
+                if let Ty::Fn(_, r) = &mut t {
+                    if def.ret.is_none() && !leaves_early(&def.body) {
+                        **r = body;
+                    }
+                }
+                t
             }
             // A loop's value is `()`, but a `return` inside it may be the
             // function's real result, so it is not treated as known.
@@ -1180,6 +1196,18 @@ fn tail_span(e: &Expr) -> Span {
     }
 }
 
+/// Whether `e` contains a `return` or `?` (outside nested functions).
+fn leaves_early(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Lambda(_) => return false,
+        ExprKind::Return(_) | ExprKind::Try(_) => return true,
+        _ => {}
+    }
+    let mut found = false;
+    for_each_child(e, &mut |c| found = found || leaves_early(c));
+    found
+}
+
 /// The types a built-in calls its callback argument (at position `pos`,
 /// counting the collection as 0) with, given the collection's type:
 /// `xs.map(fn(x) => ...)` on a `List[Int]` calls it with an Int.
@@ -1293,6 +1321,21 @@ impl Kind {
 fn builtin_result(name: &str, args: &[(Option<Name>, Ty, Span)]) -> Ty {
     let first = args.first().map(|a| a.1.clone()).unwrap_or(Ty::Any);
     let elem = element(&first);
+    // The result type of a callback argument, when known.
+    let callback = match args.get(1).map(|a| &a.1) {
+        Some(Ty::Fn(_, r)) if !matches!(**r, Ty::Any | Ty::Generic(_) | Ty::Param(..)) => Some((**r).clone()),
+        _ => None,
+    };
+    let seq = matches!(first, Ty::List(_) | Ty::Set(_) | Ty::Range | Ty::Str);
+    match (name, &first, callback) {
+        ("map", _, Some(r)) if seq => return list(r),
+        ("map", Ty::Named { id, .. }, Some(r)) if *id == OPTION_ID => return option(r),
+        ("map", Ty::Named { id, args: targs, .. }, Some(r)) if *id == RESULT_ID && targs.len() == 2 => return result(r, targs[1].clone()),
+        ("flat_map", _, Some(r @ Ty::List(_))) if seq => return r,
+        ("find" | "min_by" | "max_by", _, _) if seq => return option(elem),
+        ("sort_by" | "sort_with", Ty::List(_), _) => return first.clone(),
+        _ => {}
+    }
     match name {
         "len" | "count" | "ord" | "gcd" | "lcm" | "bit_and" | "bit_or" | "bit_xor" | "bit_not" | "shl" | "shr" | "wrapping_add" | "wrapping_sub"
         | "wrapping_mul" | "hash" | "random_int" | "int" | "floor" | "ceil" | "trunc" | "sign" => Ty::Int,
