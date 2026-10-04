@@ -24,6 +24,8 @@ use crate::types::{Name, Ty};
 use crate::value::Text;
 use std::rc::Rc;
 
+const TERNARY_HELP: &str = "Cogito has no `c ? a : b`; write `if c { a } else { b }`";
+
 type PResult<T> = Result<T, Diagnostic>;
 
 pub struct Parser<'s> {
@@ -187,8 +189,18 @@ impl<'s> Parser<'s> {
             Diagnostic::error("E0010", format!("expected {}, found {}", expected, found)).at(self.span()).label(format!("expected {}", expected));
         if let Tok::Eof = self.peek() {
             d = d.label("the file ended here").help("check for a missing closing bracket or brace");
+        } else if self.looks_like_ternary() {
+            d = d.help(TERNARY_HELP);
         }
         d
+    }
+
+    /// After `c ?` with a `:` later on the line: `c ? a : b` from another
+    /// language, whose `?` was read as the try operator.
+    fn looks_like_ternary(&self) -> bool {
+        self.pos > 0
+            && self.toks[self.pos - 1].tok == Tok::Question
+            && self.toks[self.pos..].iter().take_while(|t| !matches!(t.tok, Tok::Newline | Tok::Eof)).any(|t| t.tok == Tok::Colon)
     }
 
     fn expect(&mut self, t: &Tok, what: &str) -> PResult<Span> {
@@ -231,6 +243,7 @@ impl<'s> Parser<'s> {
                     Tok::Ident(_) | Tok::Upper(_) if matches!(self.toks[self.pos - 1].tok, Tok::Ident(_) | Tok::Upper(_)) => {
                         d.help("two names in a row: is an operator or a comma missing?")
                     }
+                    _ if self.looks_like_ternary() => d.help(TERNARY_HELP),
                     _ => d.help("put each statement on its own line, or separate statements with `;`"),
                 };
                 Err(d)
@@ -1280,6 +1293,11 @@ impl<'s> Parser<'s> {
             }
             Tok::While => {
                 self.bump();
+                if matches!(self.peek(), Tok::Let | Tok::Var) {
+                    return Err(Diagnostic::error("E0001", "Cogito has no `while let`")
+                        .at(start.to(self.span()))
+                        .help("loop with `while true` and a `match` whose other arm is `break`:\n`while true { match xs.pop!() { Some(x) => ..., None => break } }`"));
+                }
                 let cond = self.expr()?;
                 self.skip_newlines();
                 let body = self.block()?;

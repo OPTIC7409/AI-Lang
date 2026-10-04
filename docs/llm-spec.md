@@ -507,3 +507,23 @@ parameters.
 - Annotate function parameters and return types: annotations are checked,
   documented, and drive property-test generation.
 - Write `test` and `property` blocks next to the code they test.
+
+## Habits from other languages that do not work here
+
+These are the mistakes AI agents made most often while learning Cogito from
+this document. Each one is an error with a hint, but avoiding it saves a run.
+
+- `if let` / `while let`: use `match`, or `is` for a test (`if r is Ok(_)`).
+- `c ? a : b`: use `if c { a } else { b }`. `?` only propagates errors.
+- `&&`, `||`, `!x`: use `and`, `or`, `not x`. `x++`: use `x += 1`.
+- `null`/`nil`: use `None` (an `Option`).
+- `let MAX = 10`: names of values start lowercase; uppercase is for types.
+- `var m: Map[Str, Int] = {}`: `{}` is an empty block. An empty map is `[:]`.
+- `"{"` in a string starts an interpolation; write `"\{"` for a brace.
+- `a < b < c`: comparisons do not chain; write `a < b and b < c`.
+- `7 / 2` is `3.5`; `7 // 2` is `3`.
+- `xs.sort()` returns a sorted copy; `xs.sort!()` sorts `xs` itself.
+- A closure cannot assign to a variable it captures (`count += 1` inside
+  `fn() => ...`); use a `for` loop, or pass the value to a `!` function.
+- Defining `push!` (or any built-in's name) with an untyped first parameter
+  hides the built-in for every value; give the parameter its type.

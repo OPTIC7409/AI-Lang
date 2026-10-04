@@ -1,0 +1,5 @@
+# expect: E0001
+var xs = [1]
+while let Some(x) = xs.pop!() {
+  print(x)
+}
