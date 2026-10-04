@@ -1,8 +1,11 @@
 # A bounded stack whose operations state their contracts, including how
-# they change the stack (with `old`). `cogito verify examples/stack.cog`
-# checks every contract against random stacks and values.
+# they change the stack (with `old`). The type's invariant says what every
+# stack satisfies. `cogito verify examples/stack.cog` checks every contract
+# against random (valid) stacks and values.
 
 type Stack = { items: List[Int], capacity: Int }
+  where capacity > 0
+  where items.len() <= capacity
 
 fn new_stack(capacity: Int) -> Stack
   requires capacity > 0
@@ -14,7 +17,6 @@ fn is_full(s: Stack) -> Bool => s.items.len() >= s.capacity
 fn push!(s: Stack, x: Int) -> Bool
   ensures result == not old(is_full(s))
   ensures if result { s.items.last() == Some(x) } else { s == old(s) }
-  ensures s.items.len() <= max(s.capacity, old(s.items.len()))
 {
   if is_full(s) {
     return false

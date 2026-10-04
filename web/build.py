@@ -16,6 +16,8 @@ EXAMPLES = [
      "Records, enums, pattern matching and Results. Press Test to run the test and the property at the bottom."),
     ("Contracts find a bug", "web/examples/contracts.cog", "verify",
      "Verify generated inputs until the promise broke, then shrank the failure to a small counterexample. Fix it as the comment says."),
+    ("Types with invariants", "web/examples/invariants.cog", "verify",
+     "Every Span keeps lo <= hi. Verify tries valid spans only, and finds the pair that makes overlap build an invalid one."),
     ("Errors explain themselves", "web/examples/errors.cog", "run",
      "The type error is found before the program runs, so nothing is printed until it is fixed."),
     ("Reading input", "web/examples/stdin.cog", "run",

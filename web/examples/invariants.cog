@@ -1,0 +1,26 @@
+# A type can state what every value of it satisfies, with `where`. Building
+# a value that breaks it is an error, and Verify generates only valid
+# values as inputs. Press Verify.
+
+type Span = { lo: Int, hi: Int }
+  where lo <= hi
+
+fn overlap(a: Span, b: Span) -> Option[Span]
+  ensures match result {
+    Some(s) => a.lo <= s.lo and s.hi <= a.hi
+    None => true
+  }
+{
+  let lo = max(a.lo, b.lo)
+  let hi = min(a.hi, b.hi)
+  Some(Span(lo, hi))
+}
+
+# Two spans that do not overlap give `lo > hi`. To fix it, replace the
+# last line of `overlap` with:
+#
+#   if lo > hi { None } else { Some(Span(lo, hi)) }
+#
+# and press Verify again.
+
+print(overlap(Span(1, 5), Span(3, 9)))
