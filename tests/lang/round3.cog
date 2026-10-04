@@ -165,3 +165,15 @@ test "get works on ranges, as indexing does" {
   assert (0..10).get(3) == Some(3) and (0..10).get(-1) == Some(9)
   assert (0..10).get(10) == None and (5..).get(2) == Some(7)
 }
+
+type Twin = Leaf | Node(Twin, Twin)
+
+test "values that share structure compare and hash in linear time" {
+  var t = Node(Leaf, Leaf)
+  var u = Node(Leaf, Leaf)
+  for _ in 0..80 {
+    t = Node(t, t)
+    u = Node(u, u)
+  }
+  assert t == u and compare(t, u) == Equal and hash(t) == hash(u)
+}

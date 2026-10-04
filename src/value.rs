@@ -335,9 +335,14 @@ type HashMemo = Option<HashMap<usize, u64>>;
 /// always hashed to a u64 of their own, so that a shared list is hashed
 /// once however many times it appears.
 fn hash_child<H: Hasher>(x: &Value, h: &mut H, memo: &mut HashMemo) {
-    if let Value::List(c) | Value::Tuple(c) = x {
-        let key = Rc::as_ptr(c) as *const u8 as usize;
-        let shared = Rc::strong_count(c) > 1;
+    // (A shared enum value with fields can double too: `t = N(t, t)`.)
+    let node = match x {
+        Value::List(c) | Value::Tuple(c) => Some((Rc::as_ptr(c) as *const u8 as usize, Rc::strong_count(c))),
+        Value::Variant(vv) if !vv.values.is_empty() => Some((Rc::as_ptr(vv) as *const u8 as usize, Rc::strong_count(vv))),
+        _ => None,
+    };
+    if let Some((key, count)) = node {
+        let shared = count > 1;
         if let (true, Some(v)) = (shared, memo.as_ref().and_then(|m| m.get(&key))) {
             v.hash(h);
             return;
@@ -580,12 +585,26 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 /// this, comparing two such values could take exponential time.
 type EqMemo = Option<std::collections::HashSet<(usize, usize)>>;
 
-fn shared_pair<T>(x: &Rc<T>, y: &Rc<T>) -> Option<(usize, usize)> {
-    if Rc::strong_count(x) > 1 && Rc::strong_count(y) > 1 {
+/// The memo key for a pair of nodes, when both are shared and have children
+/// that are themselves containers (only those can make a comparison blow
+/// up; memoizing `Red == Red` would only cost time).
+fn shared_pair<T>(x: &Rc<T>, y: &Rc<T>, nested: impl FnOnce() -> bool) -> Option<(usize, usize)> {
+    if Rc::strong_count(x) > 1 && Rc::strong_count(y) > 1 && nested() {
         Some((Rc::as_ptr(x) as *const u8 as usize, Rc::as_ptr(y) as *const u8 as usize))
     } else {
         None
     }
+}
+
+/// Whether any of the values is a container with something in it.
+fn any_nested<'a>(mut vs: impl Iterator<Item = &'a Value>) -> bool {
+    vs.any(|v| match v {
+        Value::List(xs) | Value::Tuple(xs) => !xs.is_empty(),
+        Value::Map(m) => !m.is_empty(),
+        Value::Record(r) => !r.values.is_empty(),
+        Value::Variant(vv) => !vv.values.is_empty(),
+        _ => false,
+    })
 }
 
 fn memo_eq(memo: &mut EqMemo, key: Option<(usize, usize)>, f: impl FnOnce(&mut EqMemo) -> bool) -> bool {
@@ -610,12 +629,16 @@ fn eq_inner(a: &Value, b: &Value, memo: &mut EqMemo) -> bool {
         (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => cmp_int_float(*x, *y) == Some(Ordering::Equal),
         (Value::Str(x), Value::Str(y)) => Rc::ptr_eq(x, y) || x == y,
         (Value::List(x), Value::List(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
-            Rc::ptr_eq(x, y) || (x.len() == y.len() && memo_eq(memo, shared_pair(x, y), |m| x.iter().zip(y.iter()).all(|(a, b)| eq_inner(a, b, m))))
+            Rc::ptr_eq(x, y)
+                || (x.len() == y.len()
+                    && memo_eq(memo, shared_pair(x, y, || any_nested(x.iter())), |m| x.iter().zip(y.iter()).all(|(a, b)| eq_inner(a, b, m))))
         }
         (Value::Map(x), Value::Map(y)) => {
             Rc::ptr_eq(x, y)
                 || (x.len() == y.len()
-                    && memo_eq(memo, shared_pair(x, y), |m| x.entries.iter().all(|(k, v)| y.get(k).is_some_and(|w| eq_inner(v, w, m)))))
+                    && memo_eq(memo, shared_pair(x, y, || any_nested(x.entries.iter().flat_map(|(k, v)| [k, v]))), |m| {
+                        x.entries.iter().all(|(k, v)| y.get(k).is_some_and(|w| eq_inner(v, w, m)))
+                    }))
         }
         (Value::Record(x), Value::Record(y)) => {
             let same_ty = match (&x.ty, &y.ty) {
@@ -625,12 +648,16 @@ fn eq_inner(a: &Value, b: &Value, memo: &mut EqMemo) -> bool {
             };
             same_ty
                 && x.values.len() == y.values.len()
-                && memo_eq(memo, shared_pair(x, y), |m| x.names.iter().zip(&x.values).all(|(n, v)| y.get(n).is_some_and(|w| eq_inner(v, w, m))))
+                && memo_eq(memo, shared_pair(x, y, || any_nested(x.values.iter())), |m| {
+                    x.names.iter().zip(&x.values).all(|(n, v)| y.get(n).is_some_and(|w| eq_inner(v, w, m)))
+                })
         }
         (Value::Variant(x), Value::Variant(y)) => {
             x.ty.id == y.ty.id
                 && x.tag == y.tag
-                && memo_eq(memo, shared_pair(x, y), |m| x.values.iter().zip(&y.values).all(|(a, b)| eq_inner(a, b, m)))
+                && memo_eq(memo, shared_pair(x, y, || any_nested(x.values.iter())), |m| {
+                    x.values.iter().zip(&y.values).all(|(a, b)| eq_inner(a, b, m))
+                })
         }
         (Value::Range(x), Value::Range(y)) => x.start == y.start && x.end == y.end,
         (Value::Func(x), Value::Func(y)) => Rc::ptr_eq(x, y),
@@ -683,7 +710,7 @@ fn cmp_inner(a: &Value, b: &Value, memo: &mut EqMemo) -> Option<Ordering> {
             if Rc::ptr_eq(x, y) {
                 return Some(Ordering::Equal);
             }
-            match memo_cmp(memo, shared_pair(x, y), |m| cmp_seq(x.iter().zip(y.iter()), m))? {
+            match memo_cmp(memo, shared_pair(x, y, || any_nested(x.iter())), |m| cmp_seq(x.iter().zip(y.iter()), m))? {
                 Ordering::Equal => Some(x.len().cmp(&y.len())),
                 o => Some(o),
             }
@@ -692,11 +719,11 @@ fn cmp_inner(a: &Value, b: &Value, memo: &mut EqMemo) -> Option<Ordering> {
             if x.tag != y.tag {
                 return Some(x.tag.cmp(&y.tag));
             }
-            memo_cmp(memo, shared_pair(x, y), |m| cmp_seq(x.values.iter().zip(&y.values), m))
+            memo_cmp(memo, shared_pair(x, y, || any_nested(x.values.iter())), |m| cmp_seq(x.values.iter().zip(&y.values), m))
         }
         (Value::Record(x), Value::Record(y)) if x.ty.as_ref().map(|t| t.id) == y.ty.as_ref().map(|t| t.id) => {
             if x.names == y.names {
-                return memo_cmp(memo, shared_pair(x, y), |m| cmp_seq(x.values.iter().zip(&y.values), m));
+                return memo_cmp(memo, shared_pair(x, y, || any_nested(x.values.iter())), |m| cmp_seq(x.values.iter().zip(&y.values), m));
             }
             // Anonymous records with the same fields in another order compare
             // field by field in alphabetical order of the names.

@@ -1222,6 +1222,24 @@ impl Interp {
         Ok((pos, named))
     }
 
+    /// `v[i]` in general. (`xs[a..=-1]`: an inclusive end counted from the
+    /// back runs through that element; the stored exclusive end, -1 + 1 = 0,
+    /// would otherwise mean the front.)
+    #[inline(never)]
+    fn index_general(&mut self, v: Value, mut i: Value, index: &Expr, span: Span) -> R {
+        if let (ExprKind::Range { inclusive: true, end: Some(_), .. }, Value::Range(r)) = (&index.kind, &i) {
+            if let Some(end) = r.end.filter(|end| *end <= 0) {
+                let len = match &v {
+                    Value::List(xs) | Value::Tuple(xs) => xs.len(),
+                    Value::Str(s) => s.char_len(),
+                    _ => 0,
+                };
+                i = Value::Range(Rc::new(RangeVal { start: r.start, end: Some(end + len as i128) }));
+            }
+        }
+        self.index_value(v, i, span)
+    }
+
     /// An operand: a local variable or an Int literal is read directly,
     /// without a call to `eval`.
     #[inline(always)]
@@ -1248,7 +1266,12 @@ impl Interp {
             ExprKind::Index { target, index } => {
                 // `xs[i]` on a local list: no copy of the list's handle. (Only
                 // for an index that cannot change the list while it is computed.)
-                if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), true) = (&target.kind, simple_index(index)) {
+                if let ExprKind::Var(Var { res: VarRes::Local(s), .. }) = &target.kind {
+                    if !simple_index(index) {
+                        let v = env.locals[*s as usize].clone();
+                        let i = self.eval(index, env)?;
+                        return self.index_general(v, i, index, e.span);
+                    }
                     let i = self.operand(index, env)?;
                     if let (Value::List(xs), Value::Int(i)) = (&env.locals[*s as usize], &i) {
                         if let Some(j) = norm_index(*i, xs.len()) {
@@ -1259,21 +1282,8 @@ impl Interp {
                     return self.index_value(v, i, e.span);
                 }
                 let v = self.eval(target, env)?;
-                let mut i = self.eval(index, env)?;
-                // `xs[a..=-1]`: an inclusive end counted from the back runs
-                // through that element (the stored exclusive end, -1 + 1 = 0,
-                // would otherwise mean the front).
-                if let (ExprKind::Range { inclusive: true, end: Some(_), .. }, Value::Range(r)) = (&index.kind, &i) {
-                    if let Some(end) = r.end.filter(|end| *end <= 0) {
-                        let len = match &v {
-                            Value::List(xs) | Value::Tuple(xs) => xs.len(),
-                            Value::Str(s) => s.char_len(),
-                            _ => 0,
-                        };
-                        i = Value::Range(Rc::new(RangeVal { start: r.start, end: Some(end + len as i128) }));
-                    }
-                }
-                self.index_value(v, i, e.span)
+                let i = self.eval(index, env)?;
+                self.index_general(v, i, index, e.span)
             }
             ExprKind::Call { callee, args } => {
                 let f = self.eval(callee, env)?;
