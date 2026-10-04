@@ -22,6 +22,7 @@ for name in names {
   let s = scores[name]
   print(f"{name}: {s:.1f} -> {grade(s)}")
 }
-let passed = names.filter(fn(n) => grade(scores[n]) != "C")
-if !passed.isEmpty() { print("passed: {passed.join(", ")}") }
-print("average: {average(scores.values()):.2f}")
+// who passed, and the class average
+let passed = names.filter(n => grade(scores[n]) != "C")
+if !passed.isEmpty() { console.log("passed: {passed.join(", ")}") }
+print("average: {average(scores.values()):.2f}, best: {Math.max(scores["ana"], scores["cy"])}")

@@ -63,7 +63,9 @@ fn print_diags(it: &Interp, diags: &[Diagnostic], color: bool) {
         cogito::err_out!("{}", d.render(&it.ctx.sm, color));
     }
     let fixable = diags.iter().filter(|d| !d.fixes.is_empty()).count();
-    if let Some(d) = diags.iter().find(|d| !d.fixes.is_empty()) {
+    // (Not for `cogito eval`'s code, which is not in a file.)
+    let in_file = |d: &&Diagnostic| Path::new(&it.ctx.sm.get(d.fixes[0].span.file).name).is_file();
+    if let Some(d) = diags.iter().filter(|d| !d.fixes.is_empty()).find(in_file) {
         let c = Colors::new(color);
         let file = &it.ctx.sm.get(d.fixes[0].span.file).name;
         cogito::err_outln!(

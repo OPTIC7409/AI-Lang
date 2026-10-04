@@ -1133,6 +1133,7 @@ impl<'s> Parser<'s> {
     }
 
     fn args(&mut self) -> PResult<(Vec<Arg>, Span)> {
+        let open_idx = self.pos;
         let open = self.expect(&Tok::LParen, "`(`")?;
         let mut args = Vec::new();
         loop {
@@ -1155,9 +1156,18 @@ impl<'s> Parser<'s> {
                 None
             };
             if self.at(&Tok::DotDot) && name.is_none() {
-                return Err(Diagnostic::error("E0010", "a spread `..xs` cannot be a function argument")
+                let d = Diagnostic::error("E0010", "a spread `..xs` cannot be a function argument")
                     .at(self.span())
-                    .help("spreads work in list literals, records and patterns: to pass the elements as one list, write `f([a, ..xs])`"));
+                    .help("spreads work in list literals, records and patterns: to pass the elements as one list, write `f([a, ..xs])`");
+                // `max(...xs)` from JavaScript. (No fix: `max(xs)` gives an
+                // Option, where JavaScript gives a number.)
+                let callee = open_idx.checked_sub(1).map(|i| &self.toks[i].tok);
+                if args.is_empty() && matches!(callee, Some(Tok::Ident(f)) if matches!(&**f, "max" | "min")) {
+                    return Err(
+                        d.help("`max(xs)` and `min(xs)` take the list itself, and return an Option (`None` for an empty list): `max(xs).unwrap()`")
+                    );
+                }
+                return Err(d);
             }
             let value = self.value_expr()?;
             if name.is_none() && args.iter().any(|a: &Arg| a.name.is_some()) {
