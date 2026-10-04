@@ -21,3 +21,9 @@ test "equal values hash equally, whatever the order" {
   let s = to_set([Pos(1, 1), Pos(1, 1), Pos(2, 2)])
   assert s.len() == 2
 }
+
+test "maps and sets with swapped values hash differently" {
+  assert hash(["a": 1, "b": 2]) != hash(["a": 2, "b": 1])
+  assert hash(to_set([(1, 2), (3, 4)])) != hash(to_set([(1, 4), (3, 2)]))
+  assert hash(["a": 1, "b": 2]) == hash(["b": 2, "a": 1])
+}

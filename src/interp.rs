@@ -293,22 +293,24 @@ impl Interp {
         Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn tick(&mut self, span: Span) -> R<()> {
         self.ticks += 1;
-        if let Some(b) = self.budget {
-            if self.ticks > b {
-                let help = if self.embedded && !self.test_mode {
-                    "this usually means an infinite loop; the playground stops programs after this many steps\nto keep the page responsive (the `cogito` command-line tool has no limit)"
-                } else {
-                    "this usually means an infinite loop, or an input too large for the algorithm;\nlimit the inputs with `where`/`requires`, or raise the limit with `--budget N`"
-                };
-                return Err(
-                    self.fail(self.diag(span, "E0219", format!("step budget exceeded: more than {} calls and loop iterations", b)).help(help))
-                );
-            }
+        match self.budget {
+            Some(b) if self.ticks > b => Err(self.over_budget(b, span)),
+            _ => Ok(()),
         }
-        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn over_budget(&self, b: u64, span: Span) -> Ctrl {
+        let help = if self.embedded && !self.test_mode {
+            "this usually means an infinite loop; the playground stops programs after this many steps\nto keep the page responsive (the `cogito` command-line tool has no limit)"
+        } else {
+            "this usually means an infinite loop, or an input too large for the algorithm;\nlimit the inputs with `where`/`requires`, or raise the limit with `--budget N`"
+        };
+        self.fail(self.diag(span, "E0219", format!("step budget exceeded: more than {} calls and loop iterations", b)).help(help))
     }
 
     // ------------------------------------------------------------ values
@@ -1493,6 +1495,7 @@ impl Interp {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
             ExprKind::Float(f) => Ok(Value::Float(*f)),
             ExprKind::Str(s) => Ok(Value::Str(s.clone())),
+            ExprKind::Var(Var { res: VarRes::Local(s), .. }) => Ok(env.locals[*s as usize].clone()),
             ExprKind::Var(v) => self.load(v, e.span, env),
             ExprKind::Field { target, name, name_span } => {
                 let v = self.eval(target, env)?;
@@ -1627,7 +1630,7 @@ impl Interp {
         }
         let mut idx = [0i64; MAX];
         for k in 0..n {
-            match self.eval(chain[n - 1 - k].unwrap_or(index), env)? {
+            match self.operand(chain[n - 1 - k].unwrap_or(index), env)? {
                 Value::Int(i) => idx[k] = i,
                 _ => return Ok(None),
             }
@@ -1912,12 +1915,33 @@ impl Interp {
                 }
             }
             CompClause::For(pat, iter) => {
-                let it = self.eval(iter, env)?;
-                let items = self.iter_values(it, iter.span)?;
-                for item in items {
-                    self.tick(iter.span)?;
-                    self.bind_loop(pat, item, env)?;
-                    self.comprehension(clauses, i + 1, body, env, out)?;
+                // (A bounded range or a list without copying its elements first.)
+                match self.eval(iter, env)? {
+                    Value::Range(r) if r.end.is_some() => {
+                        let end = r.end.unwrap_or(0);
+                        let mut k = r.start as i128;
+                        while k < end {
+                            self.tick(iter.span)?;
+                            self.bind_loop(pat, Value::Int(k as i64), env)?;
+                            self.comprehension(clauses, i + 1, body, env, out)?;
+                            k += 1;
+                        }
+                    }
+                    Value::List(xs) => {
+                        for item in xs.iter() {
+                            self.tick(iter.span)?;
+                            self.bind_loop(pat, item.clone(), env)?;
+                            self.comprehension(clauses, i + 1, body, env, out)?;
+                        }
+                    }
+                    it => {
+                        let items = self.iter_values(it, iter.span)?;
+                        for item in items {
+                            self.tick(iter.span)?;
+                            self.bind_loop(pat, item, env)?;
+                            self.comprehension(clauses, i + 1, body, env, out)?;
+                        }
+                    }
                 }
             }
         }
@@ -3419,6 +3443,36 @@ impl Interp {
                     }
                     other => Err(self.err(span, "E0200", format!("argument 1 of `push!` must be a List, got {}", describe(other)))),
                 };
+            }
+        }
+        // Fast path: a simple built-in `!` function (one that calls no
+        // function of yours) on a local list, set or map declared without a
+        // type: there is no type to check and no invariant to keep.
+        if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), VarRes::Global(g), None) = (&receiver.kind, method.res, decl) {
+            let slot = *s as usize;
+            if let GlobalKind::Builtin(i) = self.ctx.globals[g as usize].kind {
+                let b = &BUILTINS[i as usize];
+                let simple = matches!(b.name, "push!" | "insert!" | "remove!" | "pop!" | "extend!" | "clear!" | "swap!" | "sort!" | "reverse!");
+                let collection = matches!(env.locals[slot], Value::List(_) | Value::Set(_) | Value::Map(_));
+                if let (BFn::Mut(fp), true, true, true) = (b.f, simple, collection, args.iter().all(|a| a.name.is_none())) {
+                    // (The commonest, on a set: without building an argument list.)
+                    if let ([arg], "insert!" | "remove!", Value::Set(_)) = (args, b.name, &env.locals[slot]) {
+                        let v = self.operand(&arg.value, env)?;
+                        let Value::Set(m) = &mut env.locals[slot] else { unreachable!() };
+                        let m = Rc::make_mut(m);
+                        let changed = if b.name == "insert!" { m.insert(v, Value::Unit).is_none() } else { m.remove(&v).is_some() };
+                        return Ok(Value::Bool(changed));
+                    }
+                    let mut vals = Vec::with_capacity(args.len());
+                    for a in args {
+                        vals.push(self.operand(&a.value, env)?);
+                    }
+                    self.check_builtin_arity(i, vals.len() + 1, span)?;
+                    let mut target = std::mem::take(&mut env.locals[slot]);
+                    let r = fp(self, &mut target, vals, span);
+                    env.locals[slot] = target;
+                    return r;
+                }
             }
         }
         let (mut pos, named) = self.eval_args(args, env, None)?;

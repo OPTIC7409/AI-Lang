@@ -284,7 +284,80 @@ impl RangeVal {
 
 /// Hashable wrapper used for map keys.
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct HKey(pub Value);
+
+impl HKey {
+    /// A value as a key, to look it up without copying it.
+    pub fn of(v: &Value) -> &HKey {
+        // SAFETY: `HKey` is a `repr(transparent)` wrapper around `Value`.
+        unsafe { &*(v as *const Value as *const HKey) }
+    }
+}
+
+/// A fast hasher for the keys of maps and sets (the FxHash of rustc, with a
+/// final mix): keys are not chosen by an attacker here, and the default
+/// SipHash made hashing a large part of every map operation.
+#[derive(Default, Clone, Copy)]
+pub struct FastHasher(u64);
+
+impl FastHasher {
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.0 = self.0.wrapping_add(w).wrapping_mul(0xf135_7aea_2e62_a9c5);
+    }
+}
+
+impl Hasher for FastHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().unwrap()));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut b = [0u8; 8];
+            b[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(b));
+        }
+        self.add(bytes.len() as u64);
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64)
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64)
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i)
+    }
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.add(i as u64)
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64)
+    }
+    /// With a final mix (fmix64 of MurmurHash3): the sums of hashes that
+    /// maps and records use for order-free hashing must not cancel out, as
+    /// they would for a hash nearly linear in its input.
+    #[inline]
+    fn finish(&self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+        x ^ (x >> 33)
+    }
+}
+
+pub type FastState = std::hash::BuildHasherDefault<FastHasher>;
 
 impl PartialEq for HKey {
     fn eq(&self, other: &Self) -> bool {
@@ -323,8 +396,20 @@ pub fn cmp_int_float(x: i64, y: f64) -> Option<Ordering> {
 impl Eq for HKey {}
 
 impl Hash for HKey {
+    #[inline]
     fn hash<H: Hasher>(&self, h: &mut H) {
-        hash_value(&self.0, h)
+        // (The commonest keys directly, as `hash_inner` hashes them.)
+        match &self.0 {
+            Value::Int(i) => {
+                2u8.hash(h);
+                i.hash(h)
+            }
+            Value::Str(s) => {
+                4u8.hash(h);
+                s.hash(h)
+            }
+            v => hash_value(v, h),
+        }
     }
 }
 
@@ -359,7 +444,7 @@ fn hash_child<H: Hasher>(x: &Value, h: &mut H, memo: &mut HashMemo) {
             v.hash(h);
             return;
         }
-        let mut sub = std::collections::hash_map::DefaultHasher::new();
+        let mut sub = FastHasher::default();
         hash_inner(x, &mut sub, memo);
         let v = sub.finish();
         if shared {
@@ -375,7 +460,7 @@ fn hash_child<H: Hasher>(x: &Value, h: &mut H, memo: &mut HashMemo) {
 fn unordered<'a, H: Hasher>(pairs: impl Iterator<Item = [&'a Value; 2]>, h: &mut H, memo: &mut HashMemo) {
     let mut sum = 0u64;
     for [a, b] in pairs {
-        let mut sub = std::collections::hash_map::DefaultHasher::new();
+        let mut sub = FastHasher::default();
         hash_child(a, &mut sub, memo);
         hash_child(b, &mut sub, memo);
         sum = sum.wrapping_add(sub.finish());
@@ -434,7 +519,7 @@ fn hash_inner<H: Hasher>(v: &Value, h: &mut H, memo: &mut HashMemo) {
             r.values.len().hash(h);
             let mut sum = 0u64;
             for (n, x) in r.names.iter().zip(r.values.iter()) {
-                let mut sub = std::collections::hash_map::DefaultHasher::new();
+                let mut sub = FastHasher::default();
                 n.hash(&mut sub);
                 hash_child(x, &mut sub, memo);
                 sum = sum.wrapping_add(sub.finish());
@@ -474,7 +559,7 @@ pub struct MapVal {
     slots: Vec<Option<(Value, Value)>>,
     /// The number of entries (slots that are not holes).
     live: usize,
-    index: HashMap<HKey, usize>,
+    index: HashMap<HKey, usize, FastState>,
     /// Memo of the last type annotation the map was checked against (see `List`).
     checked: Cell<u64>,
 }
@@ -485,7 +570,7 @@ impl MapVal {
     }
 
     pub fn with_capacity(n: usize) -> MapVal {
-        MapVal { slots: Vec::with_capacity(n), live: 0, index: HashMap::with_capacity(n), checked: Cell::new(0) }
+        MapVal { slots: Vec::with_capacity(n), live: 0, index: HashMap::with_capacity_and_hasher(n, FastState::default()), checked: Cell::new(0) }
     }
 
     pub fn len(&self) -> usize {
@@ -510,7 +595,7 @@ impl MapVal {
     }
 
     pub fn get(&self, k: &Value) -> Option<&Value> {
-        self.index.get(&HKey(k.clone())).and_then(|&i| self.slots[i].as_ref()).map(|(_, v)| v)
+        self.index.get(HKey::of(k)).and_then(|&i| self.slots[i].as_ref()).map(|(_, v)| v)
     }
 
     pub fn checked(&self) -> u64 {
@@ -523,22 +608,23 @@ impl MapVal {
 
     pub fn get_mut(&mut self, k: &Value) -> Option<&mut Value> {
         self.checked.set(0);
-        match self.index.get(&HKey(k.clone())) {
+        match self.index.get(HKey::of(k)) {
             Some(&i) => self.slots[i].as_mut().map(|(_, v)| v),
             None => None,
         }
     }
 
     pub fn contains(&self, k: &Value) -> bool {
-        self.index.contains_key(&HKey(k.clone()))
+        self.index.contains_key(HKey::of(k))
     }
 
     pub fn insert(&mut self, k: Value, v: Value) -> Option<Value> {
         self.checked.set(0);
-        match self.index.get(&HKey(k.clone())) {
-            Some(&i) => self.slots[i].as_mut().map(|(_, old)| std::mem::replace(old, v)),
-            None => {
-                self.index.insert(HKey(k.clone()), self.slots.len());
+        // (One hash: the entry is found or made in one step.)
+        match self.index.entry(HKey(k.clone())) {
+            std::collections::hash_map::Entry::Occupied(e) => self.slots[*e.get()].as_mut().map(|(_, old)| std::mem::replace(old, v)),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(self.slots.len());
                 self.slots.push(Some((k, v)));
                 self.live += 1;
                 None
@@ -548,7 +634,7 @@ impl MapVal {
 
     pub fn remove(&mut self, k: &Value) -> Option<Value> {
         self.checked.set(0);
-        let i = self.index.remove(&HKey(k.clone()))?;
+        let i = self.index.remove(HKey::of(k))?;
         let (_, v) = self.slots[i].take()?;
         self.live -= 1;
         // (Trailing holes go at once; the others when there are many.)
@@ -566,7 +652,7 @@ impl MapVal {
         self.slots.retain(Option::is_some);
         for (i, slot) in self.slots.iter().enumerate() {
             if let Some((k, _)) = slot {
-                if let Some(at) = self.index.get_mut(&HKey(k.clone())) {
+                if let Some(at) = self.index.get_mut(HKey::of(k)) {
                     *at = i;
                 }
             }
