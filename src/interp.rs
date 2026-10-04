@@ -699,8 +699,17 @@ impl Interp {
     }
 
     fn assign(&mut self, target: &Expr, op: Option<BinOp>, value: &Expr, decl: Option<&Ty>, env: &mut Env) -> R<()> {
-        let rhs = self.eval(value, env)?;
+        let rhs = self.operand(value, env)?;
         let span = target.span;
+        // `i += 1` on a local Int.
+        if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), Some(op), None | Some(Ty::Int)) = (&target.kind, op, decl) {
+            if let (Value::Int(x), Value::Int(y)) = (&env.locals[*s as usize], &rhs) {
+                if let Some(v @ Value::Int(_)) = int_binop(op, *x, *y) {
+                    env.locals[*s as usize] = v;
+                    return Ok(());
+                }
+            }
+        }
         // Fast paths for plain variables without a declared type.
         if let (ExprKind::Var(v), None) = (&target.kind, decl) {
             match v.res {
@@ -1237,6 +1246,18 @@ impl Interp {
                 self.get_field(&v, name, *name_span)
             }
             ExprKind::Index { target, index } => {
+                // `xs[i]` on a local list: no copy of the list's handle. (Only
+                // for an index that cannot change the list while it is computed.)
+                if let (ExprKind::Var(Var { res: VarRes::Local(s), .. }), true) = (&target.kind, simple_index(index)) {
+                    let i = self.operand(index, env)?;
+                    if let (Value::List(xs), Value::Int(i)) = (&env.locals[*s as usize], &i) {
+                        if let Some(j) = norm_index(*i, xs.len()) {
+                            return Ok(xs[j].clone());
+                        }
+                    }
+                    let v = env.locals[*s as usize].clone();
+                    return self.index_value(v, i, e.span);
+                }
                 let v = self.eval(target, env)?;
                 let mut i = self.eval(index, env)?;
                 // `xs[a..=-1]`: an inclusive end counted from the back runs
@@ -3186,6 +3207,18 @@ impl Interp {
             Value::Bool(b) => Ok(b),
             other => Err(self.err(span, "E0209", format!("{} must return a Bool, but it returned {}", what, describe(&other)))),
         }
+    }
+}
+
+/// An index expression made only of locals, Int literals and arithmetic.
+fn simple_index(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Var(Var { res: VarRes::Local(_), .. }) | ExprKind::Int(_) => true,
+        ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloorDiv | BinOp::Mod, lhs, rhs } => {
+            simple_index(lhs) && simple_index(rhs)
+        }
+        ExprKind::Unary { expr, .. } => simple_index(expr),
+        _ => false,
     }
 }
 

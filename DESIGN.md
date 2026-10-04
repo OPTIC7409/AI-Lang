@@ -382,6 +382,25 @@ The implementation is a single dependency-free Rust crate:
 - a property-testing engine (generation from types, shrinking) shared by
   `property` blocks and `cogito verify`.
 
+Speed was not a goal, but it should not get in the way. On three small
+programs, compared with CPython 3.11 on the same machine (best of three
+runs):
+
+| Program | Cogito | CPython |
+|---|---|---|
+| `fib(30)`, recursive | 0.26 s | 0.11 s |
+| sieve of Eratosthenes to 2,000,000 | 0.50 s | 0.22 s |
+| sum of multiples of 3 below 3,000,000 | 0.17 s | 0.17 s |
+
+Cogito does more work per operation than Python: every Int operation
+checks for overflow, annotations are checked on every call and return, and
+`verify` and `test` count steps against a budget. The interpreter keeps the
+common cases cheap: plain calls bind arguments straight into the new frame,
+Int arithmetic and comparisons skip the general operator code, and a local
+list is indexed without copying its handle. Each of these was checked by
+running about 1,300 programs on the old and new interpreter and comparing
+their output.
+
 ## How it was tested: dogfooding by AI agents
 
 The language was tested in three ways:
